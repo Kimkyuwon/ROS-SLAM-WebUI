@@ -804,6 +804,8 @@ class PC2WebSocketServer:
         self._plot_clients: dict = {}
         # topic_name → rclpy Subscription
         self._plot_subs: dict = {}
+        # ── 전체 연결 클라이언트 (broadcast용) ─────────────────────────────────
+        self._all_clients: set = set()
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -841,6 +843,9 @@ class PC2WebSocketServer:
         """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot 명령 수신."""
         my_pc2_topics: set  = set()   # PointCloud2 binary 구독
         my_plot_topics: set = set()   # 범용 plot JSON 구독
+        # 전체 클라이언트 집합에 등록 (broadcast용)
+        with self._lock:
+            self._all_clients.add(websocket)
         try:
             async for raw in websocket:
                 try:
@@ -875,6 +880,8 @@ class PC2WebSocketServer:
         except Exception:
             pass
         finally:
+            with self._lock:
+                self._all_clients.discard(websocket)
             for t in list(my_pc2_topics):
                 self._remove_client(t, websocket)
             for t in list(my_plot_topics):
@@ -979,6 +986,27 @@ class PC2WebSocketServer:
                 await ws.send(data)
             except Exception:
                 pass
+
+    async def _broadcast_json_all_async(self, data: dict):
+        """연결된 모든 클라이언트에 JSON 메시지를 전송한다 (asyncio coroutine)."""
+        with self._lock:
+            clients = list(self._all_clients)
+        payload = json.dumps(data)
+        for ws in clients:
+            try:
+                await ws.send(payload)
+            except Exception:
+                pass
+
+    def broadcast_json_all(self, data: dict):
+        """연결된 모든 WebSocket 클라이언트에 JSON 메시지를 broadcast한다.
+
+        스레드 안전: asyncio 이벤트 루프에 코루틴을 스케줄링하여 전송.
+        """
+        if self._loop is None or not self._all_clients:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast_json_all_async(data), self._loop)
 
     # ── 범용 토픽 Plot 구독 (throttle 없이 원래 주기) ─────────────────────────
 
@@ -1305,14 +1333,22 @@ class WebGUINode(Node):
 
         # File Player ROS2 Publishers/Subscribers — lazy initialized on load_player_data()
         # (not created at startup to avoid polluting the topic list before file player is used)
+        # ConPR 전용 publishers
         self.pose_pub = None
         self.imu_pub = None
-        self.clock_pub = None
-        self.livox_pub = None
         self.cam_pub = None
         self.cam_info_pub = None
+        self.livox_pub = None
+        # 공통 (ConPR + KITTI 모두 사용)
+        self.clock_pub = None
         self.start_sub = None
         self.stop_sub = None
+        # KITTI 전용 publishers
+        self.kitti_velo_pub = None
+        self.kitti_cam_pub = None
+        # 초기화 플래그 (각 데이터셋 전용 publishers 이중 생성 방지)
+        self._conpr_pubs_initialized = False
+        self._kitti_pubs_initialized = False
 
         # CV Bridge for image conversion
         self.cv_bridge = CvBridge()
@@ -1333,6 +1369,7 @@ class WebGUINode(Node):
         self.playback_thread = None
         self.playback_active = False
         self.player_seek_requested = False  # seek 후 worker 인덱스 재설정 신호
+        self.player_seek_to_stamp  = 0      # seek 목표 타임스탬프 (HTTP 스레드→worker 전달용)
 
         # Timer for playback (matching C++ implementation)
         self.create_timer(0.0001, self.timer_callback)  # 100us = 0.0001s
@@ -1347,6 +1384,17 @@ class WebGUINode(Node):
         # rosbridge를 우회해 PointCloud2를 Python에서 직접 처리 후 binary 전송
         self.pc2_ws_server = PC2WebSocketServer(self, port=8081)
         self.pc2_ws_server.start()
+
+        # ── KITTI 변환기 상태 ──────────────────────────────────────────────────
+        self.kitti_converter_running = False   # 변환 진행 중 여부
+        self.kitti_convert_thread = None       # 변환 백그라운드 스레드
+
+        # ── ROS2 bag 모드 플래그 (player_play_toggle → bag_play_toggle 위임) ─
+        self.player_is_ros2_bag = False        # True 이면 File Player가 bag 모드
+
+        # ── KITTI direct play 모드 ──────────────────────────────────────────
+        self.player_is_kitti = False           # True 이면 KITTI 파일 직접 재생
+        self.kitti_drive_path = None           # 로드된 KITTI drive 디렉토리 경로
 
         self.get_logger().info('Web GUI Node initialized with full ROS2 integration')
 
@@ -1441,31 +1489,57 @@ class WebGUINode(Node):
                     self._ros_env['XAUTHORITY'] = os.path.expanduser('~/.Xauthority')
                     self.get_logger().warn('XAUTHORITY not found, using ~/.Xauthority (may not exist)')
 
-    def _init_file_player_ros_interfaces(self):
-        """Lazy initialization of File Player ROS2 publishers and subscribers.
-
-        Called once when file player data is first loaded via load_player_data().
-        This prevents File Player topics from appearing in the topic list at startup.
+    def _init_common_ros_interfaces(self):
+        """공통 인터페이스 초기화: /clock publisher + file_player 구독.
+        ConPR/KITTI 어느 쪽이든 처음 로드 시 한 번만 호출.
         """
-        if self.imu_pub is not None:
-            return  # Already initialized
+        if self.clock_pub is None:
+            self.clock_pub = self.create_publisher(Clock, '/clock', 1)
+        if self.start_sub is None:
+            self.start_sub = self.create_subscription(
+                Bool, '/file_player_start', self.file_player_start_callback, 1)
+        if self.stop_sub is None:
+            self.stop_sub = self.create_subscription(
+                Bool, '/file_player_stop', self.file_player_stop_callback, 1)
 
-        self.pose_pub = self.create_publisher(PointStamped, '/pose/position', 1000)
-        self.imu_pub = self.create_publisher(Imu, '/imu', 1000)
-        self.clock_pub = self.create_publisher(Clock, '/clock', 1)
+    def _init_file_player_ros_interfaces(self):
+        """ConPR 전용 publisher 초기화 (lazy).
+
+        ConPR 데이터를 처음 로드할 때만 호출.
+        KITTI 데이터를 로드해도 ConPR 토픽은 생성되지 않는다.
+        """
+        self._init_common_ros_interfaces()
+        if self._conpr_pubs_initialized:
+            return
+
+        self.pose_pub     = self.create_publisher(PointStamped, '/pose/position', 1000)
+        self.imu_pub      = self.create_publisher(Imu, '/imu', 1000)
+        self.cam_pub      = self.create_publisher(Image, '/camera/color/image', 1000)
+        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 1000)
 
         if LIVOX_AVAILABLE:
             self.livox_pub = self.create_publisher(CustomMsg, '/livox/lidar', 1000)
 
-        self.cam_pub = self.create_publisher(Image, '/camera/color/image', 1000)
-        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 1000)
+        self._conpr_pubs_initialized = True
+        self.get_logger().info('ConPR File Player publishers initialized')
 
-        self.start_sub = self.create_subscription(
-            Bool, '/file_player_start', self.file_player_start_callback, 1)
-        self.stop_sub = self.create_subscription(
-            Bool, '/file_player_stop', self.file_player_stop_callback, 1)
+    def _init_kitti_ros_interfaces(self):
+        """KITTI 전용 publisher 초기화 (lazy).
 
-        self.get_logger().info('File Player ROS2 publishers/subscribers initialized')
+        KITTI 데이터를 처음 로드할 때만 호출.
+        ConPR 토픽(/pose, /imu 등)은 생성하지 않는다.
+        """
+        self._init_common_ros_interfaces()
+        if self._kitti_pubs_initialized:
+            return
+
+        self.kitti_velo_pub = self.create_publisher(
+            PointCloud2, '/kitti/velo/pointcloud', 1000)
+        self.kitti_cam_pub  = self.create_publisher(
+            Image, '/kitti/camera_color_left/image_raw', 1000)
+
+        self._kitti_pubs_initialized = True
+        self.get_logger().info('KITTI File Player publishers initialized')
 
     def _init_slam_subscriber(self):
         """Lazy initialization of SLAM-related subscribers.
@@ -2068,8 +2142,204 @@ class WebGUINode(Node):
         }
 
     # File Player Functions
+
+    def _is_kitti_drive_path(self, path: str) -> bool:
+        """경로가 KITTI drive 디렉토리인지 확인한다.
+        velodyne_points/timestamps.txt 파일 존재 여부로 판별한다.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
+        return os.path.isfile(ts_file)
+
+    def _load_kitti_direct(self, path: str) -> bool:
+        """KITTI drive 디렉토리를 직접 File Player로 로드한다.
+
+        velodyne_points/timestamps.txt 에서 타임스탬프를 읽어
+        기존 data_stamp 구조(timestamp_ns → frame_idx_str)를 구축한다.
+        playback_worker 에서 player_is_kitti 플래그를 보고 KITTI 파일을 직접 읽어 publish.
+        """
+        from ros2_autonav_webui.kitti_converter import KittiConverter
+
+        # 기존 재생 정지
+        self.player_playing = False
+        self.player_paused  = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
+        try:
+            conv = KittiConverter()
+            timestamps_ns = conv._load_timestamps(ts_file)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read KITTI timestamps: {e}')
+            return False
+
+        if not timestamps_ns:
+            self.get_logger().error(f'No valid timestamps in {ts_file}')
+            return False
+
+        # data_stamp: {timestamp_ns: frame_index_str}
+        self.data_stamp = {}
+        for idx, ts_ns in enumerate(timestamps_ns):
+            if ts_ns > 0:
+                self.data_stamp[ts_ns] = f'{idx:010d}'
+
+        if not self.data_stamp:
+            self.get_logger().error('data_stamp is empty after parsing KITTI timestamps')
+            return False
+
+        sorted_stamps = sorted(self.data_stamp.keys())
+        self.player_initial_stamp   = sorted_stamps[0]
+        self.player_last_stamp      = sorted_stamps[-1]
+        self.player_timestamp       = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos      = 0
+        self.player_seek_requested  = False
+        self.player_seek_to_stamp   = self.player_initial_stamp
+
+        self.player_path        = path
+        self.player_is_kitti    = True
+        self.player_is_ros2_bag = False
+        self.kitti_drive_path   = path
+
+        self.livox_cache = {}
+        self.cam_cache   = {}
+
+        # KITTI 전용 publisher만 초기화 (ConPR 토픽 오염 방지)
+        self._init_kitti_ros_interfaces()
+        self.player_data_loaded = True
+
+        self.get_logger().info(
+            f'KITTI drive loaded: {path} '
+            f'({len(self.data_stamp)} frames, '
+            f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
+        )
+        return True
+
+    def _publish_kitti_frame(self, frame_idx: int, stamp_ns: int):
+        """KITTI 프레임(velodyne + camera)을 ROS2 토픽으로 publish한다."""
+        from ros2_autonav_webui.kitti_converter import KittiConverter
+        from rclpy.time import Time as RclpyTime
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        drive_path = self.kitti_drive_path
+        if not drive_path:
+            return
+
+        stamp_msg = TimeMsg()
+        stamp_msg.sec      = int(stamp_ns // 1_000_000_000)
+        stamp_msg.nanosec  = int(stamp_ns %  1_000_000_000)
+
+        # ── Velodyne PointCloud2 ─────────────────────────────────────
+        bin_path = os.path.join(
+            drive_path, 'velodyne_points', 'data', f'{frame_idx:010d}.bin')
+        if os.path.isfile(bin_path):
+            try:
+                conv = KittiConverter()
+                pc2_msg = conv._make_pointcloud2_msg(bin_path, stamp_msg)
+                if pc2_msg and self.kitti_velo_pub:
+                    self.kitti_velo_pub.publish(pc2_msg)
+            except Exception as e:
+                self.get_logger().warn(f'KITTI velodyne publish failed (frame {frame_idx}): {e}')
+
+        # ── Camera image (image_02 우선, 없으면 image_00) ─────────────
+        for cam_dir, encoding in [('image_02', 'bgr8'), ('image_00', 'mono8')]:
+            img_path = os.path.join(
+                drive_path, cam_dir, 'data', f'{frame_idx:010d}.png')
+            if os.path.isfile(img_path):
+                try:
+                    conv = KittiConverter()
+                    img_msg = conv._make_image_msg(img_path, encoding, stamp_msg)
+                    if img_msg and self.kitti_cam_pub:
+                        self.kitti_cam_pub.publish(img_msg)
+                except Exception as e:
+                    self.get_logger().warn(f'KITTI image publish failed (frame {frame_idx}): {e}')
+                break
+
+    def _is_ros2_bag_path(self, path: str) -> bool:
+        """경로가 ROS2 bag (.db3 파일 또는 bag 디렉토리)인지 확인한다."""
+        if not path:
+            return False
+        # .db3 파일 직접 지정
+        if path.endswith('.db3') and os.path.exists(path):
+            return True
+        # 디렉토리인 경우: metadata.yaml 또는 .db3 파일 포함 여부 확인
+        if os.path.isdir(path):
+            if os.path.exists(os.path.join(path, 'metadata.yaml')):
+                return True
+            db3_files = glob.glob(os.path.join(path, '*.db3'))
+            if db3_files:
+                return True
+        return False
+
+    def _load_ros2_bag_player(self, path: str) -> bool:
+        """ROS2 bag 경로를 기존 bag_play_toggle 인프라로 로드한다.
+
+        .db3 파일이 지정된 경우 부모 디렉토리를 bag_path로 사용한다.
+
+        player_play_toggle()에서 bag_play_toggle()로 위임되도록
+        player_path / player_data_loaded / player_is_ros2_bag 도 함께 설정한다.
+        """
+        # 기존 ConPR playback 스레드 정지
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        # 기존 bag 재생 중이면 중지
+        if self.bag_playing:
+            if self.bag_process:
+                self.bag_process.terminate()
+                try:
+                    self.bag_process.wait(timeout=5)
+                except Exception:
+                    self.bag_process.kill()
+                self.bag_process = None
+            self.bag_playing = False
+            self.bag_paused = False
+
+        # .db3 파일인 경우 부모 디렉토리를 bag 경로로 사용
+        if path.endswith('.db3'):
+            bag_dir = os.path.dirname(path)
+        else:
+            bag_dir = path
+
+        self.bag_path = bag_dir
+
+        # ── File Player UI 상태 동기화 ─────────────────────────────────────
+        # UI가 player_path / player_data_loaded 를 읽으므로 올바른 값으로 갱신
+        self.player_path = bag_dir
+        self.player_data_loaded = True   # play 버튼 활성화
+        self.player_is_ros2_bag = True   # player_play_toggle 에서 분기 용도
+        self.player_slider_pos = 0
+        self.player_timestamp = 0
+        self.livox_cache = {}
+        self.cam_cache = {}
+
+        self.get_logger().info(f'Loaded ROS2 bag for player: {bag_dir}')
+        return True
+
     def load_player_data(self, path):
         """Load file player data from the specified path"""
+        # KITTI drive 디렉토리인 경우 직접 플레이어로 로드
+        if self._is_kitti_drive_path(path):
+            self.get_logger().info(f'Detected KITTI drive path: {path}')
+            return self._load_kitti_direct(path)
+
+        # ROS2 bag 경로인 경우 기존 bag playback 인프라로 위임
+        if self._is_ros2_bag_path(path):
+            self.get_logger().info(f'Detected ROS2 bag path: {path}')
+            return self._load_ros2_bag_player(path)
+
         # 기존 재생 스레드를 완전히 정지시킨 후 새 데이터 로드
         # (두 번째 디렉토리 로드 후 재생 안 되는 버그 수정)
         self.player_playing = False
@@ -2079,6 +2349,9 @@ class WebGUINode(Node):
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.player_seek_requested = False
+        self.player_seek_to_stamp  = 0
+        self.player_is_ros2_bag = False   # ConPR 모드로 복귀
+        self.player_is_kitti = False      # KITTI 모드 해제
 
         if self.playback_active:
             self.playback_active = False
@@ -2195,6 +2468,92 @@ class WebGUINode(Node):
             traceback.print_exc()
             return False
 
+    # ── KITTI 변환 함수 ────────────────────────────────────────────────────────
+
+    def scan_kitti_directory(self, path: str) -> dict:
+        """KITTI 데이터셋 디렉토리를 탐색하여 calib/drive 정보를 반환한다.
+
+        Args:
+            path: 사용자가 선택한 날짜 디렉토리 (예: /path/to/2011_09_30)
+
+        Returns:
+            {'success': True, 'scan_result': {...}} or {'success': False, 'error': '...'}
+        """
+        try:
+            from ros2_autonav_webui.kitti_converter import KittiConverter
+            converter = KittiConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'KITTI scan complete: date={result["date"]}, '
+                f'{len(result["drive_dirs"])} drive(s) found')
+            return {'success': True, 'scan_result': result}
+        except Exception as e:
+            self.get_logger().error(f'KITTI scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_kitti_conversion(
+        self,
+        base_dir: str,
+        calib_dir: str,
+        data_path: str,
+        drive_name: str,
+    ) -> dict:
+        """KITTI 데이터를 ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
+
+        변환 진행률은 WebSocket(포트 8081)을 통해 전체 클라이언트에 push된다.
+
+        Returns:
+            {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
+        """
+        if self.kitti_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        output_bag_path = os.path.join(base_dir, 'converted', drive_name)
+
+        def _run():
+            self.kitti_converter_running = True
+            try:
+                from ros2_autonav_webui.kitti_converter import KittiConverter
+                converter = KittiConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'kitti_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'KITTI conversion started: {data_path} → {output_bag_path}')
+                converter.convert_to_ros2bag(
+                    calib_dir=calib_dir,
+                    data_path=data_path,
+                    output_bag_path=output_bag_path,
+                    progress_cb=_progress_cb,
+                )
+                self.get_logger().info(f'KITTI conversion complete: {output_bag_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kitti_convert_done',
+                    'bag_path': output_bag_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'KITTI conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kitti_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.kitti_converter_running = False
+
+        self.kitti_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='kitti-convert')
+        self.kitti_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
+
     def load_livox_data(self, stamp):
         """Load LiDAR data from .bin file for given timestamp"""
         if not LIVOX_AVAILABLE or not self.livox_pub:
@@ -2307,19 +2666,26 @@ class WebGUINode(Node):
             return None
 
     def timer_callback(self):
-        """Timer callback to update processed_stamp (1배속 고정)"""
-        current_time = time.time()
+        """Timer callback (100μs 주기).
 
-        if self.player_playing and not self.player_paused:
-            if self.player_prev_time > 0:
-                dt = current_time - self.player_prev_time
-                # 실제 경과 시간(ns) 만큼 processed_stamp 증가 (1배속)
-                self.player_processed_stamp += int(dt * 1e9)
-
-        self.player_prev_time = current_time
-
+        - 정지 상태: processed_stamp 를 0 으로 리셋
+        - KITTI 재생 중: 100μs 마다 /clock 을 publish 하여 시각화 끊김 최소화
+          (KITTI 데이터는 10Hz 이지만 clock 은 더 자주 갱신해야 RViz2 가 부드러움)
+        """
         if not self.player_playing:
             self.player_processed_stamp = 0
+            return
+
+        # KITTI 재생 중: 매 timer tick 마다 /clock 갱신 (100μs → 10000Hz)
+        # player_processed_stamp 는 playback_worker 가 관리하므로 읽기만 한다.
+        if getattr(self, 'player_is_kitti', False) and self.clock_pub:
+            try:
+                clock_ns = self.player_initial_stamp + self.player_processed_stamp
+                clock_msg = Clock()
+                clock_msg.clock = Time(nanoseconds=clock_ns).to_msg()
+                self.clock_pub.publish(clock_msg)
+            except Exception:
+                pass
 
     def bag_timer_callback(self):
         """Timer callback to update bag current time during playback"""
@@ -2339,6 +2705,11 @@ class WebGUINode(Node):
         if not self.player_data_loaded:
             self.get_logger().warn('No data loaded. Please load data first.')
             return False
+
+        # ── ROS2 bag 모드: bag_play_toggle()로 위임 ────────────────────────
+        if getattr(self, 'player_is_ros2_bag', False):
+            self.get_logger().info('ROS2 bag mode: delegating to bag_play_toggle()')
+            return self.bag_play_toggle()
 
         self.player_playing = not self.player_playing
         self.player_paused = False
@@ -3002,14 +3373,20 @@ class WebGUINode(Node):
         - timestamps 는 Play 시작 시 한 번 복사 → 새 디렉토리 로드 후 재생 시 갱신됨
         - 인덱스(current_idx) 추적으로 매 루프 O(n) 전체 순회를 O(k) 로 단축
           (k: 이번 루프에서 실제로 발행할 스탬프 수)
-        - 배속(player_speed)은 timer_callback 에서 processed_stamp 를 증가시키므로
-          worker 는 단순히 current_idx 를 앞으로 전진시키기만 하면 됨
+        - 배속(player_speed)은 worker 내부 wall-clock으로 직접 계산
+          (timer_callback 의존 제거 → KITTI/ConPR 모두 안정적 동작)
         """
         self.get_logger().info('Playback worker started')
 
         timestamps = []      # Play 시작 시 data_stamp 에서 복사
         current_idx = 0      # 다음 처리할 timestamps 인덱스
         was_playing = False  # 이전 루프의 재생 상태 (재시작 감지용)
+        was_paused = False   # pause 상태 추적 (resume 시 기준 시간 재조정)
+        _dbg_iter = 0        # 진단용 카운터
+
+        # wall-clock 기준 타이밍 (timer_callback 불필요)
+        _wall_start = 0.0    # play/resume 시점 wall time
+        _proc_start = 0      # play/resume 시점 player_processed_stamp
 
         while self.playback_active:
             time.sleep(0.001)  # 1ms sleep
@@ -3020,8 +3397,32 @@ class WebGUINode(Node):
                     current_idx = 0
                     timestamps = []
                 was_playing = False
+                was_paused = False
                 time.sleep(0.01)
                 continue
+
+            # ── wall-clock 기반 player_processed_stamp 갱신 ──────────────
+            now = time.time()
+            if self.player_seek_requested:
+                # seek 발생 → 일반 wall-clock 갱신을 막아 player_processed_stamp
+                # 덮어쓰기 방지.  실제 seek 처리는 아래 elif 블록에서 수행.
+                # _proc_start 를 seek 목표로 미리 설정해 두면 혹시 elif 가 같은
+                # 이터레이션에서 실행되지 않더라도 다음 이터레이션 정상 진행 가능.
+                _wall_start = now
+                _proc_start = self.player_seek_to_stamp - self.player_initial_stamp
+            elif not self.player_paused:
+                if was_paused:
+                    # pause 에서 resume 됨 → 기준 시간 재설정 (멈춘 시간 제외)
+                    _wall_start = now
+                    _proc_start = self.player_processed_stamp
+                    was_paused = False
+                elif _wall_start > 0:
+                    elapsed_ns = int((now - _wall_start) * 1e9 * self.player_speed)
+                    self.player_processed_stamp = _proc_start + elapsed_ns
+            else:
+                if not was_paused:
+                    was_paused = True
+            # ─────────────────────────────────────────────────────────────
 
             # Play 시작 시(또는 재시작 시) timestamps 를 현재 data_stamp 로 갱신
             if not was_playing:
@@ -3031,21 +3432,54 @@ class WebGUINode(Node):
                 while current_idx < len(timestamps) and timestamps[current_idx] <= self.player_timestamp:
                     current_idx += 1
                 self.player_seek_requested = False
+                # wall-clock 기준 초기화
+                _wall_start = now
+                _proc_start = self.player_processed_stamp
+                was_paused = self.player_paused
                 self.get_logger().info(
-                    f'Playback started: {len(timestamps)} stamps, idx={current_idx}, '
-                    f'speed={self.player_speed}'
+                    f'[KITTI DBG] Playback started: {len(timestamps)} stamps, '
+                    f'idx={current_idx}, speed={self.player_speed}, '
+                    f'is_kitti={getattr(self, "player_is_kitti", False)}, '
+                    f'initial={self.player_initial_stamp}, last={self.player_last_stamp}, '
+                    f'player_ts={self.player_timestamp}, proc={self.player_processed_stamp}'
                 )
+                if len(timestamps) > 1:
+                    self.get_logger().info(
+                        f'[KITTI DBG] ts[0]={timestamps[0]}, ts[1]={timestamps[1]}, '
+                        f'gap={timestamps[1]-timestamps[0]}ns'
+                    )
             elif self.player_seek_requested:
-                # 재생 중 seek → 인덱스를 새 위치로 재설정
+                # 재생 중 seek ─────────────────────────────────────────────
+                # player_seek_to_stamp 에서 목표 위치를 읽는다.
+                # (HTTP 스레드가 player_processed_stamp 를 직접 쓰지 않으므로
+                #  여기서 처음이자 유일하게 worker 가 값을 확정한다.)
+                seek_stamp = self.player_seek_to_stamp
+                self.player_processed_stamp = seek_stamp - self.player_initial_stamp
+                self.player_timestamp = seek_stamp
                 self.player_seek_requested = False
                 current_idx = 0
-                while current_idx < len(timestamps) and timestamps[current_idx] <= self.player_timestamp:
+                while current_idx < len(timestamps) and timestamps[current_idx] <= seek_stamp:
                     current_idx += 1
-                self.get_logger().info(f'Seek: idx reset to {current_idx}')
+                _wall_start = now
+                _proc_start = self.player_processed_stamp
+                self.get_logger().info(
+                    f'Seek done: stamp={seek_stamp}, idx={current_idx}'
+                )
             was_playing = True
+            _dbg_iter += 1
 
             # 현재 목표 스탬프 계산
             target_stamp = self.player_initial_stamp + self.player_processed_stamp
+
+            # 진단 로그 (100ms마다 한 번)
+            if _dbg_iter % 100 == 1:
+                next_ts = timestamps[current_idx] if current_idx < len(timestamps) else -1
+                self.get_logger().info(
+                    f'[KITTI DBG] iter={_dbg_iter} proc={self.player_processed_stamp} '
+                    f'target={target_stamp} next_ts={next_ts} '
+                    f'diff={next_ts - target_stamp if next_ts > 0 else "N/A"} '
+                    f'n_ts={len(timestamps)} idx={current_idx}'
+                )
 
             # 인덱스를 앞으로 전진하면서 target_stamp 이하의 스탬프만 발행 (O(k))
             while current_idx < len(timestamps):
@@ -3059,6 +3493,22 @@ class WebGUINode(Node):
                     continue
 
                 data_type = self.data_stamp.get(stamp, "")
+
+                # ── KITTI direct play ──────────────────────────────────────
+                if getattr(self, 'player_is_kitti', False):
+                    try:
+                        frame_idx = int(data_type)
+                        self._publish_kitti_frame(frame_idx, stamp)
+                        # 클락 메시지 발행
+                        if self.clock_pub:
+                            clock_msg = Clock()
+                            clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                            self.clock_pub.publish(clock_msg)
+                    except Exception as e:
+                        self.get_logger().warn(f'KITTI frame publish error: {e}')
+                    # player_timestamp는 예외 여부와 무관하게 항상 갱신
+                    self.player_timestamp = stamp
+                    continue  # ConPR 분기 스킵
 
                 if data_type == "pose" and stamp in self.pose_data:
                     x, y, z = self.pose_data[stamp]
@@ -3111,9 +3561,13 @@ class WebGUINode(Node):
                         )
 
                 # 클락 메시지 발행
-                clock_msg = Clock()
-                clock_msg.clock = Time(nanoseconds=stamp).to_msg()
-                self.clock_pub.publish(clock_msg)
+                if self.clock_pub:
+                    try:
+                        clock_msg = Clock()
+                        clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                        self.clock_pub.publish(clock_msg)
+                    except Exception as e:
+                        self.get_logger().warn(f'Clock publish error: {e}')
 
                 self.player_timestamp = stamp
 
@@ -3130,6 +3584,9 @@ class WebGUINode(Node):
                     self.player_processed_stamp = 0
                     self.player_timestamp = self.player_initial_stamp
                     current_idx = 0
+                    # wall-clock 기준도 리셋 (리셋 없으면 elapsed_ns 폭주)
+                    _wall_start = now
+                    _proc_start = 0
                 else:
                     self.get_logger().info('Playback finished')
                     self.player_playing = False
@@ -3139,28 +3596,26 @@ class WebGUINode(Node):
         self.get_logger().info('Playback worker stopped')
 
     def reset_player_position(self, position):
-        """Reset playback position (0-10000)"""
+        """Reset playback position (0-10000)
+
+        player_processed_stamp / player_timestamp 는 playback_worker 에서만 쓰도록
+        race-condition 을 방지한다.  HTTP 핸들러 스레드는 player_seek_to_stamp 와
+        player_seek_requested 만 설정하고 나머지는 worker 에 위임한다.
+        """
         if not self.player_data_loaded:
             return
 
         ratio = position / 10000.0
         total_duration = self.player_last_stamp - self.player_initial_stamp
+        target_stamp = int(self.player_initial_stamp + int(ratio * total_duration))
 
-        # Update processed_stamp to match the slider position
-        self.player_processed_stamp = int(ratio * total_duration)
-
-        # Update timestamp to the target position
-        target_stamp = int(self.player_initial_stamp + self.player_processed_stamp)
-        self.player_timestamp = target_stamp
+        # 슬라이더 위치는 즉시 반영 (시각적 피드백)
         self.player_slider_pos = position
+        # seek 목표를 worker 에 전달 — player_processed_stamp 직접 쓰기 ×
+        self.player_seek_to_stamp = target_stamp
+        self.player_seek_requested = True  # 마지막에 설정 (원자성 보장)
 
-        # Reset timer for smooth playback after seeking
-        self.player_prev_time = time.time()
-
-        # worker 에게 인덱스를 재설정하도록 신호
-        self.player_seek_requested = True
-
-        self.get_logger().info(f'Reset position to {position} (stamp: {target_stamp}, processed: {self.player_processed_stamp}ns)')
+        self.get_logger().info(f'Seek requested: pos={position} → stamp={target_stamp}')
 
     def save_rosbag(self):
         """Save loaded data to rosbag2 format"""
@@ -3863,6 +4318,29 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 response = {'success': False, 'message': str(e)}
 
         # File Player API endpoints
+        elif parsed_path.path == '/api/player/scan_kitti':
+            # KITTI 디렉토리 탐색
+            # body: { "path": "/path/to/2011_09_30" }
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_kitti_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_kitti':
+            # KITTI → ROS2 bag 변환
+            # body: { "base_dir": "...", "calib_dir": "...", "data_path": "...", "drive_name": "..." }
+            base_dir   = data.get('base_dir', '')
+            calib_dir  = data.get('calib_dir', '')
+            data_path  = data.get('data_path', '')
+            drive_name = data.get('drive_name', '')
+            if not all([base_dir, calib_dir, data_path, drive_name]):
+                response = {'success': False, 'error': 'Missing required fields: base_dir, calib_dir, data_path, drive_name'}
+            else:
+                response = self.node.start_kitti_conversion(base_dir, calib_dir, data_path, drive_name)
+
         elif parsed_path.path == '/api/player/load_data':
             path = data.get('path', '')
             success = self.node.load_player_data(path)

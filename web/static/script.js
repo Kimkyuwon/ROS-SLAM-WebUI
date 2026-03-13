@@ -17,6 +17,14 @@ const bagRecorderState = {
     selectedTopics: []
 };
 
+const kittiState = {
+    baseDir: null,   // 사용자가 선택한 KITTI 최상위 디렉토리
+    calibDir: null,  // calib 파일이 있는 실제 경로
+    drives: [],      // drive 목록 [{name, drive_type, drive_id, data_path}]
+    converting: false, // 변환 중 여부
+    // 진행률/완료/오류는 8081 WebSocket kitti_convert_* 메시지로 수신
+};
+
 // Cached DOM elements
 const domCache = {
     elements: {},
@@ -848,7 +856,280 @@ async function convertToRos1() {
 }
 
 // File Player Functions
+
+/**
+ * 데이터셋 형식 변경 핸들러 (ConPR / KITTI Raw)
+ * @param {string} format - 선택된 형식 ('conpr' or 'kitti')
+ */
+function onDatasetFormatChange(format) {
+    const kittiUi = domCache.get('kitti-ui');
+    const saveBagBtn = domCache.get('save-bag-btn');
+
+    if (format === 'kitti') {
+        kittiUi.style.display = 'block';
+        // KITTI 모드에서는 Save bag 버튼 숨김 (변환 후 별도 처리)
+        if (saveBagBtn) { saveBagBtn.style.display = 'none'; }
+        // 이전 KITTI 상태 초기화
+        kittiState.baseDir = null;
+        kittiState.calibDir = null;
+        kittiState.drives = [];
+        domCache.get('player-path-label').textContent = '—';
+        _resetKittiDriveSelect();
+        _resetKittiProgressBar();
+    } else {
+        kittiUi.style.display = 'none';
+        if (saveBagBtn) { saveBagBtn.style.display = ''; }
+    }
+}
+
+/**
+ * KITTI 드라이브 선택 셀렉트를 초기 상태로 리셋
+ */
+function _resetKittiDriveSelect() {
+    const sel = domCache.get('kitti-drive-select');
+    sel.innerHTML = '<option value="">— Select a drive —</option>';
+}
+
+/**
+ * KITTI 변환 진행바 리셋
+ */
+function _resetKittiProgressBar() {
+    const bar = domCache.get('kitti-progress-bar');
+    const fill = domCache.get('kitti-progress-fill');
+    const text = domCache.get('kitti-progress-text');
+    const msg = domCache.get('kitti-progress-msg');
+    if (bar) { bar.style.display = 'none'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msg) { msg.textContent = ''; }
+}
+
+/**
+ * KITTI 디렉토리 탐색: scan_kitti API 호출 후 drive 목록 업데이트
+ * 파일 브라우저에서 KITTI date 디렉토리 선택 후 호출됨
+ */
+async function loadKittiDirectory() {
+    openFileBrowser(async (path) => {
+        domCache.get('player-path-label').textContent = 'Scanning...';
+        _resetKittiDriveSelect();
+        _resetKittiProgressBar();
+
+        const result = await apiCall('/api/player/scan_kitti', { path });
+        if (!result.success) {
+            domCache.get('player-path-label').textContent = 'Scan failed';
+            alert('KITTI scan failed: ' + (result.error || result.message || 'Unknown error'));
+            return;
+        }
+
+        const scan = result.scan_result;
+        kittiState.baseDir = path;
+        kittiState.calibDir = scan.calib_dir || null;
+        kittiState.drives = scan.drive_dirs || [];
+
+        domCache.get('player-path-label').textContent = path;
+
+        // drive 목록을 select에 채우기
+        const sel = domCache.get('kitti-drive-select');
+        sel.innerHTML = '<option value="">— Select a drive —</option>';
+        kittiState.drives.forEach((drive, idx) => {
+            const opt = document.createElement('option');
+            opt.value = idx;
+            opt.textContent = `${drive.name} [${drive.drive_type}]`;
+            sel.appendChild(opt);
+        });
+
+        if (kittiState.drives.length === 0) {
+            alert('No drive directories found in the selected KITTI directory.');
+        } else {
+            // 항상 "Select a drive" 기본값 유지 - 사용자가 직접 선택
+            console.log(`[KITTI] Found ${kittiState.drives.length} drive(s) in ${path}`);
+        }
+    }, '/home');
+}
+
+/**
+ * Drive 드롭다운 선택 변경 시 자동 호출.
+ * 선택된 drive를 load_data API로 바로 로드 → data_stamp 구축 → Play 버튼 활성.
+ */
+async function onKittiDriveChange(driveIdx) {
+    if (driveIdx === '' || driveIdx === null || !kittiState.baseDir) return;
+    const drive = kittiState.drives[parseInt(driveIdx)];
+    if (!drive) return;
+
+    domCache.get('player-path-label').textContent = 'Loading...';
+    const result = await apiCall('/api/player/load_data', { path: drive.data_path });
+    if (result && result.success) {
+        domCache.get('player-path-label').textContent = drive.data_path;
+        console.log('[KITTI] Drive auto-loaded:', drive.data_path);
+
+        // Auto-start: 체크박스가 켜져 있으면 로드 직후 자동 재생
+        const autoStartCheck = domCache.get('player-auto-start');
+        if (autoStartCheck && autoStartCheck.checked) {
+            console.log('[KITTI] Auto start enabled — starting playback');
+            await playPlayer();
+        }
+    } else {
+        const errMsg = result ? (result.message || result.error || 'Unknown') : 'No response';
+        domCache.get('player-path-label').textContent = 'Load failed';
+        console.error('[KITTI] Drive auto-load failed:', errMsg);
+    }
+}
+
+/**
+ * KITTI drive 디렉토리를 File Player에 직접 로드한다 (변환 없이 파일에서 직접 재생).
+ * drive의 data_path를 load_data API에 전달 → 백엔드가 timestamps를 읽어 data_stamp 구축.
+ */
+async function loadKittiDrive() {
+    const sel = domCache.get('kitti-drive-select');
+    const driveIdx = sel.value;
+    if (driveIdx === '' || driveIdx === null) {
+        alert('Please select a drive first.');
+        return;
+    }
+    if (!kittiState.baseDir) {
+        alert('Please load a KITTI directory first.');
+        return;
+    }
+
+    const drive = kittiState.drives[parseInt(driveIdx)];
+    if (!drive) {
+        alert('Invalid drive selection.');
+        return;
+    }
+
+    const btn = domCache.get('kitti-convert-btn');
+    btn.disabled = true;
+    btn.textContent = 'Loading…';
+
+    domCache.get('player-path-label').textContent = 'Loading...';
+
+    const result = await apiCall('/api/player/load_data', { path: drive.data_path });
+
+    btn.disabled = false;
+    btn.textContent = 'Load';
+
+    if (result && result.success) {
+        domCache.get('player-path-label').textContent = drive.data_path;
+        console.log('[KITTI] Drive loaded:', drive.data_path);
+    } else {
+        const errMsg = result ? (result.message || result.error || 'Unknown error') : 'No response';
+        domCache.get('player-path-label').textContent = 'Load failed';
+        alert('Failed to load KITTI drive: ' + errMsg);
+    }
+}
+
+/**
+ * KITTI 변환 완료 후 처리: 진행바 완료 표시 → load_data로 재생 시작
+ * @param {string} bagPath - 생성된 ROS2 bag 파일 경로
+ * @param {HTMLElement} btn - Convert 버튼 엘리먼트
+ * @param {HTMLElement} bar - 진행바 컨테이너 엘리먼트
+ * @param {HTMLElement} fill - 진행바 fill 엘리먼트
+ * @param {HTMLElement} text - 진행바 텍스트 엘리먼트
+ * @param {HTMLElement} msg - 상태 메시지 엘리먼트
+ */
+/**
+ * KITTI 데이터를 ROS2 bag으로 변환 (Save Bag).
+ * 현재 선택된 drive를 /api/player/convert_kitti 로 전송.
+ * 진행률은 WebSocket(8081)을 통해 수신.
+ */
+async function convertKitti() {
+    const sel = domCache.get('kitti-drive-select');
+    const driveIdx = sel ? sel.value : '';
+    if (driveIdx === '' || driveIdx === null) {
+        alert('먼저 드라이브를 선택하세요.');
+        return;
+    }
+    if (!kittiState.baseDir) {
+        alert('KITTI 디렉토리를 먼저 로드하세요.');
+        return;
+    }
+
+    const drive = kittiState.drives[parseInt(driveIdx)];
+    if (!drive) {
+        alert('유효하지 않은 드라이브 선택입니다.');
+        return;
+    }
+
+    const calibDir = drive.calib_dir || kittiState.calibDir;
+    if (!calibDir) {
+        alert('Calibration 디렉토리를 찾을 수 없습니다.\n날짜 디렉토리(예: 2011_09_30)에 *_calib 폴더가 있어야 합니다.');
+        return;
+    }
+
+    if (kittiState.converting) {
+        alert('이미 변환 중입니다.');
+        return;
+    }
+
+    const btn   = domCache.get('kitti-convert-btn');
+    const bar   = domCache.get('kitti-progress-bar');
+    const fill  = domCache.get('kitti-progress-fill');
+    const text  = domCache.get('kitti-progress-text');
+    const msgEl = domCache.get('kitti-progress-msg');
+
+    kittiState.converting = true;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+
+    if (bar)   { bar.style.display = 'block'; }
+    if (fill)  { fill.style.width = '0%'; }
+    if (text)  { text.textContent = '0%'; }
+    if (msgEl) { msgEl.textContent = 'Starting conversion...'; }
+
+    const result = await apiCall('/api/player/convert_kitti', {
+        base_dir:   kittiState.baseDir,
+        calib_dir:  calibDir,
+        data_path:  drive.data_path,
+        drive_name: drive.name,
+    });
+
+    if (!result || !result.success) {
+        kittiState.converting = false;
+        btn.disabled = false;
+        btn.textContent = 'Save Bag';
+        if (bar) bar.style.display = 'none';
+        const errMsg = result ? (result.error || result.message || 'Unknown') : 'No response';
+        alert('변환 시작 실패: ' + errMsg);
+    }
+    // 진행률·완료·오류는 _handleBackendWsMessage의 WebSocket 핸들러에서 처리
+}
+
+async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
+    // 진행바 100% 완료 표시
+    fill.style.width = '100%';
+    text.textContent = '100%';
+    msg.textContent = 'Conversion complete! Loading bag...';
+
+    // load_data API 호출하여 생성된 ROS2 bag 로드 (재생은 사용자가 직접 Play 버튼으로)
+    const loadResult = await apiCall('/api/player/load_data', { path: bagPath });
+    if (loadResult && loadResult.success) {
+        domCache.get('player-path-label').textContent = bagPath;
+        msg.textContent = 'Ready to play';
+        console.log('[KITTI] Bag loaded:', bagPath);
+    } else {
+        msg.textContent = 'Load failed';
+        alert('Failed to load converted bag: ' + (loadResult ? (loadResult.message || loadResult.error || 'Unknown error') : 'No response'));
+    }
+
+    kittiState.converting = false;
+    btn.disabled = false;
+    btn.textContent = 'Save Bag';
+}
+
+/**
+ * 데이터셋 형식에 따라 파일/디렉토리 로드
+ * ConPR 형식이면 기존 로직, KITTI 형식이면 loadKittiDirectory() 호출
+ */
 async function loadPlayerPath() {
+    const formatSel = domCache.get('dataset-format-select');
+    const format = formatSel ? formatSel.value : 'conpr';
+
+    if (format === 'kitti') {
+        await loadKittiDirectory();
+        return;
+    }
+
+    // ConPR 기존 로직
     openFileBrowser(async (path) => {
         domCache.get('player-path-label').textContent = 'Loading...';
         const result = await apiCall('/api/player/load_data', { path });
@@ -1912,6 +2193,37 @@ function _handleBackendWsMessage(rawData) {
     } else if (msg.type === 'pc2meta') {
         // PC2 메타데이터는 threejs_display.js가 dispatch하는 CustomEvent와 동일
         window.dispatchEvent(new CustomEvent('pc2_topic_meta', { detail: msg }));
+
+    // ── KITTI 변환 진행률 / 완료 / 오류 ──────────────────────────────────────
+    } else if (msg.type === 'kitti_convert_progress') {
+        const fill = domCache.get('kitti-progress-fill');
+        const text = domCache.get('kitti-progress-text');
+        const msgEl = domCache.get('kitti-progress-msg');
+        const pct = parseInt(msg.progress || 0);
+        if (!isNaN(pct)) {
+            fill.style.width = pct + '%';
+            text.textContent = pct + '%';
+        }
+        if (msg.message) { msgEl.textContent = msg.message; }
+
+    } else if (msg.type === 'kitti_convert_done') {
+        const btn  = domCache.get('kitti-convert-btn');
+        const bar  = domCache.get('kitti-progress-bar');
+        const fill = domCache.get('kitti-progress-fill');
+        const text = domCache.get('kitti-progress-text');
+        const msgEl = domCache.get('kitti-progress-msg');
+        _onKittiConvertDone(msg.bag_path, btn, bar, fill, text, msgEl).catch(console.error);
+
+    } else if (msg.type === 'kitti_convert_error') {
+        const btn  = domCache.get('kitti-convert-btn');
+        const bar  = domCache.get('kitti-progress-bar');
+        const msgEl = domCache.get('kitti-progress-msg');
+        kittiState.converting = false;
+        btn.disabled = false;
+        btn.textContent = 'Save Bag';
+        if (bar) bar.style.display = 'none';
+        if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
+        alert('Conversion error: ' + (msg.error || 'Unknown'));
     }
 }
 
@@ -3682,6 +3994,10 @@ window.addEventListener('click', (event) => {
 // ==============================================================
 document.addEventListener('DOMContentLoaded', () => {
     console.log('[DOMContentLoaded] Page loaded');
+
+    // 8081 WebSocket은 Plot 탭 여부와 무관하게 항상 연결 유지
+    // (KITTI 변환 진행률 등 전역 백엔드 이벤트 수신에 필요)
+    _initBackendWs();
     
     // Visualization 탭의 Plot subtab이 기본 활성화되어 있으면 초기화
     setTimeout(() => {
