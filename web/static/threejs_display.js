@@ -274,7 +274,7 @@ const viewer3DState = {
 
     // Phase 2.7: Image 패널 관련 상태
     selectedImageTopics: [],        // 선택된 Image 토픽 목록
-    imageSubscriptions: new Map(),  // topicName → ROSLIB.Topic
+    imageSubscriptions: new Map(),  // topicName → true  (Worker 구독 중 표시용)
     imagePanelCollapsed: false,     // 패널 접힘 상태
     _imagePanelHeight: 200,         // 패널 마지막 높이 저장 (접기/펼치기 복원용)
 
@@ -1088,6 +1088,11 @@ const _pc2ColBuffer = new Float32Array(PC2_MAX_POINTS * 3);
 let _pc2StreamWorker = null;
 const _pc2FrameCounts = new Map(); // topicName → frameCount (BoundingSphere 갱신 주기용)
 
+// ── Image 스트리밍 워커 (단일 인스턴스, 모든 Image 토픽 공유) ──
+// Python Backend(8081)에서 JPEG 바이너리를 수신 → createImageBitmap()으로 GPU 가속 디코딩
+// 메인 스레드는 canvas.drawImage(bitmap) 만 수행 → 픽셀 루프 / atob 완전 제거
+let _imgStreamWorker = null;
+
 /**
  * PointCloud2 메시지 고성능 파싱 (단일 패스, 재사용 버퍼)
  * @param {Object} message       - rosbridge PointCloud2 메시지
@@ -1503,13 +1508,10 @@ function unsubscribeFromTopic(topicName) {
         viewer3DState.livoxTagFilter.delete(topicName);
     }
 
-    // Image 구독 정리
-    const imgSub = viewer3DState.imageSubscriptions.get(topicName);
-    if (imgSub) {
-        try {
-            imgSub.unsubscribe();
-        } catch (e) {
-            console.warn('[Image] Failed to unsubscribe:', topicName, e);
+    // Image 구독 정리 (Worker 기반)
+    if (viewer3DState.imageSubscriptions.has(topicName)) {
+        if (_imgStreamWorker) {
+            _imgStreamWorker.postMessage({ cmd: 'unsubscribe', topicName });
         }
         viewer3DState.imageSubscriptions.delete(topicName);
         removeImageCell(topicName);
@@ -1659,6 +1661,47 @@ function _getPC2StreamWorker() {
     _pc2StreamWorker.postMessage({ cmd: 'connect', url: `ws://${hostname}:8081` });
 
     return _pc2StreamWorker;
+}
+
+/**
+ * Image 스트리밍 Worker (단일 인스턴스, 모든 Image 토픽 공유)
+ * Python Backend(8081)에서 JPEG 바이너리를 수신하여
+ * createImageBitmap()으로 디코딩 후 해당 canvas에 drawImage() 한다.
+ */
+function _getImgStreamWorker() {
+    if (_imgStreamWorker) return _imgStreamWorker;
+
+    _imgStreamWorker = new Worker('/static/img_stream_worker.js?v=' + Date.now());
+
+    _imgStreamWorker.onmessage = function (ev) {
+        const msg = ev.data;
+        if (msg.type !== 'imgframe') return;
+
+        const { topicName, bitmap } = msg;
+        const canvasId = 'image-canvas-' + topicName.replace(/\//g, '_');
+        const canvas   = document.getElementById(canvasId);
+        if (!canvas || !bitmap) {
+            bitmap && bitmap.close && bitmap.close();
+            return;
+        }
+
+        // canvas 크기를 이미지에 맞춤 (한 번만)
+        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width  = bitmap.width;
+            canvas.height = bitmap.height;
+        }
+
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+            ctx.drawImage(bitmap, 0, 0);
+        }
+        bitmap.close();   // GPU 메모리 즉시 해제
+    };
+
+    const hostname = window.location.hostname || 'localhost';
+    _imgStreamWorker.postMessage({ cmd: 'connect', url: `ws://${hostname}:8081` });
+
+    return _imgStreamWorker;
 }
 
 /**
@@ -2239,122 +2282,24 @@ async function getAvailableImageTopics() {
 
 /**
  * sensor_msgs/Image 토픽 구독 및 이미지 패널에 렌더링
+ * Python Backend(8081) 바이너리 WebSocket → img_stream_worker.js → drawImage()
  * @param {string} topicName - 구독할 토픽 이름
  */
 function subscribeToImage(topicName) {
-    if (!viewer3DState.rosConnected) {
-        console.warn('[Image] Not connected to ROS');
-        return;
-    }
-
     // 재구독 방지
-    if (viewer3DState.imageSubscriptions.has(topicName)) {
-        return viewer3DState.imageSubscriptions.get(topicName);
-    }
+    if (viewer3DState.imageSubscriptions.has(topicName)) return;
 
-    console.log('[Image] Subscribing to topic:', topicName);
+    console.log('[Image] Subscribing to topic (Worker):', topicName);
 
-    const topic = new ROSLIB.Topic({
-        ros: viewer3DState.ros,
-        name: topicName,
-        messageType: 'sensor_msgs/msg/Image',
-        throttle_rate: 100,   // 10Hz
-        queue_length: 1       // 항상 최신 프레임
-    });
+    // Worker 구독 등록 (true = 구독 중)
+    viewer3DState.imageSubscriptions.set(topicName, true);
 
-    viewer3DState.imageSubscriptions.set(topicName, topic);
-
-    // .image-cell 추가 및 패널 자동 오픈
+    // .image-cell DOM 추가 및 패널 자동 오픈
     addImageCell(topicName);
 
-    topic.subscribe(function(message) {
-        const canvas = document.getElementById('image-canvas-' + topicName.replace(/\//g, '_'));
-        if (!canvas) return;
-        parseImageMsg(message, canvas);
-    });
-
-    return topic;
-}
-
-/**
- * sensor_msgs/Image 메시지를 canvas에 렌더링
- * @param {Object} message - ROS Image 메시지
- * @param {HTMLCanvasElement} canvas - 렌더링 대상 canvas
- */
-function parseImageMsg(message, canvas) {
-    try {
-        const width    = message.width;
-        const height   = message.height;
-        const encoding = message.encoding || 'rgb8';
-
-        if (!width || !height) return;
-
-        // canvas 크기 업데이트
-        if (canvas.width !== width || canvas.height !== height) {
-            canvas.width  = width;
-            canvas.height = height;
-        }
-
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        // base64 디코딩
-        const binaryStr = atob(message.data);
-        const len       = binaryStr.length;
-        const bytes     = new Uint8Array(len);
-        for (let i = 0; i < len; i++) {
-            bytes[i] = binaryStr.charCodeAt(i);
-        }
-
-        // ImageData 생성 (RGBA)
-        const imgData = ctx.createImageData(width, height);
-        const out     = imgData.data;
-        const nPixels = width * height;
-
-        if (encoding === 'rgb8') {
-            for (let i = 0; i < nPixels; i++) {
-                out[i * 4]     = bytes[i * 3];     // R
-                out[i * 4 + 1] = bytes[i * 3 + 1]; // G
-                out[i * 4 + 2] = bytes[i * 3 + 2]; // B
-                out[i * 4 + 3] = 255;               // A
-            }
-        } else if (encoding === 'bgr8') {
-            for (let i = 0; i < nPixels; i++) {
-                out[i * 4]     = bytes[i * 3 + 2]; // R ← B
-                out[i * 4 + 1] = bytes[i * 3 + 1]; // G
-                out[i * 4 + 2] = bytes[i * 3];     // B ← R
-                out[i * 4 + 3] = 255;
-            }
-        } else if (encoding === 'mono8') {
-            for (let i = 0; i < nPixels; i++) {
-                const v        = bytes[i];
-                out[i * 4]     = v;
-                out[i * 4 + 1] = v;
-                out[i * 4 + 2] = v;
-                out[i * 4 + 3] = 255;
-            }
-        } else if (encoding === 'rgba8') {
-            for (let i = 0; i < nPixels; i++) {
-                out[i * 4]     = bytes[i * 4];
-                out[i * 4 + 1] = bytes[i * 4 + 1];
-                out[i * 4 + 2] = bytes[i * 4 + 2];
-                out[i * 4 + 3] = bytes[i * 4 + 3];
-            }
-        } else {
-            // 지원되지 않는 encoding: 그레이스케일로 표시
-            for (let i = 0; i < nPixels; i++) {
-                const v        = bytes[i] || 0;
-                out[i * 4]     = v;
-                out[i * 4 + 1] = v;
-                out[i * 4 + 2] = v;
-                out[i * 4 + 3] = 255;
-            }
-        }
-
-        ctx.putImageData(imgData, 0, 0);
-    } catch (err) {
-        console.error('[Image] parseImageMsg error:', err);
-    }
+    // img_stream_worker에 구독 요청 (Python Backend 8081 → JPEG binary)
+    const worker = _getImgStreamWorker();
+    worker.postMessage({ cmd: 'subscribe', topicName });
 }
 
 /**
@@ -2442,14 +2387,12 @@ function removeImageCell(topicName) {
  * @param {string} topicName - 토픽 이름
  */
 function unsubscribeFromImage(topicName) {
-    const imgSub = viewer3DState.imageSubscriptions.get(topicName);
-    if (imgSub) {
-        try {
-            imgSub.unsubscribe();
-        } catch (e) {
-            console.warn('[Image] Failed to unsubscribe:', topicName, e);
-        }
+    if (viewer3DState.imageSubscriptions.has(topicName)) {
         viewer3DState.imageSubscriptions.delete(topicName);
+        // Worker에 구독 해제 요청
+        if (_imgStreamWorker) {
+            _imgStreamWorker.postMessage({ cmd: 'unsubscribe', topicName });
+        }
     }
     removeImageCell(topicName);
     const idx = viewer3DState.selectedImageTopics.indexOf(topicName);

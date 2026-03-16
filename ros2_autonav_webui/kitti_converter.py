@@ -8,13 +8,20 @@ KITTI Raw Dataset → ROS2 bag (.db3) 변환 모듈
   - KittiConverter.convert_to_ros2bag(): KITTI 데이터를 ROS2 bag 파일로 변환
 
 출력 토픽:
-  /kitti/oxts/imu                     sensor_msgs/msg/Imu
-  /kitti/oxts/gps/fix                 sensor_msgs/msg/NavSatFix
-  /kitti/velo/pointcloud              sensor_msgs/msg/PointCloud2
-  /kitti/camera_gray_left/image_raw   sensor_msgs/msg/Image  (mono8)
-  /kitti/camera_color_left/image_raw  sensor_msgs/msg/Image  (bgr8, 있을 경우)
-  /tf                                 tf2_msgs/msg/TFMessage (dynamic: world→base_link)
-  /tf_static                          tf2_msgs/msg/TFMessage (static: base_link→imu→velo→cam)
+  /kitti/oxts/imu                          sensor_msgs/msg/Imu
+  /kitti/oxts/gps/fix                      sensor_msgs/msg/NavSatFix
+  /kitti/oxts/gps/vel                      geometry_msgs/msg/TwistStamped
+  /kitti/velo/pointcloud                   sensor_msgs/msg/PointCloud2
+  /kitti/camera_gray_left/image_raw        sensor_msgs/msg/Image      (mono8)
+  /kitti/camera_gray_left/camera_info      sensor_msgs/msg/CameraInfo
+  /kitti/camera_gray_right/image_raw       sensor_msgs/msg/Image      (mono8, 있을 경우)
+  /kitti/camera_gray_right/camera_info     sensor_msgs/msg/CameraInfo (있을 경우)
+  /kitti/camera_color_left/image_raw       sensor_msgs/msg/Image      (bgr8, 있을 경우)
+  /kitti/camera_color_left/camera_info     sensor_msgs/msg/CameraInfo (있을 경우)
+  /kitti/camera_color_right/image_raw      sensor_msgs/msg/Image      (bgr8, 있을 경우)
+  /kitti/camera_color_right/camera_info    sensor_msgs/msg/CameraInfo (있을 경우)
+  /tf                                      tf2_msgs/msg/TFMessage     (dynamic: world→base_link)
+  /tf_static                               tf2_msgs/msg/TFMessage     (static: base_link→imu→velo→cam)
 """
 
 import math
@@ -33,8 +40,8 @@ try:
     import rosbag2_py
     from rosbag2_py import TopicMetadata
     from rclpy.serialization import serialize_message
-    from geometry_msgs.msg import TransformStamped
-    from sensor_msgs.msg import NavSatFix, NavSatStatus
+    from geometry_msgs.msg import TransformStamped, TwistStamped
+    from sensor_msgs.msg import CameraInfo, NavSatFix, NavSatStatus
     from tf2_msgs.msg import TFMessage
     _ROSBAG2_AVAILABLE = True
 except ImportError:
@@ -42,6 +49,8 @@ except ImportError:
     TopicMetadata = None       # type: ignore
     serialize_message = None   # type: ignore
     TransformStamped = None    # type: ignore
+    TwistStamped = None        # type: ignore
+    CameraInfo = None          # type: ignore
     NavSatFix = None           # type: ignore
     NavSatStatus = None        # type: ignore
     TFMessage = None           # type: ignore
@@ -183,6 +192,8 @@ class KittiConverter:
             os.path.join(calib_dir, 'calib_imu_to_velo.txt'))
         calib_velo_to_cam = self._parse_calib_file(
             os.path.join(calib_dir, 'calib_velo_to_cam.txt'))
+        calib_cam_to_cam = self._parse_calib_file(
+            os.path.join(calib_dir, 'calib_cam_to_cam.txt'))
 
         # ── 2. OXTS 파일 목록 및 타임스탬프 ─────────────────────────
         oxts_dir = os.path.join(data_path, 'oxts')
@@ -198,10 +209,16 @@ class KittiConverter:
 
         # ── 4. Camera 이미지 파일 목록 ───────────────────────────────
         cam0_dir = os.path.join(data_path, 'image_00', 'data')
+        cam1_dir = os.path.join(data_path, 'image_01', 'data')
         cam2_dir = os.path.join(data_path, 'image_02', 'data')
+        cam3_dir = os.path.join(data_path, 'image_03', 'data')
         cam0_files = sorted(Path(cam0_dir).glob('*.png')) if os.path.isdir(cam0_dir) else []
+        cam1_files = sorted(Path(cam1_dir).glob('*.png')) if os.path.isdir(cam1_dir) else []
         cam2_files = sorted(Path(cam2_dir).glob('*.png')) if os.path.isdir(cam2_dir) else []
+        cam3_files = sorted(Path(cam3_dir).glob('*.png')) if os.path.isdir(cam3_dir) else []
+        has_cam1 = len(cam1_files) > 0
         has_cam2 = len(cam2_files) > 0
+        has_cam3 = len(cam3_files) > 0
 
         # ── 5. 출력 경로 준비 ────────────────────────────────────────────
         # rosbag2_py.SequentialWriter 가 bag 디렉토리를 스스로 생성하므로
@@ -223,15 +240,24 @@ class KittiConverter:
 
         # ── 7. 토픽 등록 ─────────────────────────────────────────────
         topics = [
-            ('/kitti/oxts/imu',                      'sensor_msgs/msg/Imu'),
-            ('/kitti/oxts/gps/fix',                  'sensor_msgs/msg/NavSatFix'),
-            ('/kitti/velo/pointcloud',               'sensor_msgs/msg/PointCloud2'),
-            ('/kitti/camera_gray_left/image_raw',    'sensor_msgs/msg/Image'),
-            ('/tf',                                  'tf2_msgs/msg/TFMessage'),
-            ('/tf_static',                           'tf2_msgs/msg/TFMessage'),
+            ('/kitti/oxts/imu',                           'sensor_msgs/msg/Imu'),
+            ('/kitti/oxts/gps/fix',                       'sensor_msgs/msg/NavSatFix'),
+            ('/kitti/oxts/gps/vel',                       'geometry_msgs/msg/TwistStamped'),
+            ('/kitti/velo/pointcloud',                    'sensor_msgs/msg/PointCloud2'),
+            ('/kitti/camera_gray_left/image_raw',         'sensor_msgs/msg/Image'),
+            ('/kitti/camera_gray_left/camera_info',       'sensor_msgs/msg/CameraInfo'),
+            ('/tf',                                       'tf2_msgs/msg/TFMessage'),
+            ('/tf_static',                                'tf2_msgs/msg/TFMessage'),
         ]
+        if has_cam1:
+            topics.append(('/kitti/camera_gray_right/image_raw',   'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_gray_right/camera_info', 'sensor_msgs/msg/CameraInfo'))
         if has_cam2:
-            topics.append(('/kitti/camera_color_left/image_raw', 'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_color_left/image_raw',   'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_color_left/camera_info', 'sensor_msgs/msg/CameraInfo'))
+        if has_cam3:
+            topics.append(('/kitti/camera_color_right/image_raw',   'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_color_right/camera_info', 'sensor_msgs/msg/CameraInfo'))
 
         for idx, (topic_name, topic_type) in enumerate(topics):
             writer.create_topic(TopicMetadata(
@@ -258,8 +284,10 @@ class KittiConverter:
         n_oxts = min(len(oxts_timestamps), len(oxts_files))
         n_velo = min(len(velo_timestamps), len(velo_files))
         n_cam0 = len(cam0_files)
+        n_cam1 = len(cam1_files)
         n_cam2 = len(cam2_files)
-        total = max(n_oxts + n_velo + n_cam0 + n_cam2, 1)
+        n_cam3 = len(cam3_files)
+        total = max(n_oxts + n_velo + n_cam0 + n_cam1 + n_cam2 + n_cam3, 1)
         processed = 0
 
         def _tick(message: str):
@@ -293,6 +321,10 @@ class KittiConverter:
             gps_msg = self._make_navsatfix_msg(oxts, stamp_msg)
             writer.write('/kitti/oxts/gps/fix', serialize_message(gps_msg), ts_ns)
 
+            # TwistStamped 속도 메시지
+            vel_msg = self._make_twist_stamped_msg(oxts, stamp_msg)
+            writer.write('/kitti/oxts/gps/vel', serialize_message(vel_msg), ts_ns)
+
             # Dynamic TF: world → base_link
             if origin_oxts is not None and mercator_scale is not None:
                 tf_msg = self._make_dynamic_tf(oxts, origin_oxts, mercator_scale, stamp_msg)
@@ -311,41 +343,387 @@ class KittiConverter:
 
         # ── 13. Camera 0 (gray left) ─────────────────────────────────
         if cam0_files:
-            _progress(70, 'Converting gray camera images...')
+            _progress(70, 'Converting gray left camera images...')
             # cam0 타임스탬프: OXTS 타임스탬프를 공유 (같은 개수인 경우)
             cam0_ts = (oxts_timestamps[:len(cam0_files)]
                        if len(oxts_timestamps) >= len(cam0_files)
                        else list(range(len(cam0_files))))
             for ts_ns, img_file in zip(cam0_ts, cam0_files):
                 stamp_msg = self._ns_to_time_msg(ts_ns)
-                img_msg = self._make_image_msg(str(img_file), 'mono8', stamp_msg)
+                img_msg = self._make_image_msg(
+                    str(img_file), 'mono8', stamp_msg,
+                    frame_id='camera_gray_left_link')
                 if img_msg:
                     writer.write(
                         '/kitti/camera_gray_left/image_raw',
                         serialize_message(img_msg),
                         ts_ns,
                     )
-                _tick('Converting gray camera images...')
+                caminfo_msg = self._make_camera_info_msg(calib_cam_to_cam, '00', stamp_msg)
+                writer.write(
+                    '/kitti/camera_gray_left/camera_info',
+                    serialize_message(caminfo_msg),
+                    ts_ns,
+                )
+                _tick('Converting gray left camera images...')
+
+        # ── 13.5. Camera 1 (gray right, 있을 경우) ───────────────────
+        if has_cam1:
+            _progress(75, 'Converting gray right camera images...')
+            cam1_ts = (oxts_timestamps[:len(cam1_files)]
+                       if len(oxts_timestamps) >= len(cam1_files)
+                       else list(range(len(cam1_files))))
+            for ts_ns, img_file in zip(cam1_ts, cam1_files):
+                stamp_msg = self._ns_to_time_msg(ts_ns)
+                img_msg = self._make_image_msg(
+                    str(img_file), 'mono8', stamp_msg,
+                    frame_id='camera_gray_right_link')
+                if img_msg:
+                    writer.write(
+                        '/kitti/camera_gray_right/image_raw',
+                        serialize_message(img_msg),
+                        ts_ns,
+                    )
+                caminfo_msg = self._make_camera_info_msg(calib_cam_to_cam, '01', stamp_msg)
+                writer.write(
+                    '/kitti/camera_gray_right/camera_info',
+                    serialize_message(caminfo_msg),
+                    ts_ns,
+                )
+                _tick('Converting gray right camera images...')
 
         # ── 14. Camera 2 (color left, 있을 경우) ─────────────────────
         if has_cam2:
-            _progress(85, 'Converting color camera images...')
+            _progress(85, 'Converting color left camera images...')
             cam2_ts = (oxts_timestamps[:len(cam2_files)]
                        if len(oxts_timestamps) >= len(cam2_files)
                        else list(range(len(cam2_files))))
             for ts_ns, img_file in zip(cam2_ts, cam2_files):
                 stamp_msg = self._ns_to_time_msg(ts_ns)
-                img_msg = self._make_image_msg(str(img_file), 'bgr8', stamp_msg)
+                img_msg = self._make_image_msg(
+                    str(img_file), 'bgr8', stamp_msg,
+                    frame_id='camera_color_left_link')
                 if img_msg:
                     writer.write(
                         '/kitti/camera_color_left/image_raw',
                         serialize_message(img_msg),
                         ts_ns,
                     )
-                _tick('Converting color camera images...')
+                caminfo_msg = self._make_camera_info_msg(calib_cam_to_cam, '02', stamp_msg)
+                writer.write(
+                    '/kitti/camera_color_left/camera_info',
+                    serialize_message(caminfo_msg),
+                    ts_ns,
+                )
+                _tick('Converting color left camera images...')
+
+        # ── 14.5. Camera 3 (color right, 있을 경우) ──────────────────
+        if has_cam3:
+            _progress(92, 'Converting color right camera images...')
+            cam3_ts = (oxts_timestamps[:len(cam3_files)]
+                       if len(oxts_timestamps) >= len(cam3_files)
+                       else list(range(len(cam3_files))))
+            for ts_ns, img_file in zip(cam3_ts, cam3_files):
+                stamp_msg = self._ns_to_time_msg(ts_ns)
+                img_msg = self._make_image_msg(
+                    str(img_file), 'bgr8', stamp_msg,
+                    frame_id='camera_color_right_link')
+                if img_msg:
+                    writer.write(
+                        '/kitti/camera_color_right/image_raw',
+                        serialize_message(img_msg),
+                        ts_ns,
+                    )
+                caminfo_msg = self._make_camera_info_msg(calib_cam_to_cam, '03', stamp_msg)
+                writer.write(
+                    '/kitti/camera_color_right/camera_info',
+                    serialize_message(caminfo_msg),
+                    ts_ns,
+                )
+                _tick('Converting color right camera images...')
 
         del writer
         _progress(100, 'Conversion complete!')
+
+    def convert_to_ros1bag(
+        self,
+        calib_dir: str,
+        data_path: str,
+        output_bag_path: str,
+        progress_cb=None,
+    ) -> None:
+        """KITTI 데이터를 ROS1 .bag 파일로 직접 변환한다 (rosbags 라이브러리 사용).
+
+        rosbags.rosbag1.Writer + migrate_bytes()를 통해 ROS2 CDR 직렬화 후
+        즉시 ROS1 raw bytes로 변환하여 .bag에 기록한다.
+        중간 ROS2 bag 파일을 생성하지 않아 공간/시간 절약.
+
+        Args:
+            calib_dir:        calib 파일 디렉토리
+            data_path:        drive 데이터 디렉토리
+            output_bag_path:  출력 ROS1 .bag 파일 경로 (예: '/path/to/drive_name.bag')
+            progress_cb:      진행률 콜백 (선택), signature: (progress: int, message: str)
+        """
+        try:
+            from rosbags.rosbag1 import Writer as Ros1Writer
+            from rosbags.typesys import get_typestore, Stores
+            from rosbags.convert.converter import migrate_bytes as _migrate_bytes
+        except ImportError as e:
+            raise RuntimeError(
+                f'rosbags 라이브러리가 필요합니다. 설치: pip install rosbags\n원인: {e}'
+            )
+
+        # 단조증가 보장
+        _sent_max = [-1]
+
+        def _progress(pct: int, msg: str):
+            if progress_cb and pct > _sent_max[0]:
+                _sent_max[0] = pct
+                progress_cb(pct, msg)
+
+        src_typestore = get_typestore(Stores.ROS2_JAZZY)
+        dst_typestore = get_typestore(Stores.ROS1_NOETIC)
+        migrate_cache: dict = {}
+
+        # ── 1. calib 파일 파싱 ──────────────────────────────────────
+        _progress(0, 'Parsing calibration files...')
+        calib_imu_to_velo = self._parse_calib_file(
+            os.path.join(calib_dir, 'calib_imu_to_velo.txt'))
+        calib_velo_to_cam = self._parse_calib_file(
+            os.path.join(calib_dir, 'calib_velo_to_cam.txt'))
+        calib_cam_to_cam = self._parse_calib_file(
+            os.path.join(calib_dir, 'calib_cam_to_cam.txt'))
+
+        # ── 2. OXTS ─────────────────────────────────────────────────
+        oxts_dir = os.path.join(data_path, 'oxts')
+        oxts_timestamps = self._load_timestamps(os.path.join(oxts_dir, 'timestamps.txt'))
+        oxts_files = sorted(Path(os.path.join(oxts_dir, 'data')).glob('*.txt')) \
+            if os.path.isdir(os.path.join(oxts_dir, 'data')) else []
+
+        # ── 3. Velodyne ─────────────────────────────────────────────
+        velo_dir = os.path.join(data_path, 'velodyne_points')
+        velo_timestamps = self._load_timestamps(os.path.join(velo_dir, 'timestamps.txt'))
+        velo_files = sorted(Path(os.path.join(velo_dir, 'data')).glob('*.bin')) \
+            if os.path.isdir(os.path.join(velo_dir, 'data')) else []
+
+        # ── 4. Camera 파일 목록 ──────────────────────────────────────
+        cam0_dir = os.path.join(data_path, 'image_00', 'data')
+        cam1_dir = os.path.join(data_path, 'image_01', 'data')
+        cam2_dir = os.path.join(data_path, 'image_02', 'data')
+        cam3_dir = os.path.join(data_path, 'image_03', 'data')
+        cam0_files = sorted(Path(cam0_dir).glob('*.png')) if os.path.isdir(cam0_dir) else []
+        cam1_files = sorted(Path(cam1_dir).glob('*.png')) if os.path.isdir(cam1_dir) else []
+        cam2_files = sorted(Path(cam2_dir).glob('*.png')) if os.path.isdir(cam2_dir) else []
+        cam3_files = sorted(Path(cam3_dir).glob('*.png')) if os.path.isdir(cam3_dir) else []
+        has_cam1 = len(cam1_files) > 0
+        has_cam2 = len(cam2_files) > 0
+        has_cam3 = len(cam3_files) > 0
+
+        # ── 5. 출력 경로 준비 ────────────────────────────────────────
+        import shutil as _shutil
+        if os.path.isfile(output_bag_path):
+            os.remove(output_bag_path)
+        parent_dir = os.path.dirname(output_bag_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+
+        # ── 6. 토픽 목록 ────────────────────────────────────────────
+        topics = [
+            ('/kitti/oxts/imu',                           'sensor_msgs/msg/Imu'),
+            ('/kitti/oxts/gps/fix',                       'sensor_msgs/msg/NavSatFix'),
+            ('/kitti/oxts/gps/vel',                       'geometry_msgs/msg/TwistStamped'),
+            ('/kitti/velo/pointcloud',                    'sensor_msgs/msg/PointCloud2'),
+            ('/kitti/camera_gray_left/image_raw',         'sensor_msgs/msg/Image'),
+            ('/kitti/camera_gray_left/camera_info',       'sensor_msgs/msg/CameraInfo'),
+            ('/tf',                                       'tf2_msgs/msg/TFMessage'),
+            ('/tf_static',                                'tf2_msgs/msg/TFMessage'),
+        ]
+        if has_cam1:
+            topics.append(('/kitti/camera_gray_right/image_raw',   'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_gray_right/camera_info', 'sensor_msgs/msg/CameraInfo'))
+        if has_cam2:
+            topics.append(('/kitti/camera_color_left/image_raw',   'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_color_left/camera_info', 'sensor_msgs/msg/CameraInfo'))
+        if has_cam3:
+            topics.append(('/kitti/camera_color_right/image_raw',   'sensor_msgs/msg/Image'))
+            topics.append(('/kitti/camera_color_right/camera_info', 'sensor_msgs/msg/CameraInfo'))
+
+        # ── 7. 진행률 추적 ───────────────────────────────────────────
+        n_oxts = min(len(oxts_timestamps), len(oxts_files))
+        n_velo = min(len(velo_timestamps), len(velo_files))
+        n_cam0 = len(cam0_files)
+        n_cam1 = len(cam1_files)
+        n_cam2 = len(cam2_files)
+        n_cam3 = len(cam3_files)
+        total = max(n_oxts + n_velo + n_cam0 + n_cam1 + n_cam2 + n_cam3, 1)
+        processed = 0
+
+        def _tick(message: str):
+            nonlocal processed
+            processed += 1
+            pct = min(3 + int(processed / total * 95), 98)
+            _progress(pct, message)
+
+        # ── 8. Static TF 계산 ────────────────────────────────────────
+        _progress(2, 'Initializing ROS1 bag writer...')
+        static_tf_msg = self._build_static_tf(calib_imu_to_velo, calib_velo_to_cam)
+
+        # ── 9. Mercator 투영 원점 ────────────────────────────────────
+        origin_oxts = None
+        mercator_scale = None
+        if oxts_files:
+            first_oxts = self._load_oxts_file(str(oxts_files[0]))
+            if first_oxts:
+                origin_oxts = first_oxts
+                mercator_scale = math.cos(math.radians(first_oxts[0]))
+
+        # ── 10. ROS1 bag Writer 열기 및 토픽 등록 ────────────────────
+        def _ensure_type(ros2_type: str) -> bool:
+            """dst_typestore에 타입이 없으면 src_typestore에서 등록 시도. 성공 시 True."""
+            if ros2_type in dst_typestore.fielddefs:
+                return True
+            try:
+                from rosbags.typesys import get_types_from_msg
+                typs = get_types_from_msg(
+                    src_typestore.generate_msgdef(ros2_type, ros_version=1)[0],
+                    ros2_type,
+                )
+                typs.pop('std_msgs/msg/Header', None)
+                dst_typestore.register(typs)
+                return True
+            except Exception:
+                return False
+
+        def _cdr_to_ros1(conn, cdr_bytes: bytes) -> bytes:
+            """ROS2 CDR bytes → ROS1 raw bytes 변환."""
+            return bytes(_migrate_bytes(
+                src_typestore, dst_typestore,
+                conn.msgtype, conn.msgtype,
+                migrate_cache, cdr_bytes,
+                src_is2=True, dst_is2=False,
+            ))
+
+        _progress(3, 'Converting OXTS data...')
+        with Ros1Writer(output_bag_path) as writer:
+            # 커넥션 등록 (토픽별 1회)
+            connections: dict = {}
+            for topic_name, ros2_type in topics:
+                if not _ensure_type(ros2_type):
+                    continue
+                try:
+                    conn = writer.add_connection(topic_name, ros2_type, typestore=dst_typestore)
+                    connections[topic_name] = conn
+                except Exception:
+                    pass
+
+            def _write(topic_name: str, ros2_msg, ts_ns: int):
+                conn = connections.get(topic_name)
+                if conn is None:
+                    return
+                try:
+                    cdr = bytes(serialize_message(ros2_msg))
+                    raw = _cdr_to_ros1(conn, cdr)
+                    writer.write(conn, ts_ns, raw)
+                except Exception:
+                    pass
+
+            # ── 11. OXTS → IMU + NavSatFix + TwistStamped + Dynamic TF ──
+            static_tf_written = False
+            for ts_ns, oxts_file in zip(oxts_timestamps, oxts_files):
+                oxts = self._load_oxts_file(str(oxts_file))
+                if oxts is None:
+                    _tick('Converting OXTS data...')
+                    continue
+                stamp_msg = self._ns_to_time_msg(ts_ns)
+
+                if not static_tf_written:
+                    _write('/tf_static', static_tf_msg, ts_ns)
+                    static_tf_written = True
+
+                _write('/kitti/oxts/imu',     self._make_imu_msg(oxts, stamp_msg),           ts_ns)
+                _write('/kitti/oxts/gps/fix', self._make_navsatfix_msg(oxts, stamp_msg),      ts_ns)
+                _write('/kitti/oxts/gps/vel', self._make_twist_stamped_msg(oxts, stamp_msg),  ts_ns)
+
+                if origin_oxts is not None and mercator_scale is not None:
+                    _write('/tf', self._make_dynamic_tf(
+                        oxts, origin_oxts, mercator_scale, stamp_msg), ts_ns)
+
+                _tick('Converting OXTS data...')
+
+            # ── 12. Velodyne PointCloud2 ─────────────────────────────
+            _progress(50, 'Converting velodyne data...')
+            for ts_ns, velo_file in zip(velo_timestamps, velo_files):
+                stamp_msg = self._ns_to_time_msg(ts_ns)
+                pc2_msg = self._make_pointcloud2_msg(str(velo_file), stamp_msg)
+                if pc2_msg:
+                    _write('/kitti/velo/pointcloud', pc2_msg, ts_ns)
+                _tick('Converting velodyne data...')
+
+            # ── 13. Camera 0 (gray left) ─────────────────────────────
+            if cam0_files:
+                _progress(70, 'Converting gray left camera images...')
+                cam0_ts = (oxts_timestamps[:len(cam0_files)]
+                           if len(oxts_timestamps) >= len(cam0_files)
+                           else list(range(len(cam0_files))))
+                for ts_ns, img_file in zip(cam0_ts, cam0_files):
+                    stamp_msg = self._ns_to_time_msg(ts_ns)
+                    img_msg = self._make_image_msg(
+                        str(img_file), 'mono8', stamp_msg, frame_id='camera_gray_left_link')
+                    if img_msg:
+                        _write('/kitti/camera_gray_left/image_raw', img_msg, ts_ns)
+                    _write('/kitti/camera_gray_left/camera_info',
+                           self._make_camera_info_msg(calib_cam_to_cam, '00', stamp_msg), ts_ns)
+                    _tick('Converting gray left camera images...')
+
+            # ── 13.5. Camera 1 (gray right) ──────────────────────────
+            if has_cam1:
+                _progress(75, 'Converting gray right camera images...')
+                cam1_ts = (oxts_timestamps[:len(cam1_files)]
+                           if len(oxts_timestamps) >= len(cam1_files)
+                           else list(range(len(cam1_files))))
+                for ts_ns, img_file in zip(cam1_ts, cam1_files):
+                    stamp_msg = self._ns_to_time_msg(ts_ns)
+                    img_msg = self._make_image_msg(
+                        str(img_file), 'mono8', stamp_msg, frame_id='camera_gray_right_link')
+                    if img_msg:
+                        _write('/kitti/camera_gray_right/image_raw', img_msg, ts_ns)
+                    _write('/kitti/camera_gray_right/camera_info',
+                           self._make_camera_info_msg(calib_cam_to_cam, '01', stamp_msg), ts_ns)
+                    _tick('Converting gray right camera images...')
+
+            # ── 14. Camera 2 (color left) ────────────────────────────
+            if has_cam2:
+                _progress(85, 'Converting color left camera images...')
+                cam2_ts = (oxts_timestamps[:len(cam2_files)]
+                           if len(oxts_timestamps) >= len(cam2_files)
+                           else list(range(len(cam2_files))))
+                for ts_ns, img_file in zip(cam2_ts, cam2_files):
+                    stamp_msg = self._ns_to_time_msg(ts_ns)
+                    img_msg = self._make_image_msg(
+                        str(img_file), 'bgr8', stamp_msg, frame_id='camera_color_left_link')
+                    if img_msg:
+                        _write('/kitti/camera_color_left/image_raw', img_msg, ts_ns)
+                    _write('/kitti/camera_color_left/camera_info',
+                           self._make_camera_info_msg(calib_cam_to_cam, '02', stamp_msg), ts_ns)
+                    _tick('Converting color left camera images...')
+
+            # ── 14.5. Camera 3 (color right) ─────────────────────────
+            if has_cam3:
+                _progress(92, 'Converting color right camera images...')
+                cam3_ts = (oxts_timestamps[:len(cam3_files)]
+                           if len(oxts_timestamps) >= len(cam3_files)
+                           else list(range(len(cam3_files))))
+                for ts_ns, img_file in zip(cam3_ts, cam3_files):
+                    stamp_msg = self._ns_to_time_msg(ts_ns)
+                    img_msg = self._make_image_msg(
+                        str(img_file), 'bgr8', stamp_msg, frame_id='camera_color_right_link')
+                    if img_msg:
+                        _write('/kitti/camera_color_right/image_raw', img_msg, ts_ns)
+                    _write('/kitti/camera_color_right/camera_info',
+                           self._make_camera_info_msg(calib_cam_to_cam, '03', stamp_msg), ts_ns)
+                    _tick('Converting color right camera images...')
+
+        _progress(100, 'ROS1 bag conversion complete!')
 
     # ──────────────────────────────────────────────────────────────
     # Private helpers - calib 파일 파싱
@@ -660,13 +1038,15 @@ class KittiConverter:
     # Private helpers - 이미지
     # ──────────────────────────────────────────────────────────────
 
-    def _make_image_msg(self, img_file: str, encoding: str, stamp: Time):
+    def _make_image_msg(self, img_file: str, encoding: str, stamp: Time,
+                        frame_id: str = None):
         """PNG 파일에서 sensor_msgs/Image 메시지를 생성한다.
 
         Args:
             img_file: PNG 파일 경로
             encoding: 'mono8' (gray camera) 또는 'bgr8' (color camera)
             stamp:    타임스탬프
+            frame_id: 헤더 frame_id (None 이면 encoding 기반 기본값 사용)
         """
         try:
             if encoding == 'mono8':
@@ -678,7 +1058,8 @@ class KittiConverter:
         except Exception:
             return None
 
-        frame_id = 'camera_gray_left_link' if encoding == 'mono8' else 'camera_color_left_link'
+        if frame_id is None:
+            frame_id = 'camera_gray_left_link' if encoding == 'mono8' else 'camera_color_left_link'
 
         msg = Image()
         msg.header.stamp = stamp
@@ -689,6 +1070,84 @@ class KittiConverter:
         msg.is_bigendian = False
         msg.step = int(img.strides[0])
         msg.data = img.tobytes()
+        return msg
+
+    def _make_camera_info_msg(self, calib_cam_to_cam: dict, cam_id: str, stamp: Time):
+        """calib_cam_to_cam.txt 파싱 결과로 sensor_msgs/CameraInfo 메시지를 생성한다.
+
+        Args:
+            calib_cam_to_cam: _parse_calib_file()로 파싱한 calib_cam_to_cam.txt 딕셔너리
+            cam_id:           카메라 ID ('00', '01', '02', '03')
+            stamp:            타임스탬프
+
+        Returns:
+            CameraInfo 메시지 (데이터 부재 시 빈 메시지 반환)
+        """
+        _frame_id_map = {
+            '00': 'camera_gray_left_link',
+            '01': 'camera_gray_right_link',
+            '02': 'camera_color_left_link',
+            '03': 'camera_color_right_link',
+        }
+
+        msg = CameraInfo()
+        msg.header.stamp = stamp
+        msg.header.frame_id = _frame_id_map.get(cam_id, f'camera_{cam_id}_link')
+
+        # 이미지 크기: S_{cam_id} = [width, height]
+        s_key = f'S_{cam_id}'
+        if s_key in calib_cam_to_cam:
+            s = calib_cam_to_cam[s_key]
+            msg.width = int(s[0])
+            msg.height = int(s[1])
+
+        # 내부 파라미터 행렬 K (3×3, 9 values)
+        k_key = f'K_{cam_id}'
+        if k_key in calib_cam_to_cam:
+            msg.k = [float(v) for v in calib_cam_to_cam[k_key]]
+
+        # 왜곡 계수 D
+        d_key = f'D_{cam_id}'
+        if d_key in calib_cam_to_cam:
+            msg.d = [float(v) for v in calib_cam_to_cam[d_key]]
+            msg.distortion_model = 'plumb_bob'
+
+        # 정류화 행렬 R_rect (3×3, 9 values)
+        r_key = f'R_rect_{cam_id}'
+        if r_key in calib_cam_to_cam:
+            msg.r = [float(v) for v in calib_cam_to_cam[r_key]]
+
+        # 프로젝션 행렬 P_rect (3×4, 12 values)
+        p_key = f'P_rect_{cam_id}'
+        if p_key in calib_cam_to_cam:
+            msg.p = [float(v) for v in calib_cam_to_cam[p_key]]
+
+        return msg
+
+    def _make_twist_stamped_msg(self, oxts: list, stamp: Time):
+        """OXTS 데이터로 geometry_msgs/TwistStamped 메시지를 생성한다.
+
+        OXTS 인덱스:
+          [6]  vn  북쪽 속도 (m/s)
+          [7]  ve  동쪽 속도 (m/s)
+          [8]  vf  전방(차체) 속도 (m/s)
+
+        Args:
+            oxts:  _load_oxts_file()로 읽은 OXTS float 리스트
+            stamp: 타임스탬프
+
+        Returns:
+            TwistStamped 메시지
+        """
+        msg = TwistStamped()
+        msg.header.stamp = stamp
+        msg.header.frame_id = 'base_link'
+
+        if len(oxts) > 8:
+            msg.twist.linear.x = oxts[8]   # vf: 전방 속도 (차체 x축)
+            msg.twist.linear.y = oxts[6]   # vn: 북쪽 속도
+            msg.twist.linear.z = oxts[7]   # ve: 동쪽 속도
+
         return msg
 
     # ──────────────────────────────────────────────────────────────

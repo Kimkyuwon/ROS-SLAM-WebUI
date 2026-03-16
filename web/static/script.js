@@ -1061,6 +1061,10 @@ async function convertKitti() {
         return;
     }
 
+    const bagFormatSel = domCache.get('kitti-bag-format-select');
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+    kittiState.bagFormat = bagFormat;
+
     const btn   = domCache.get('kitti-convert-btn');
     const bar   = domCache.get('kitti-progress-bar');
     const fill  = domCache.get('kitti-progress-fill');
@@ -1069,7 +1073,7 @@ async function convertKitti() {
 
     kittiState.converting = true;
     btn.disabled = true;
-    btn.textContent = 'Saving…';
+    btn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…';
 
     if (bar)   { bar.style.display = 'block'; }
     if (fill)  { fill.style.width = '0%'; }
@@ -1081,6 +1085,7 @@ async function convertKitti() {
         calib_dir:  calibDir,
         data_path:  drive.data_path,
         drive_name: drive.name,
+        bag_format: bagFormat,
     });
 
     if (!result || !result.success) {
@@ -1200,10 +1205,13 @@ async function saveBag() {
         }
     }
 
+    const bagFormatSel = domCache.get('bag-format-select');
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+
     toProgressBar(0);
 
     // 저장 시작 (백그라운드 스레드 실행 — 즉시 응답)
-    const startResult = await apiCall('/api/player/save_bag', {});
+    const startResult = await apiCall('/api/player/save_bag', { bag_format: bagFormat });
     if (!startResult || !startResult.success) {
         restoreButton(false);
         alert('Failed to start bag save: ' + (startResult ? startResult.message : 'Unknown error'));

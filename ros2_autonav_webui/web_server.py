@@ -6,8 +6,10 @@ from rclpy.time import Time
 from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, TransformStamped
 from rosgraph_msgs.msg import Clock
+from tf2_msgs.msg import TFMessage
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from cv_bridge import CvBridge
 import cv2
 import struct
@@ -27,6 +29,7 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
 from urllib.parse import parse_qs, urlparse
 import subprocess
 import signal
+import math
 import yaml
 from pathlib import Path as PathLib
 import rosbag2_py
@@ -787,6 +790,10 @@ class PC2WebSocketServer:
         7: np.float32, 8: np.float64,
     } if NUMPY_AVAILABLE else {}
 
+    # Image WebSocket 스트리밍 설정
+    IMG_THROTTLE_SEC = 0.033   # ~30Hz
+    IMG_JPEG_QUALITY = 80      # JPEG 품질 (0~100)
+
     def __init__(self, ros_node, port: int = 8081):
         self._node = ros_node
         self._port = port
@@ -806,6 +813,15 @@ class PC2WebSocketServer:
         self._plot_subs: dict = {}
         # ── 전체 연결 클라이언트 (broadcast용) ─────────────────────────────────
         self._all_clients: set = set()
+        # ── Image 전용 (JPEG 바이너리 스트리밍) ────────────────────────────────
+        # topic_name → set[websocket]
+        self._img_clients: dict = {}
+        # topic_name → rclpy Subscription
+        self._img_subs: dict = {}
+        # topic_name → 마지막 전송 단조시각 (throttle)
+        self._img_last_sent: dict = {}
+        # CvBridge 인스턴스 (Image → OpenCV 변환)
+        self._cv_bridge = CvBridge()
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -840,9 +856,10 @@ class PC2WebSocketServer:
             self._node.get_logger().error(f'[PC2WS] server error: {e}')
 
     async def _handler(self, websocket):
-        """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot 명령 수신."""
-        my_pc2_topics: set  = set()   # PointCloud2 binary 구독
-        my_plot_topics: set = set()   # 범용 plot JSON 구독
+        """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot/subscribe_image 명령 수신."""
+        my_pc2_topics: set   = set()   # PointCloud2 binary 구독
+        my_plot_topics: set  = set()   # 범용 plot JSON 구독
+        my_img_topics: set   = set()   # Image JPEG binary 구독
         # 전체 클라이언트 집합에 등록 (broadcast용)
         with self._lock:
             self._all_clients.add(websocket)
@@ -877,6 +894,13 @@ class PC2WebSocketServer:
                         remaining = self._plot_clients.get(topic, {}).get(websocket)
                     if not remaining:
                         my_plot_topics.discard(topic)
+                elif cmd == 'subscribe_image':
+                    # sensor_msgs/Image → JPEG 바이너리 스트리밍
+                    self._add_image_client(topic, websocket)
+                    my_img_topics.add(topic)
+                elif cmd == 'unsubscribe_image':
+                    self._remove_image_client(topic, websocket)
+                    my_img_topics.discard(topic)
         except Exception:
             pass
         finally:
@@ -886,6 +910,8 @@ class PC2WebSocketServer:
                 self._remove_client(t, websocket)
             for t in list(my_plot_topics):
                 self._remove_plot_client(t, websocket, None)
+            for t in list(my_img_topics):
+                self._remove_image_client(t, websocket)
 
     # ── 클라이언트 / 구독 관리 ────────────────────────────────────────────────
 
@@ -916,6 +942,96 @@ class PC2WebSocketServer:
                 self._clients.pop(topic, None)
                 self._last_sent.pop(topic, None)
                 self._node.get_logger().info(f'[PC2WS] unsubscribed ← {topic}')
+
+    # ── Image 클라이언트 / 구독 관리 ─────────────────────────────────────────
+
+    def _add_image_client(self, topic: str, ws):
+        """sensor_msgs/Image 토픽을 JPEG 바이너리로 브라우저에 스트리밍하기 위한 클라이언트 등록."""
+        with self._lock:
+            if topic not in self._img_clients:
+                self._img_clients[topic] = set()
+            self._img_clients[topic].add(ws)
+            if topic not in self._img_subs:
+                sub = self._node.create_subscription(
+                    Image, topic,
+                    lambda m, t=topic: self._on_image(m, t),
+                    10)
+                self._img_subs[topic]      = sub
+                self._img_last_sent[topic] = 0.0
+                self._node.get_logger().info(f'[ImgWS] subscribed → {topic}')
+
+    def _remove_image_client(self, topic: str, ws):
+        with self._lock:
+            s = self._img_clients.get(topic)
+            if not s:
+                return
+            s.discard(ws)
+            if not s:
+                sub = self._img_subs.pop(topic, None)
+                if sub:
+                    self._node.destroy_subscription(sub)
+                self._img_clients.pop(topic, None)
+                self._img_last_sent.pop(topic, None)
+                self._node.get_logger().info(f'[ImgWS] unsubscribed ← {topic}')
+
+    # ── rclpy 콜백 (Image) ────────────────────────────────────────────────────
+
+    def _on_image(self, msg: Image, topic_name: str):
+        """Image 메시지 수신 → JPEG 압축 → binary 패킷 → asyncio 브로드캐스트.
+
+        Binary 패킷 포맷 (little-endian):
+          [3B]  magic = b'IMG'
+          [1B]  version = 1
+          [4B]  uint32  topic_name 바이트 길이
+          [4B]  uint32  jpeg_data 바이트 길이
+          [N B] topic_name (UTF-8)
+          [L B] JPEG data
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now - self._img_last_sent.get(topic_name, 0.0) < self.IMG_THROTTLE_SEC:
+                return
+            clients = self._img_clients.get(topic_name, set()).copy()
+        if not clients:
+            return
+
+        try:
+            # sensor_msgs/Image → OpenCV BGR 이미지 → JPEG 압축
+            encoding = msg.encoding.lower()
+            if encoding in ('rgb8', 'bgr8', 'mono8', 'rgba8', 'bgra8',
+                            '8uc1', '8uc3', '8uc4'):
+                cv_img = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            else:
+                # 지원되지 않는 encoding은 bgr8로 강제 변환 시도
+                try:
+                    cv_img = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                except Exception:
+                    return
+
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.IMG_JPEG_QUALITY]
+            ret, jpeg_buf = cv2.imencode('.jpg', cv_img, encode_param)
+            if not ret:
+                return
+            jpeg_bytes = jpeg_buf.tobytes()
+        except Exception as e:
+            self._node.get_logger().warn(f'[ImgWS] encode error ({topic_name}): {e}')
+            return
+
+        with self._lock:
+            self._img_last_sent[topic_name] = now
+
+        # 바이너리 패킷 조립: [IMG][version][topic_len][jpeg_len][topic_name][jpeg_data]
+        topic_bytes = topic_name.encode('utf-8')
+        header = struct.pack('<3sBII',
+                             b'IMG', 1,
+                             len(topic_bytes),
+                             len(jpeg_bytes))
+        payload = header + topic_bytes + jpeg_bytes
+
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast(clients, payload), loop)
 
     # ── rclpy 콜백 ───────────────────────────────────────────────────────────
 
@@ -1346,6 +1462,14 @@ class WebGUINode(Node):
         # KITTI 전용 publishers
         self.kitti_velo_pub = None
         self.kitti_cam_pub = None
+        self.kitti_tf_static_pub = None    # /tf_static publisher
+        self.kitti_tf_pub = None           # /tf publisher
+        # KITTI calib / oxts / TF 관련 상태
+        self.kitti_calib_dir = None        # calib 파일 디렉토리 경로
+        self.kitti_oxts_files = []         # oxts 파일 경로 목록 (sorted)
+        self.kitti_oxts_timestamps = []    # oxts 타임스탬프 (ns) 목록
+        self.kitti_origin_oxts = None      # Mercator 원점 OXTS 데이터
+        self.kitti_mercator_scale = None   # Mercator 투영 스케일
         # 초기화 플래그 (각 데이터셋 전용 publishers 이중 생성 방지)
         self._conpr_pubs_initialized = False
         self._kitti_pubs_initialized = False
@@ -1390,7 +1514,8 @@ class WebGUINode(Node):
         self.kitti_convert_thread = None       # 변환 백그라운드 스레드
 
         # ── ROS2 bag 모드 플래그 (player_play_toggle → bag_play_toggle 위임) ─
-        self.player_is_ros2_bag = False        # True 이면 File Player가 bag 모드
+        self.player_is_ros2_bag = False        # True 이면 File Player가 ROS2 bag 모드
+        self.player_is_ros1_bag = False        # True 이면 File Player가 ROS1 .bag 모드
 
         # ── KITTI direct play 모드 ──────────────────────────────────────────
         self.player_is_kitti = False           # True 이면 KITTI 파일 직접 재생
@@ -1538,8 +1663,74 @@ class WebGUINode(Node):
         self.kitti_cam_pub  = self.create_publisher(
             Image, '/kitti/camera_color_left/image_raw', 1000)
 
+        # /tf_static: transient_local QoS → 늦게 subscribe해도 최신 값 수신
+        tf_static_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.kitti_tf_static_pub = self.create_publisher(TFMessage, '/tf_static', tf_static_qos)
+        self.kitti_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
         self._kitti_pubs_initialized = True
         self.get_logger().info('KITTI File Player publishers initialized')
+
+    def _find_kitti_calib_dir(self, drive_path):
+        """드라이브 경로에서 calib 디렉토리를 탐색하여 반환한다.
+
+        KITTI 데이터셋 디렉토리 구조:
+          <base>/<date>/<date>_drive_<id>_sync/   ← drive_path
+          <base>/<date>/<date>_calib/              ← calib dir (sibling of drive)
+          또는
+          <base>/<date>_calib/                     ← calib dir (parent 레벨)
+
+        탐색 전략:
+          1. drive_path 부모 디렉토리에서 '*_calib' 패턴 항목 탐색 (형제 calib 우선)
+          2. drive_path 조부모 디렉토리에서 '*_calib' 패턴 항목 탐색
+
+        Args:
+            drive_path (str): KITTI 드라이브 데이터 디렉토리 경로
+
+        Returns:
+            str | None: calib 파일(.txt)이 실제로 존재하는 디렉토리 경로.
+                        찾지 못하면 None 반환.
+        """
+        drive_path = os.path.realpath(drive_path)
+        candidates = []
+
+        # 탐색 범위: 부모 → 조부모 순서로 '*_calib' 항목 수집
+        for search_dir in [os.path.dirname(drive_path),
+                           os.path.dirname(os.path.dirname(drive_path))]:
+            if not os.path.isdir(search_dir):
+                continue
+            try:
+                for entry in sorted(os.listdir(search_dir)):
+                    if entry.endswith('_calib') and os.path.isdir(os.path.join(search_dir, entry)):
+                        candidates.append(os.path.join(search_dir, entry))
+            except OSError:
+                pass
+
+        # 후보 calib 디렉토리에서 실제 calib .txt 파일 유무로 유효성 검사
+        for calib_base in candidates:
+            # KITTI raw 구조: <date>_calib/<date>/ 하위에 txt가 있을 수 있음
+            inner = None
+            try:
+                for sub in sorted(os.listdir(calib_base)):
+                    sub_path = os.path.join(calib_base, sub)
+                    if os.path.isdir(sub_path) and glob.glob(os.path.join(sub_path, '*.txt')):
+                        inner = sub_path
+                        break
+            except OSError:
+                pass
+
+            # 내부 날짜 서브디렉토리가 있으면 그 쪽을 우선, 없으면 base 자체 검사
+            for calib_dir in ([inner, calib_base] if inner else [calib_base]):
+                if calib_dir and glob.glob(os.path.join(calib_dir, 'calib_*.txt')):
+                    self.get_logger().info(f'KITTI calib dir found: {calib_dir}')
+                    return calib_dir
+
+        self.get_logger().warn(f'KITTI calib dir not found for drive path: {drive_path}')
+        return None
 
     def _init_slam_subscriber(self):
         """Lazy initialization of SLAM-related subscribers.
@@ -2212,6 +2403,59 @@ class WebGUINode(Node):
 
         # KITTI 전용 publisher만 초기화 (ConPR 토픽 오염 방지)
         self._init_kitti_ros_interfaces()
+
+        # ── calib 디렉토리 탐색 → Static TF 1회 publish ──────────────────────
+        # kitti_calib_dir / oxts 상태 초기화 (재로드 대비)
+        self.kitti_calib_dir = None
+        self.kitti_oxts_files = []
+        self.kitti_oxts_timestamps = []
+        self.kitti_origin_oxts = None
+        self.kitti_mercator_scale = None
+
+        calib_dir = self._find_kitti_calib_dir(path)
+        if calib_dir:
+            self.kitti_calib_dir = calib_dir
+            try:
+                calib_imu_to_velo = conv._parse_calib_file(
+                    os.path.join(calib_dir, 'calib_imu_to_velo.txt'))
+                calib_velo_to_cam = conv._parse_calib_file(
+                    os.path.join(calib_dir, 'calib_velo_to_cam.txt'))
+                static_tf_msg = conv._build_static_tf(calib_imu_to_velo, calib_velo_to_cam)
+                # transient_local QoS 덕분에 늦게 subscribe해도 수신됨
+                if self.kitti_tf_static_pub and static_tf_msg:
+                    self.kitti_tf_static_pub.publish(static_tf_msg)
+                    self.get_logger().info(f'KITTI static TF published from: {calib_dir}')
+            except Exception as e:
+                self.get_logger().warn(f'KITTI static TF publish failed: {e}')
+        else:
+            self.get_logger().warn(f'KITTI calib directory not found near: {path}')
+
+        # ── oxts 파일 목록 + 타임스탬프 파싱 + Mercator 원점 계산 ─────────────
+        oxts_dir = os.path.join(path, 'oxts')
+        oxts_ts_file = os.path.join(oxts_dir, 'timestamps.txt')
+        if os.path.isfile(oxts_ts_file):
+            try:
+                self.kitti_oxts_timestamps = conv._load_timestamps(oxts_ts_file)
+                oxts_data_dir = os.path.join(oxts_dir, 'data')
+                if os.path.isdir(oxts_data_dir):
+                    self.kitti_oxts_files = sorted(
+                        glob.glob(os.path.join(oxts_data_dir, '*.txt')))
+                    # Mercator 원점: 첫 번째 OXTS 데이터 기준
+                    if self.kitti_oxts_files:
+                        first_oxts = conv._load_oxts_file(self.kitti_oxts_files[0])
+                        if first_oxts:
+                            self.kitti_origin_oxts = first_oxts
+                            self.kitti_mercator_scale = math.cos(
+                                math.radians(first_oxts[0]))
+                            self.get_logger().info(
+                                f'KITTI oxts loaded: {len(self.kitti_oxts_files)} files, '
+                                f'origin lat={first_oxts[0]:.4f}'
+                            )
+            except Exception as e:
+                self.get_logger().warn(f'KITTI oxts parsing failed: {e}')
+        else:
+            self.get_logger().warn(f'KITTI oxts timestamps not found: {oxts_ts_file}')
+
         self.player_data_loaded = True
 
         self.get_logger().info(
@@ -2260,6 +2504,23 @@ class WebGUINode(Node):
                 except Exception as e:
                     self.get_logger().warn(f'KITTI image publish failed (frame {frame_idx}): {e}')
                 break
+
+        # ── Dynamic TF: world → base_link (oxts GPS/IMU 기반) ────────────────
+        if (self.kitti_tf_pub and self.kitti_oxts_files
+                and self.kitti_origin_oxts and self.kitti_mercator_scale):
+            if frame_idx < len(self.kitti_oxts_files):
+                try:
+                    conv = KittiConverter()
+                    oxts = conv._load_oxts_file(self.kitti_oxts_files[frame_idx])
+                    if oxts:
+                        tf_msg = conv._make_dynamic_tf(
+                            oxts, self.kitti_origin_oxts,
+                            self.kitti_mercator_scale, stamp_msg
+                        )
+                        self.kitti_tf_pub.publish(tf_msg)
+                except Exception as e:
+                    self.get_logger().debug(
+                        f'KITTI TF publish failed (frame {frame_idx}): {e}')
 
     def _is_ros2_bag_path(self, path: str) -> bool:
         """경로가 ROS2 bag (.db3 파일 또는 bag 디렉토리)인지 확인한다."""
@@ -2328,12 +2589,50 @@ class WebGUINode(Node):
         self.get_logger().info(f'Loaded ROS2 bag for player: {bag_dir}')
         return True
 
+    def _load_ros1_bag_player(self, path: str) -> bool:
+        """ROS1 .bag 파일 경로를 File Player 인프라로 로드한다.
+
+        변환 완료 후 _onKittiConvertDone 또는 수동 load 시 호출된다.
+        play 버튼이 눌리면 player_play_toggle() → start_ros1_playback()으로 위임.
+        """
+        # 기존 ConPR playback 스레드 정지
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        # 기존 ROS1 재생 중이면 중지
+        self.stop_ros1_playback()
+
+        self.bag_path = path
+        self.player_path = path
+        self.player_data_loaded = True
+        self.player_is_ros2_bag = False
+        self.player_is_ros1_bag = True
+        self.player_is_kitti = False
+        self.player_slider_pos = 0
+        self.player_timestamp = 0
+        self.livox_cache = {}
+        self.cam_cache = {}
+
+        self.get_logger().info(f'Loaded ROS1 bag for player: {path}')
+        return True
+
     def load_player_data(self, path):
         """Load file player data from the specified path"""
         # KITTI drive 디렉토리인 경우 직접 플레이어로 로드
         if self._is_kitti_drive_path(path):
             self.get_logger().info(f'Detected KITTI drive path: {path}')
             return self._load_kitti_direct(path)
+
+        # ROS1 .bag 파일인 경우 ROS1 bag player 인프라로 위임
+        if path.endswith('.bag') and os.path.isfile(path):
+            self.get_logger().info(f'Detected ROS1 .bag path: {path}')
+            return self._load_ros1_bag_player(path)
 
         # ROS2 bag 경로인 경우 기존 bag playback 인프라로 위임
         if self._is_ros2_bag_path(path):
@@ -2351,6 +2650,7 @@ class WebGUINode(Node):
         self.player_seek_requested = False
         self.player_seek_to_stamp  = 0
         self.player_is_ros2_bag = False   # ConPR 모드로 복귀
+        self.player_is_ros1_bag = False   # ROS1 모드 해제
         self.player_is_kitti = False      # KITTI 모드 해제
 
         if self.playback_active:
@@ -2499,10 +2799,16 @@ class WebGUINode(Node):
         calib_dir: str,
         data_path: str,
         drive_name: str,
+        bag_format: str = 'ros2',
     ) -> dict:
-        """KITTI 데이터를 ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
+        """KITTI 데이터를 ROS2 bag 또는 ROS1 .bag으로 변환하는 백그라운드 스레드를 시작한다.
 
         변환 진행률은 WebSocket(포트 8081)을 통해 전체 클라이언트에 push된다.
+
+        Args:
+            bag_format: 출력 bag 형식 - 'ros2' (기본) 또는 'ros1'
+                        'ros1'이면 KittiConverter.convert_to_ros1bag()로 직접 변환 (.bag).
+                        'ros2'이면 KittiConverter.convert_to_ros2bag()로 변환 (_bag 디렉토리).
 
         Returns:
             {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
@@ -2510,7 +2816,10 @@ class WebGUINode(Node):
         if self.kitti_converter_running:
             return {'success': False, 'error': 'Conversion already in progress'}
 
-        output_bag_path = os.path.join(base_dir, 'converted', drive_name)
+        if bag_format == 'ros1':
+            final_output_path = os.path.join(base_dir, f"{drive_name}.bag")
+        else:
+            final_output_path = os.path.join(base_dir, f"{drive_name}_bag")
 
         def _run():
             self.kitti_converter_running = True
@@ -2526,17 +2835,30 @@ class WebGUINode(Node):
                     })
 
                 self.get_logger().info(
-                    f'KITTI conversion started: {data_path} → {output_bag_path}')
-                converter.convert_to_ros2bag(
-                    calib_dir=calib_dir,
-                    data_path=data_path,
-                    output_bag_path=output_bag_path,
-                    progress_cb=_progress_cb,
-                )
-                self.get_logger().info(f'KITTI conversion complete: {output_bag_path}')
+                    f'KITTI conversion started: {data_path} → {final_output_path} '
+                    f'[format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    # ROS1: KITTI → ROS1 .bag 직접 변환 (중간 파일 없음)
+                    converter.convert_to_ros1bag(
+                        calib_dir=calib_dir,
+                        data_path=data_path,
+                        output_bag_path=final_output_path,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    # ROS2: KITTI → ROS2 bag 변환
+                    converter.convert_to_ros2bag(
+                        calib_dir=calib_dir,
+                        data_path=data_path,
+                        output_bag_path=final_output_path,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'KITTI conversion complete: {final_output_path}')
                 self.pc2_ws_server.broadcast_json_all({
                     'type': 'kitti_convert_done',
-                    'bag_path': output_bag_path,
+                    'bag_path': final_output_path,
                 })
             except Exception as e:
                 self.get_logger().error(f'KITTI conversion failed: {str(e)}')
@@ -2552,7 +2874,7 @@ class WebGUINode(Node):
         self.kitti_convert_thread = threading.Thread(
             target=_run, daemon=True, name='kitti-convert')
         self.kitti_convert_thread.start()
-        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': final_output_path}
 
     def load_livox_data(self, stamp):
         """Load LiDAR data from .bin file for given timestamp"""
@@ -2710,6 +3032,22 @@ class WebGUINode(Node):
         if getattr(self, 'player_is_ros2_bag', False):
             self.get_logger().info('ROS2 bag mode: delegating to bag_play_toggle()')
             return self.bag_play_toggle()
+
+        # ── ROS1 .bag 모드: start/stop_ros1_playback()으로 위임 ─────────────
+        if getattr(self, 'player_is_ros1_bag', False):
+            thread = self.ros1_player_thread
+            if thread is not None and thread.is_alive():
+                self.get_logger().info('ROS1 bag mode: stopping playback')
+                self.stop_ros1_playback()
+                return True
+            else:
+                self.get_logger().info(
+                    f'ROS1 bag mode: starting playback ({self.bag_path})')
+                return self.start_ros1_playback(
+                    self.bag_path,
+                    topics=None,
+                    rate=getattr(self, 'ros1_player_rate', 1.0),
+                )
 
         self.player_playing = not self.player_playing
         self.player_paused = False
@@ -3802,8 +4140,211 @@ class WebGUINode(Node):
             traceback.print_exc()
             return False
 
-    def start_save_rosbag(self):
-        """Start save_rosbag() in a background thread so HTTP server stays responsive."""
+    def save_rosbag_ros1(self):
+        """로드된 ConPR 데이터를 ROS1 .bag 형식으로 직접 저장한다.
+
+        rosbags.rosbag1.Writer + migrate_bytes()를 사용하여 ROS2 CDR 직렬화 후
+        즉시 ROS1 raw bytes로 변환하여 .bag에 기록한다.
+
+        livox_ros_driver2/CustomMsg·CustomPoint 타입은 rosbags 표준 타입스토어에
+        없으므로 msg 정의를 직접 등록한 후 migrate_bytes로 변환한다.
+        Header.seq 필드 추가 등 ROS1↔ROS2 구조 차이는 migrate_bytes가 자동 처리.
+
+        출력 경로: {player_path}/output.bag
+        """
+        if not self.player_data_loaded:
+            self.get_logger().error('No data loaded. Please load data first.')
+            return False
+
+        try:
+            from pathlib import Path as _Path
+            from rosbags.rosbag1 import Writer as Ros1Writer
+            from rosbags.typesys import get_typestore, Stores
+            from rosbags.convert.converter import migrate_bytes as _migrate_bytes
+        except ImportError as e:
+            self.get_logger().error(
+                f'rosbags 라이브러리가 필요합니다. pip install rosbags\n원인: {e}'
+            )
+            return False
+
+        try:
+            bag_path = _Path(self.player_path) / 'output.bag'
+            self.save_bag_progress = '0%'
+            self.get_logger().info(f'Starting ROS1 bag save to: {bag_path}')
+
+            src_store = get_typestore(Stores.ROS2_JAZZY)
+            dst_store = get_typestore(Stores.ROS1_NOETIC)
+            migrate_cache: dict = {}
+
+            def _cdr_to_ros1(conn, cdr_bytes: bytes) -> bytes:
+                return bytes(_migrate_bytes(
+                    src_store, dst_store,
+                    conn.msgtype, conn.msgtype,
+                    migrate_cache, cdr_bytes,
+                    src_is2=True, dst_is2=False,
+                ))
+
+            # ── Livox custom type 등록 (src + dst 양쪽 모두) ─────────────
+            livox_stamps = []
+            livox_type_ok = False
+            if LIVOX_AVAILABLE and len(self.livox_file_list) > 0:
+                try:
+                    from rosbags.typesys import get_types_from_msg as _get_types
+                    _POINT_DEF = (
+                        'uint32 offset_time\n'
+                        'float32 x\n'
+                        'float32 y\n'
+                        'float32 z\n'
+                        'uint8 reflectivity\n'
+                        'uint8 tag\n'
+                        'uint8 line\n'
+                    )
+                    _MSG_DEF = (
+                        'std_msgs/Header header\n'
+                        'uint64 timebase\n'
+                        'uint32 point_num\n'
+                        'uint8 lidar_id\n'
+                        'uint8[3] rsvd\n'
+                        'livox_ros_driver2/CustomPoint[] points\n'
+                    )
+                    for _store in (src_store, dst_store):
+                        _pt = _get_types(_POINT_DEF, 'livox_ros_driver2/msg/CustomPoint')
+                        _pt.pop('std_msgs/msg/Header', None)
+                        _ms = _get_types(_MSG_DEF, 'livox_ros_driver2/msg/CustomMsg')
+                        _ms.pop('std_msgs/msg/Header', None)
+                        if 'livox_ros_driver2/msg/CustomPoint' not in _store.fielddefs:
+                            _store.register(_pt)
+                        if 'livox_ros_driver2/msg/CustomMsg' not in _store.fielddefs:
+                            _store.register(_ms)
+                    livox_stamps = [s for s, dtype in self.data_stamp.items()
+                                    if dtype == 'livox']
+                    livox_type_ok = True
+                    self.get_logger().info(
+                        f'Livox custom type registered — {len(livox_stamps)} frames')
+                except Exception as _le:
+                    self.get_logger().warn(
+                        f'Livox type registration failed, will skip: {_le}')
+
+            # 데이터 크기 계산 (진행률용)
+            cam_stamps = []
+            if len(self.cam_file_list) > 0:
+                cam_stamps = [s for s, dtype in self.data_stamp.items() if dtype == 'cam']
+            total_items = (len(self.pose_data) + len(self.imu_data)
+                           + len(cam_stamps) + len(livox_stamps))
+            processed_items = 0
+            last_pct = -1
+
+            def update_progress():
+                nonlocal processed_items, last_pct
+                processed_items += 1
+                if total_items > 0:
+                    pct = int(processed_items / total_items * 100)
+                    if pct != last_pct:
+                        self.save_bag_progress = f'{pct}%'
+                        last_pct = pct
+                        time.sleep(0)
+
+            # 기존 output.bag 삭제
+            if bag_path.exists():
+                bag_path.unlink()
+
+            with Ros1Writer(bag_path) as writer:
+                # 커넥션 등록
+                pose_conn = writer.add_connection(
+                    '/pose/position', 'geometry_msgs/msg/PointStamped', typestore=dst_store)
+                imu_conn = writer.add_connection(
+                    '/imu', 'sensor_msgs/msg/Imu', typestore=dst_store)
+                img_conn = None
+                caminfo_conn = None
+                if cam_stamps:
+                    img_conn = writer.add_connection(
+                        '/camera/color/image', 'sensor_msgs/msg/Image', typestore=dst_store)
+                    caminfo_conn = writer.add_connection(
+                        '/camera/color/camera_info', 'sensor_msgs/msg/CameraInfo',
+                        typestore=dst_store)
+                livox_conn = None
+                if livox_type_ok and livox_stamps:
+                    livox_conn = writer.add_connection(
+                        '/livox/lidar', 'livox_ros_driver2/msg/CustomMsg',
+                        typestore=dst_store)
+
+                def _write(conn, ros2_msg, ts_ns: int):
+                    try:
+                        cdr = bytes(serialize_message(ros2_msg))
+                        raw = _cdr_to_ros1(conn, cdr)
+                        writer.write(conn, ts_ns, raw)
+                    except Exception as _e:
+                        self.get_logger().warn(f'ROS1 write skipped: {_e}')
+
+                # Write pose data
+                self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
+                for stamp, (x, y, z) in sorted(self.pose_data.items()):
+                    msg = PointStamped()
+                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.frame_id = 'imu_link'
+                    msg.point.x = x
+                    msg.point.y = y
+                    msg.point.z = z
+                    _write(pose_conn, msg, stamp)
+                    update_progress()
+
+                # Write IMU data
+                self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
+                for stamp, imu_values in sorted(self.imu_data.items()):
+                    msg = Imu()
+                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.frame_id = 'imu_link'
+                    msg.orientation.x = imu_values[0]
+                    msg.orientation.y = imu_values[1]
+                    msg.orientation.z = imu_values[2]
+                    msg.orientation.w = imu_values[3]
+                    msg.angular_velocity.x = imu_values[4]
+                    msg.angular_velocity.y = imu_values[5]
+                    msg.angular_velocity.z = imu_values[6]
+                    msg.linear_acceleration.x = imu_values[7]
+                    msg.linear_acceleration.y = imu_values[8]
+                    msg.linear_acceleration.z = imu_values[9]
+                    _write(imu_conn, msg, stamp)
+                    update_progress()
+
+                # Write Livox data
+                if livox_conn and livox_stamps:
+                    self.get_logger().info(f'Writing {len(livox_stamps)} Livox messages...')
+                    for stamp in sorted(livox_stamps):
+                        livox_msg = self.load_livox_data(stamp)
+                        if livox_msg:
+                            _write(livox_conn, livox_msg, stamp)
+                        update_progress()
+
+                # Write Camera data
+                if cam_stamps and img_conn and caminfo_conn:
+                    self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
+                    for stamp in sorted(cam_stamps):
+                        cam_data = self.load_camera_data(stamp)
+                        if cam_data:
+                            img_msg, cam_info_msg = cam_data
+                            _write(img_conn, img_msg, stamp)
+                            _write(caminfo_conn, cam_info_msg, stamp)
+                        update_progress()
+
+            self.save_bag_progress = None
+            self.get_logger().info(f'ROS1 bag save complete: {bag_path}')
+            return True
+
+        except Exception as e:
+            self.save_bag_progress = None
+            self.get_logger().error(f'Failed to save ROS1 bag: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def start_save_rosbag(self, bag_format: str = 'ros2'):
+        """save_rosbag() 또는 save_rosbag_ros1()을 백그라운드 스레드에서 실행한다.
+
+        Args:
+            bag_format: 'ros2' (기본) — ROS2 bag (output/ 디렉토리)
+                        'ros1'        — ROS1 .bag 파일 (output.bag)
+        """
         if self.save_bag_saving:
             self.get_logger().warn('Bag save already in progress')
             return False
@@ -3812,7 +4353,10 @@ class WebGUINode(Node):
             self.save_bag_saving = True
             self.save_bag_success = False
             try:
-                self.save_bag_success = self.save_rosbag()
+                if bag_format == 'ros1':
+                    self.save_bag_success = self.save_rosbag_ros1()
+                else:
+                    self.save_bag_success = self.save_rosbag()
             finally:
                 self.save_bag_saving = False
                 self.save_bag_progress = None
@@ -4330,16 +4874,20 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 response = self.node.scan_kitti_directory(path)
 
         elif parsed_path.path == '/api/player/convert_kitti':
-            # KITTI → ROS2 bag 변환
-            # body: { "base_dir": "...", "calib_dir": "...", "data_path": "...", "drive_name": "..." }
+            # KITTI → ROS2 bag 또는 ROS1 .bag 변환
+            # body: { "base_dir": "...", "calib_dir": "...", "data_path": "...",
+            #         "drive_name": "...", "bag_format": "ros2"|"ros1" }
             base_dir   = data.get('base_dir', '')
             calib_dir  = data.get('calib_dir', '')
             data_path  = data.get('data_path', '')
             drive_name = data.get('drive_name', '')
+            bag_format = data.get('bag_format', 'ros2')
             if not all([base_dir, calib_dir, data_path, drive_name]):
                 response = {'success': False, 'error': 'Missing required fields: base_dir, calib_dir, data_path, drive_name'}
             else:
-                response = self.node.start_kitti_conversion(base_dir, calib_dir, data_path, drive_name)
+                response = self.node.start_kitti_conversion(
+                    base_dir, calib_dir, data_path, drive_name, bag_format
+                )
 
         elif parsed_path.path == '/api/player/load_data':
             path = data.get('path', '')
@@ -4352,7 +4900,9 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             success = self.node.player_pause_toggle()
             response = {'success': success, 'paused': self.node.player_paused}
         elif parsed_path.path == '/api/player/save_bag':
-            started = self.node.start_save_rosbag()
+            # body: { "bag_format": "ros2" | "ros1" }  (기본값 "ros2")
+            bag_fmt = data.get('bag_format', 'ros2')
+            started = self.node.start_save_rosbag(bag_format=bag_fmt)
             response = {'success': started, 'message': 'Save started' if started else 'Save already in progress'}
         elif parsed_path.path == '/api/player/set_loop':
             self.node.player_loop = data.get('loop', False)
