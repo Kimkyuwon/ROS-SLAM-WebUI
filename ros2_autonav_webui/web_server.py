@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
+from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, TransformStamped
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
@@ -98,6 +98,9 @@ class Ros1BagPlayerThread(threading.Thread):
 
         # 제어 플래그
         self._stop_flag = False
+        self._loop = False
+        self._seek_requested = False
+        self._seek_to_sec = 0.0
         self._play_event = threading.Event()
         self._play_event.set()  # 기본적으로 재생 상태
 
@@ -140,6 +143,24 @@ class Ros1BagPlayerThread(threading.Thread):
         """
         with self._lock:
             self._playback_rate = max(new_rate, 0.01)
+
+    def set_loop(self, loop: bool):
+        """루프 재생 여부 설정.
+
+        Args:
+            loop (bool): True이면 재생 완료 후 처음부터 반복.
+        """
+        self._loop = loop
+
+    def set_seek(self, time_sec: float):
+        """재생 위치 이동 (seek). 재생 중/일시정지 중 호출 가능.
+
+        Args:
+            time_sec (float): 이동할 시간(초). 0 이상 total_sec 이하.
+        """
+        self._seek_to_sec = max(0.0, float(time_sec))
+        self._seek_requested = True
+        self._play_event.set()  # 일시정지 중이면 block 해제
 
     def get_status(self):
         """현재 상태 딕셔너리 반환"""
@@ -285,61 +306,96 @@ class Ros1BagPlayerThread(threading.Thread):
                         self._status = 'stopped'
                     return
 
-                prev_ros_time = None   # 직전 메시지의 ROS timestamp (nanoseconds)
-                start_ns = reader.start_time
+                # 루프 재생 지원: _loop 플래그가 True이면 완료 후 처음부터 재시작
+                # seek 지원: messages(start=...)로 특정 시점부터 재생
+                start_param = None  # None = 처음부터, int(ns) = 해당 시점부터
+                while True:
+                    prev_ros_time = None
+                    start_ns = reader.start_time
 
-                # 메시지 순차 순회
-                for conn, timestamp, rawdata in reader.messages():
-                    if self._stop_flag:
-                        break
-
-                    # 일시정지 대기 (blocking)
-                    self._play_event.wait()
-                    if self._stop_flag:
-                        break
-
-                    topic_name = conn.topic
-                    ros1_type_str = conn.msgtype
-
-                    # 선택되지 않은 토픽 스킵
-                    if topic_name not in publishable_topics:
-                        continue
-
-                    # elapsed 업데이트
-                    elapsed_ns = timestamp - start_ns
                     with self._lock:
-                        self._elapsed_sec = elapsed_ns / 1e9
+                        if start_param is not None:
+                            self._elapsed_sec = (start_param - start_ns) / 1e9
+                        else:
+                            self._elapsed_sec = 0.0
 
-                    # 메시지 간 시간차 기반 sleep (속도 제어)
-                    if prev_ros_time is not None:
-                        dt_ns = timestamp - prev_ros_time
-                        if dt_ns > 0:
-                            sleep_sec = (dt_ns / 1e9) / self._playback_rate
-                            # 최대 2초 sleep 제한 (긴 공백 방지)
-                            time.sleep(min(sleep_sec, 2.0))
-                    prev_ros_time = timestamp
+                    # 메시지 순차 순회 (seek 시에만 start 파라미터 사용, 기본은 원본과 동일)
+                    seek_break = False
+                    msg_iter = (reader.messages(connections=(), start=start_param, stop=None)
+                                if start_param is not None else reader.messages())
+                    for conn, timestamp, rawdata in msg_iter:
+                        if self._stop_flag:
+                            break
 
-                    # 역직렬화 + publish
-                    try:
-                        msg_cls = self._resolve_ros2_type(ros1_type_str)
-                        if msg_cls is None:
+                        # seek 요청 처리: 현재 for 루프 탈출 후 start_param으로 재시작
+                        if self._seek_requested:
+                            start_param = int(start_ns + self._seek_to_sec * 1e9)
+                            start_param = max(reader.start_time, min(start_param, reader.end_time))
+                            with self._lock:
+                                self._elapsed_sec = self._seek_to_sec
+                            self._seek_requested = False
+                            seek_break = True
+                            break
+
+                        # 일시정지 대기 (blocking)
+                        self._play_event.wait()
+                        if self._stop_flag:
+                            break
+
+                        topic_name = conn.topic
+                        ros1_type_str = conn.msgtype
+
+                        # 선택되지 않은 토픽 스킵
+                        if topic_name not in publishable_topics:
                             continue
 
-                        # rosbags 최신 API: typestore.deserialize_ros1()
-                        ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
-                        # ROS2 메시지로 변환
-                        ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
-                        if ros2_msg is None:
-                            continue
+                        # elapsed 업데이트
+                        elapsed_ns = timestamp - start_ns
+                        with self._lock:
+                            self._elapsed_sec = elapsed_ns / 1e9
 
-                        pub = self._publishers.get(topic_name)
-                        if pub is not None:
-                            pub.publish(ros2_msg)
+                        # 메시지 간 시간차 기반 sleep (속도 제어)
+                        if prev_ros_time is not None:
+                            dt_ns = timestamp - prev_ros_time
+                            if dt_ns > 0:
+                                sleep_sec = (dt_ns / 1e9) / self._playback_rate
+                                # 최대 2초 sleep 제한 (긴 공백 방지)
+                                time.sleep(min(sleep_sec, 2.0))
+                        prev_ros_time = timestamp
 
-                    except Exception as e:
-                        self._ros_node.get_logger().debug(
-                            f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
-                        )
+                        # 역직렬화 + publish
+                        try:
+                            msg_cls = self._resolve_ros2_type(ros1_type_str)
+                            if msg_cls is None:
+                                continue
+
+                            # rosbags 최신 API: typestore.deserialize_ros1()
+                            ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
+                            # ROS2 메시지로 변환
+                            ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
+                            if ros2_msg is None:
+                                continue
+
+                            pub = self._publishers.get(topic_name)
+                            if pub is not None:
+                                pub.publish(ros2_msg)
+
+                        except Exception as e:
+                            self._ros_node.get_logger().debug(
+                                f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
+                            )
+
+                    # seek로 탈출한 경우: start_param으로 for 루프 재시작
+                    if seek_break:
+                        continue
+                    # for 루프 완료 (정상 종료 또는 stop_flag)
+                    if self._stop_flag or not self._loop:
+                        break
+                    # 루프 재생: 타임라인 즉시 0으로 리셋 후 재시작
+                    start_param = None
+                    with self._lock:
+                        self._elapsed_sec = 0.0
+                    self._ros_node.get_logger().info('[Ros1BagPlayer] Looping playback.')
 
         except Exception as e:
             self._ros_node.get_logger().error(
@@ -806,6 +862,10 @@ class PC2WebSocketServer:
         self._subs: dict = {}
         # topic_name → 마지막 전송 단조시각 (throttle)
         self._last_sent: dict = {}
+        # ── Livox CustomMsg (PC2와 동일한 binary 포맷으로 스트리밍) ─────────────
+        self._livox_clients: dict = {}
+        self._livox_subs: dict = {}
+        self._livox_last_sent: dict = {}
         # ── 범용 Plot 토픽 (throttle 없이 원래 주기로 전송) ────────────────────
         # topic_name → { ws: set[field_path, ...] }
         self._plot_clients: dict = {}
@@ -915,22 +975,61 @@ class PC2WebSocketServer:
 
     # ── 클라이언트 / 구독 관리 ────────────────────────────────────────────────
 
+    def _get_topic_type(self, topic: str) -> str | None:
+        """토픽 타입 조회 (PointCloud2 또는 CustomMsg 등)."""
+        try:
+            for name, types in self._node.get_topic_names_and_types():
+                if name == topic and types:
+                    return types[0]
+        except Exception:
+            pass
+        return None
+
     def _add_client(self, topic: str, ws):
         with self._lock:
-            if topic not in self._clients:
-                self._clients[topic] = set()
-            self._clients[topic].add(ws)
-            if topic not in self._subs:
-                sub = self._node.create_subscription(
-                    PointCloud2, topic,
-                    lambda m, t=topic: self._on_pc2(m, t),
-                    10)
-                self._subs[topic]      = sub
-                self._last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
+            topic_type = self._get_topic_type(topic)
+            is_livox = (topic_type == 'livox_ros_driver2/msg/CustomMsg' and LIVOX_AVAILABLE)
+
+            if is_livox:
+                if topic not in self._livox_clients:
+                    self._livox_clients[topic] = set()
+                self._livox_clients[topic].add(ws)
+                if topic not in self._livox_subs:
+                    sub = self._node.create_subscription(
+                        CustomMsg, topic,
+                        lambda m, t=topic: self._on_livox(m, t),
+                        10)
+                    self._livox_subs[topic] = sub
+                    self._livox_last_sent[topic] = 0.0
+                    self._node.get_logger().info(f'[PC2WS] subscribed (Livox) → {topic}')
+            else:
+                if topic not in self._clients:
+                    self._clients[topic] = set()
+                self._clients[topic].add(ws)
+                if topic not in self._subs:
+                    sub = self._node.create_subscription(
+                        PointCloud2, topic,
+                        lambda m, t=topic: self._on_pc2(m, t),
+                        10)
+                    self._subs[topic] = sub
+                    self._last_sent[topic] = 0.0
+                    self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
 
     def _remove_client(self, topic: str, ws):
         with self._lock:
+            # Livox 클라이언트 확인
+            s_livox = self._livox_clients.get(topic)
+            if s_livox:
+                s_livox.discard(ws)
+                if not s_livox:
+                    sub = self._livox_subs.pop(topic, None)
+                    if sub:
+                        self._node.destroy_subscription(sub)
+                    self._livox_clients.pop(topic, None)
+                    self._livox_last_sent.pop(topic, None)
+                    self._node.get_logger().info(f'[PC2WS] unsubscribed (Livox) ← {topic}')
+                return
+            # PointCloud2 클라이언트
             s = self._clients.get(topic)
             if not s:
                 return
@@ -1388,6 +1487,83 @@ class PC2WebSocketServer:
             self._node.get_logger().error(f'[PC2WS] _build_payload error: {e}')
             return None
 
+    # ── Livox CustomMsg → PC2 호환 binary ──────────────────────────────────────
+
+    def _build_livox_payload(self, msg, topic_name: str):
+        """Livox CustomMsg를 PC2와 동일한 binary 포맷으로 변환."""
+        if not LIVOX_AVAILABLE:
+            return None
+        try:
+            frame_id = msg.header.frame_id if msg.header else 'livox'
+            points = msg.points or []
+            n_total = min(len(points), self.MAX_POINTS)
+            if n_total == 0:
+                return None
+
+            x = np.array([p.x for p in points[:n_total]], dtype=np.float32)
+            y = np.array([p.y for p in points[:n_total]], dtype=np.float32)
+            z = np.array([p.z for p in points[:n_total]], dtype=np.float32)
+            reflectivity = np.array(
+                [getattr(p, 'reflectivity', 0.0) for p in points[:n_total]],
+                dtype=np.float32)
+
+            valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            x, y, z = x[valid], y[valid], z[valid]
+            reflectivity = reflectivity[valid]
+            n_out = len(x)
+            if n_out == 0:
+                return None
+
+            xyz = np.column_stack([x, y, z]).astype(np.float32)
+            flags = 0x01  # has_intensity (reflectivity)
+            topic_b = topic_name.encode('utf-8')
+            frame_b = frame_id.encode('utf-8')
+            header = struct.pack(
+                '<3sBBIII',
+                b'PC2', 1, flags,
+                len(topic_b), len(frame_b), n_out)
+            return b''.join([
+                header, topic_b, frame_b,
+                xyz.tobytes(), reflectivity.astype(np.float32).tobytes()])
+        except Exception as e:
+            self._node.get_logger().error(f'[PC2WS] _build_livox_payload error: {e}')
+            return None
+
+    def _on_livox(self, msg, topic_name: str):
+        """Livox CustomMsg 수신 → PC2 호환 binary + JSON 메타데이터 → 브로드캐스트."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._livox_last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+                return
+            clients = self._livox_clients.get(topic_name, set()).copy()
+        if not clients:
+            return
+
+        stamp = msg.header.stamp if msg.header else None
+        frame_id = msg.header.frame_id if msg.header else ''
+        point_count = len(msg.points) if msg.points else 0
+
+        meta_json = json.dumps({
+            'type': 'pc2meta',
+            'topic': topic_name,
+            'stamp_sec': stamp.sec if stamp else 0,
+            'stamp_nanosec': stamp.nanosec if stamp else 0,
+            'frame_id': frame_id,
+            'point_count': point_count,
+        }, separators=(',', ':'))
+
+        payload = self._build_livox_payload(msg, topic_name)
+        if payload is None:
+            return
+
+        with self._lock:
+            self._livox_last_sent[topic_name] = now
+
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_both(clients, meta_json, payload), loop)
+
 
 class WebGUINode(Node):
     def __init__(self):
@@ -1409,6 +1585,7 @@ class WebGUINode(Node):
         self.bag_paused = False
         self.bag_process = None
         self.bag_playback_rate = 1.0  # 현재 설정된 재생 속도 배율
+        self.bag_player_loop = False  # 루프 재생 여부
 
         # Bag Recorder state
         self.recorder_bag_name = ""
@@ -1440,6 +1617,7 @@ class WebGUINode(Node):
         self.player_processed_stamp = 0
         self.player_prev_time = 0
         self.save_bag_progress = None   # None: idle, "0%"~"100%": saving in progress
+        self.save_bag_message = None    # KITTI처럼 단계별 메시지 (예: "Converting pose messages...")
         self.save_bag_saving = False    # True while background save thread is running
         self.save_bag_success = False   # Result of last save operation
 
@@ -1647,6 +1825,34 @@ class WebGUINode(Node):
 
         self._conpr_pubs_initialized = True
         self.get_logger().info('ConPR File Player publishers initialized')
+
+    def _destroy_conpr_publishers(self):
+        """ConPR publishers 정리. ROS1 bag 재생 시 /livox/lidar 등 토픽 충돌 방지.
+
+        변환된 ROS1 bag은 /livox/lidar를 PointCloud2로 저장하므로,
+        기존 livox_pub(CustomMsg)가 있으면 create_publisher 충돌 발생.
+        """
+        if not self._conpr_pubs_initialized:
+            return
+        for name, pub in [
+                ('pose_pub', self.pose_pub),
+                ('imu_pub', self.imu_pub),
+                ('cam_pub', self.cam_pub),
+                ('cam_info_pub', self.cam_info_pub),
+                ('livox_pub', self.livox_pub),
+        ]:
+            if pub is not None:
+                try:
+                    self.destroy_publisher(pub)
+                except Exception as e:
+                    self.get_logger().warn(f'[ConPR] destroy {name}: {e}')
+        self.pose_pub = None
+        self.imu_pub = None
+        self.cam_pub = None
+        self.cam_info_pub = None
+        self.livox_pub = None
+        self._conpr_pubs_initialized = False
+        self.get_logger().info('ConPR publishers destroyed (for bag playback)')
 
     def _init_kitti_ros_interfaces(self):
         """KITTI 전용 publisher 초기화 (lazy).
@@ -2595,6 +2801,9 @@ class WebGUINode(Node):
         변환 완료 후 _onKittiConvertDone 또는 수동 load 시 호출된다.
         play 버튼이 눌리면 player_play_toggle() → start_ros1_playback()으로 위임.
         """
+        # ConPR publishers 정리 (변환된 bag은 /livox/lidar를 PointCloud2로 저장 → 충돌 방지)
+        self._destroy_conpr_publishers()
+
         # 기존 ConPR playback 스레드 정지
         self.player_playing = False
         self.player_paused = False
@@ -2652,6 +2861,9 @@ class WebGUINode(Node):
         self.player_is_ros2_bag = False   # ConPR 모드로 복귀
         self.player_is_ros1_bag = False   # ROS1 모드 해제
         self.player_is_kitti = False      # KITTI 모드 해제
+
+        # ROS1 bag 재생 중이면 중지 (PointCloud2 publisher 정리 → ConPR CustomMsg 생성 가능)
+        self.stop_ros1_playback()
 
         if self.playback_active:
             self.playback_active = False
@@ -3017,10 +3229,14 @@ class WebGUINode(Node):
             # bag_playback_rate 배속을 반영하여 bag 시간 업데이트
             self.bag_current_time = self.bag_start_offset + elapsed_time * self.bag_playback_rate
 
-            # Stop when reaching end
+            # 끝 도달 시: loop 모드면 0으로 리셋, 아니면 duration에 고정
             if self.bag_current_time >= self.bag_duration:
-                self.bag_current_time = self.bag_duration
-                # Note: We don't auto-stop here, let ros2 bag play finish naturally
+                if self.bag_player_loop:
+                    self.bag_start_real_time = current_real_time
+                    self.bag_start_offset = 0.0
+                    self.bag_current_time = 0.0
+                else:
+                    self.bag_current_time = self.bag_duration
 
     def player_play_toggle(self):
         """Toggle play/stop"""
@@ -3264,6 +3480,8 @@ class WebGUINode(Node):
         """ROS1 bag 재생 시작.
 
         기존 스레드가 있으면 중지한 후 새 스레드를 시작합니다.
+        ConPR livox_pub(CustomMsg)가 /livox/lidar에 있으면 PointCloud2 publisher 생성 실패하므로
+        재생 직전에 반드시 정리합니다.
 
         Args:
             bag_path (str): ROS1 .bag 파일 경로
@@ -3273,11 +3491,23 @@ class WebGUINode(Node):
         Returns:
             bool: True if successfully started
         """
-        # 기존 스레드 정리
+        # ConPR CustomMsg publisher 정리 (같은 /livox/lidar 토픽 충돌 방지)
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+        self._destroy_conpr_publishers()
+
+        # 기존 ROS1 스레드 정리
         self.stop_ros1_playback()
 
         self.ros1_player_rate = rate
         self.ros1_player_thread = Ros1BagPlayerThread(bag_path, topics, rate, self)
+        self.ros1_player_thread.set_loop(self.bag_player_loop)
         self.ros1_player_thread.start()
         self.get_logger().info(
             f'[ROS1 Player] Started: {bag_path}, topics={topics or "ALL"}, rate={rate}x'
@@ -3507,6 +3737,11 @@ class WebGUINode(Node):
                     cmd.extend(['--rate', str(rate)])
                 self.get_logger().info(f'Playback rate: {rate}x')
 
+                # Add loop flag if enabled
+                if self.bag_player_loop:
+                    cmd.append('--loop')
+                    self.get_logger().info('Loop playback enabled')
+
                 # Add topic filter if topics are selected
                 if selected_topics and len(selected_topics) > 0:
                     self.bag_selected_topics = selected_topics
@@ -3572,21 +3807,26 @@ class WebGUINode(Node):
             return False
 
     def set_bag_position(self, position_ratio):
-        """Set bag playback position (0.0 to 1.0)"""
+        """Set bag playback position (0.0 to 1.0). ROS1/ROS2 bag 모두 지원."""
         if self.bag_duration <= 0:
             return False
 
         target_time = position_ratio * self.bag_duration
 
-        # If playing, restart from new position
+        # ROS1 bag 재생 중: Ros1BagPlayerThread.set_seek() 호출
+        thread = self.ros1_player_thread
+        if thread is not None and thread.is_alive():
+            thread.set_seek(target_time)
+            self.bag_current_time = target_time
+            self.get_logger().info(f'[ROS1] Set bag position to {target_time}s ({position_ratio*100}%)')
+            return True
+
+        # ROS2 bag: 기존 로직
         if self.bag_playing:
-            # Stop current playback
             self.bag_play_toggle()
             time.sleep(0.1)
-            # Restart from new position (현재 속도 유지)
             self.bag_play_toggle(self.bag_selected_topics, target_time, self.bag_playback_rate)
         else:
-            # Just update the position
             self.bag_current_time = target_time
             self.bag_start_offset = target_time
 
@@ -3701,7 +3941,8 @@ class WebGUINode(Node):
             'topics': self.bag_topics,
             'selected_topics': self.bag_selected_topics,
             'duration': self.bag_duration,
-            'current_time': self.bag_current_time
+            'current_time': self.bag_current_time,
+            'loop': self.bag_player_loop,
         }
 
     def playback_worker(self):
@@ -3962,8 +4203,11 @@ class WebGUINode(Node):
             return False
 
         try:
-            bag_path = os.path.join(self.player_path, "output")
+            # KITTI와 동일한 정책: {base_dir}/{name}_bag
+            bag_name = os.path.basename(os.path.normpath(self.player_path)) or 'output'
+            bag_path = os.path.join(self.player_path, f"{bag_name}_bag")
             self.save_bag_progress = "0%"
+            self.save_bag_message = "Starting conversion..."
             self.get_logger().info(f'Starting rosbag conversion to: {bag_path}')
 
             # Create writer
@@ -4056,6 +4300,7 @@ class WebGUINode(Node):
                         time.sleep(0)  # GIL 반납 → HTTP 스레드가 폴링 요청 처리 가능
 
             # Write pose data
+            self.save_bag_message = "Converting pose messages..."
             self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
             for stamp, (x, y, z) in sorted(self.pose_data.items()):
                 msg = PointStamped()
@@ -4073,6 +4318,7 @@ class WebGUINode(Node):
                 update_progress()
 
             # Write IMU data
+            self.save_bag_message = "Converting IMU messages..."
             self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
             for stamp, imu_values in sorted(self.imu_data.items()):
                 msg = Imu()
@@ -4098,6 +4344,7 @@ class WebGUINode(Node):
 
             # Write LiDAR data
             if LIVOX_AVAILABLE and len(livox_stamps) > 0:
+                self.save_bag_message = "Converting LiDAR messages..."
                 self.get_logger().info(f'Writing {len(livox_stamps)} LiDAR messages...')
                 for stamp in sorted(livox_stamps):
                     livox_msg = self.load_livox_data(stamp)
@@ -4111,6 +4358,7 @@ class WebGUINode(Node):
 
             # Write Camera data
             if len(cam_stamps) > 0:
+                self.save_bag_message = "Converting camera messages..."
                 self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
                 for stamp in sorted(cam_stamps):
                     cam_data = self.load_camera_data(stamp)
@@ -4130,11 +4378,13 @@ class WebGUINode(Node):
 
             del writer
             self.save_bag_progress = None
+            self.save_bag_message = None
             self.get_logger().info('Rosbag conversion complete!')
             return True
 
         except Exception as e:
             self.save_bag_progress = None
+            self.save_bag_message = None
             self.get_logger().error(f'Failed to save rosbag: {str(e)}')
             import traceback
             traceback.print_exc()
@@ -4146,9 +4396,9 @@ class WebGUINode(Node):
         rosbags.rosbag1.Writer + migrate_bytes()를 사용하여 ROS2 CDR 직렬화 후
         즉시 ROS1 raw bytes로 변환하여 .bag에 기록한다.
 
-        livox_ros_driver2/CustomMsg·CustomPoint 타입은 rosbags 표준 타입스토어에
-        없으므로 msg 정의를 직접 등록한 후 migrate_bytes로 변환한다.
-        Header.seq 필드 추가 등 ROS1↔ROS2 구조 차이는 migrate_bytes가 자동 처리.
+        Livox 데이터는 CustomMsg 대신 sensor_msgs/PointCloud2로 변환하여 저장한다.
+        표준 타입이므로 migrate_bytes() 캐시 적중률 100% → 변환 속도 대폭 향상.
+        또한 rosbridge 타입 호환성 보장 → 3D Viewer에서 정상 시각화 가능.
 
         출력 경로: {player_path}/output.bag
         """
@@ -4168,8 +4418,11 @@ class WebGUINode(Node):
             return False
 
         try:
-            bag_path = _Path(self.player_path) / 'output.bag'
+            # KITTI와 동일한 정책: {base_dir}/{name}.bag
+            bag_name = os.path.basename(os.path.normpath(self.player_path)) or 'output'
+            bag_path = _Path(self.player_path) / f'{bag_name}.bag'
             self.save_bag_progress = '0%'
+            self.save_bag_message = "Starting conversion..."
             self.get_logger().info(f'Starting ROS1 bag save to: {bag_path}')
 
             src_store = get_typestore(Stores.ROS2_JAZZY)
@@ -4184,46 +4437,47 @@ class WebGUINode(Node):
                     src_is2=True, dst_is2=False,
                 ))
 
-            # ── Livox custom type 등록 (src + dst 양쪽 모두) ─────────────
+            def _livox_custommsg_to_pointcloud2(livox_msg, stamp_ns: int) -> PointCloud2:
+                """Livox CustomMsg → sensor_msgs/PointCloud2 변환.
+
+                PointCloud2 필드: x, y, z (float32), intensity (float32 = reflectivity),
+                tag (uint8), line (uint8). point_step = 18 bytes.
+                """
+                _fields = [
+                    PointField(name='x',         offset=0,  datatype=PointField.FLOAT32, count=1),
+                    PointField(name='y',         offset=4,  datatype=PointField.FLOAT32, count=1),
+                    PointField(name='z',         offset=8,  datatype=PointField.FLOAT32, count=1),
+                    PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+                    PointField(name='tag',       offset=16, datatype=PointField.UINT8,   count=1),
+                    PointField(name='line',      offset=17, datatype=PointField.UINT8,   count=1),
+                ]
+                _point_step = 18  # 4+4+4+4+1+1
+                _num_pts = len(livox_msg.points)
+                _buf = bytearray(_num_pts * _point_step)
+                for _i, _pt in enumerate(livox_msg.points):
+                    _off = _i * _point_step
+                    struct.pack_into('ffff', _buf, _off, _pt.x, _pt.y, _pt.z, float(_pt.reflectivity))
+                    struct.pack_into('BB', _buf, _off + 16, _pt.tag, _pt.line)
+                _pc2 = PointCloud2()
+                _pc2.header.stamp = Time(nanoseconds=stamp_ns).to_msg()
+                _pc2.header.frame_id = livox_msg.header.frame_id or 'livox'
+                _pc2.height = 1
+                _pc2.width = _num_pts
+                _pc2.fields = _fields
+                _pc2.is_bigendian = False
+                _pc2.point_step = _point_step
+                _pc2.row_step = _point_step * _num_pts
+                _pc2.data = bytes(_buf)
+                _pc2.is_dense = True
+                return _pc2
+
+            # ── Livox 프레임 수집 (PointCloud2로 저장하므로 커스텀 타입 등록 불필요) ──
             livox_stamps = []
-            livox_type_ok = False
             if LIVOX_AVAILABLE and len(self.livox_file_list) > 0:
-                try:
-                    from rosbags.typesys import get_types_from_msg as _get_types
-                    _POINT_DEF = (
-                        'uint32 offset_time\n'
-                        'float32 x\n'
-                        'float32 y\n'
-                        'float32 z\n'
-                        'uint8 reflectivity\n'
-                        'uint8 tag\n'
-                        'uint8 line\n'
-                    )
-                    _MSG_DEF = (
-                        'std_msgs/Header header\n'
-                        'uint64 timebase\n'
-                        'uint32 point_num\n'
-                        'uint8 lidar_id\n'
-                        'uint8[3] rsvd\n'
-                        'livox_ros_driver2/CustomPoint[] points\n'
-                    )
-                    for _store in (src_store, dst_store):
-                        _pt = _get_types(_POINT_DEF, 'livox_ros_driver2/msg/CustomPoint')
-                        _pt.pop('std_msgs/msg/Header', None)
-                        _ms = _get_types(_MSG_DEF, 'livox_ros_driver2/msg/CustomMsg')
-                        _ms.pop('std_msgs/msg/Header', None)
-                        if 'livox_ros_driver2/msg/CustomPoint' not in _store.fielddefs:
-                            _store.register(_pt)
-                        if 'livox_ros_driver2/msg/CustomMsg' not in _store.fielddefs:
-                            _store.register(_ms)
-                    livox_stamps = [s for s, dtype in self.data_stamp.items()
-                                    if dtype == 'livox']
-                    livox_type_ok = True
-                    self.get_logger().info(
-                        f'Livox custom type registered — {len(livox_stamps)} frames')
-                except Exception as _le:
-                    self.get_logger().warn(
-                        f'Livox type registration failed, will skip: {_le}')
+                livox_stamps = [s for s, dtype in self.data_stamp.items()
+                                if dtype == 'livox']
+                self.get_logger().info(
+                    f'Livox → PointCloud2: {len(livox_stamps)} frames')
 
             # 데이터 크기 계산 (진행률용)
             cam_stamps = []
@@ -4263,9 +4517,9 @@ class WebGUINode(Node):
                         '/camera/color/camera_info', 'sensor_msgs/msg/CameraInfo',
                         typestore=dst_store)
                 livox_conn = None
-                if livox_type_ok and livox_stamps:
+                if livox_stamps:
                     livox_conn = writer.add_connection(
-                        '/livox/lidar', 'livox_ros_driver2/msg/CustomMsg',
+                        '/livox/lidar', 'sensor_msgs/msg/PointCloud2',
                         typestore=dst_store)
 
                 def _write(conn, ros2_msg, ts_ns: int):
@@ -4277,6 +4531,7 @@ class WebGUINode(Node):
                         self.get_logger().warn(f'ROS1 write skipped: {_e}')
 
                 # Write pose data
+                self.save_bag_message = "Converting pose messages..."
                 self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
                 for stamp, (x, y, z) in sorted(self.pose_data.items()):
                     msg = PointStamped()
@@ -4289,6 +4544,7 @@ class WebGUINode(Node):
                     update_progress()
 
                 # Write IMU data
+                self.save_bag_message = "Converting IMU messages..."
                 self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
                 for stamp, imu_values in sorted(self.imu_data.items()):
                     msg = Imu()
@@ -4307,17 +4563,21 @@ class WebGUINode(Node):
                     _write(imu_conn, msg, stamp)
                     update_progress()
 
-                # Write Livox data
-                if livox_conn and livox_stamps:
-                    self.get_logger().info(f'Writing {len(livox_stamps)} Livox messages...')
+                # Write Livox data as PointCloud2
+                if livox_conn:
+                    self.save_bag_message = "Converting LiDAR messages..."
+                    self.get_logger().info(
+                        f'Writing {len(livox_stamps)} Livox messages as PointCloud2...')
                     for stamp in sorted(livox_stamps):
                         livox_msg = self.load_livox_data(stamp)
                         if livox_msg:
-                            _write(livox_conn, livox_msg, stamp)
+                            pc2_msg = _livox_custommsg_to_pointcloud2(livox_msg, stamp)
+                            _write(livox_conn, pc2_msg, stamp)
                         update_progress()
 
                 # Write Camera data
                 if cam_stamps and img_conn and caminfo_conn:
+                    self.save_bag_message = "Converting camera messages..."
                     self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
                     for stamp in sorted(cam_stamps):
                         cam_data = self.load_camera_data(stamp)
@@ -4328,11 +4588,13 @@ class WebGUINode(Node):
                         update_progress()
 
             self.save_bag_progress = None
+            self.save_bag_message = None
             self.get_logger().info(f'ROS1 bag save complete: {bag_path}')
             return True
 
         except Exception as e:
             self.save_bag_progress = None
+            self.save_bag_message = None
             self.get_logger().error(f'Failed to save ROS1 bag: {str(e)}')
             import traceback
             traceback.print_exc()
@@ -4360,6 +4622,7 @@ class WebGUINode(Node):
             finally:
                 self.save_bag_saving = False
                 self.save_bag_progress = None
+                self.save_bag_message = None
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -4385,6 +4648,7 @@ class WebGUINode(Node):
             'slider_pos': self.player_slider_pos,
             'data_loaded': self.player_data_loaded,
             'save_bag_progress': self.save_bag_progress,
+            'save_bag_message': self.save_bag_message,
             'save_bag_saving': self.save_bag_saving,
             'save_bag_success': self.save_bag_success
         }
@@ -4540,7 +4804,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self.send_json_response({'success': False, 'error': str(e)})
         elif parsed_path.path == '/api/viewer/pc2_topics':
-            # PC2 전용: 현재 활성화된 PointCloud2 토픽 목록
+            # PC2 전용: 현재 활성화된 PointCloud2 토픽 목록 (rosbridge 불필요)
             try:
                 all_topics = self.node.get_recorder_topics()
                 pc2_topics = [
@@ -4552,6 +4816,18 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                     )
                 ]
                 self.send_json_response({'success': True, 'topics': pc2_topics})
+            except Exception as e:
+                self.send_json_response({'success': False, 'error': str(e), 'topics': []})
+        elif parsed_path.path == '/api/viewer/livox_topics':
+            # Livox CustomMsg 토픽 목록 (Python 백엔드, rosbridge 불필요)
+            try:
+                all_topics = self.node.get_recorder_topics()
+                livox_topics = [
+                    t['name'] if isinstance(t, dict) else t
+                    for t in all_topics
+                    if (t.get('type', '') if isinstance(t, dict) else '') == 'livox_ros_driver2/msg/CustomMsg'
+                ]
+                self.send_json_response({'success': True, 'topics': livox_topics})
             except Exception as e:
                 self.send_json_response({'success': False, 'error': str(e), 'topics': []})
         else:
@@ -4602,6 +4878,18 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         # Bag Player API endpoints
         elif parsed_path.path == '/api/bag/load':
             path = data.get('path', '')
+            # ConPR → bag 전환 시 CustomMsg publisher 및 재생 정리 (같은 /livox/lidar 토픽 충돌 방지)
+            if path:
+                self.node._destroy_conpr_publishers()
+                self.node.player_playing = False
+                self.node.player_paused = False
+                if self.node.playback_active:
+                    self.node.playback_active = False
+                    old_thread = self.node.playback_thread
+                    self.node.playback_thread = None
+                    if old_thread and old_thread.is_alive():
+                        old_thread.join(timeout=1.0)
+                self.node.stop_ros1_playback()
             self.node.bag_path = path
             # Automatically get bag info when loading
             info = self.node.get_bag_info()
@@ -4655,6 +4943,12 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/bag/stop_ros1':
             success = self.node.stop_ros1_playback()
             response = {'success': success, 'message': 'ROS1 playback stopped'}
+        elif parsed_path.path == '/api/bag/set_loop':
+            loop = data.get('loop', False)
+            self.node.bag_player_loop = bool(loop)
+            if self.node.ros1_player_thread is not None:
+                self.node.ros1_player_thread.set_loop(self.node.bag_player_loop)
+            response = {'success': True, 'loop': self.node.bag_player_loop}
 
         # Bag Recorder API endpoints
         elif parsed_path.path == '/api/recorder/set_bag_name':

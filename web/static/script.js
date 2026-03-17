@@ -369,6 +369,10 @@ async function loadBagFile() {
         const result = await apiCall('/api/bag/load', { path });
         if (result.success) {
             console.log('Bag file loaded successfully:', path);
+            // ConPR → ROS1/ROS2 bag 전환 시 3D Viewer 토픽 구독 리셋 (CustomMsg↔PointCloud2 충돌 방지)
+            if (typeof resetViewerTopicSubscriptions === 'function') {
+                resetViewerTopicSubscriptions();
+            }
             // Get topics, duration and bag_type from result
             // topics는 string[] (ROS2) 또는 {name, type, publishable}[] (ROS1) 형태일 수 있음
             bagPlayerState.availableTopics = result.topics || [];
@@ -647,8 +651,15 @@ async function updateBagState() {
                 const ratio = elapsed_sec / duration;
                 const sliderValue = Math.floor(ratio * 10000);
                 const slider = domCache.get('bag-slider');
-                if (slider && document.activeElement !== slider) {
-                    slider.value = sliderValue;
+                if (slider) {
+                    // 루프 감지: elapsed가 높은 값에서 0 근처로 떨어지면 강제 업데이트 (클릭 없이 즉시 반영)
+                    const loopDetected = (sliderValue < 500 && parseInt(slider.value, 10) > 9500);
+                    if (loopDetected || document.activeElement !== slider) {
+                        slider.value = sliderValue;
+                        if (loopDetected && document.activeElement === slider) {
+                            slider.blur();
+                        }
+                    }
                 }
                 updateBagTimeLabel(elapsed_sec, duration);
             }
@@ -681,6 +692,14 @@ async function updateBagState() {
                 }
             }
         }
+        // Loop 체크박스 동기화 (ROS1: /api/bag/state에서 loop 조회)
+        const bagState = await apiCall('/api/bag/state');
+        if (bagState && bagState.loop !== undefined) {
+            const loopCb = domCache.get('bag-player-loop');
+            if (loopCb) {
+                loopCb.checked = bagState.loop;
+            }
+        }
         return;
     }
 
@@ -692,10 +711,16 @@ async function updateBagState() {
             const ratio = state.current_time / bagPlayerState.bagDuration;
             const sliderValue = Math.floor(ratio * 10000);
 
-            // Only update slider if user is not dragging it
             const slider = domCache.get('bag-slider');
-            if (document.activeElement !== slider) {
-                slider.value = sliderValue;
+            if (slider) {
+                // ROS2 루프 감지: current_time이 0 근처로 떨어지면 강제 업데이트 (클릭 없이 즉시 반영)
+                const loopDetected = (sliderValue < 500 && parseInt(slider.value, 10) > 9500);
+                if (loopDetected || document.activeElement !== slider) {
+                    slider.value = sliderValue;
+                    if (loopDetected && document.activeElement === slider) {
+                        slider.blur();
+                    }
+                }
             }
 
             updateBagTimeLabel(state.current_time, bagPlayerState.bagDuration);
@@ -715,6 +740,12 @@ async function updateBagState() {
             pauseButton.textContent = 'Resume';
         } else {
             pauseButton.textContent = 'Pause';
+        }
+
+        // Loop 체크박스 동기화
+        const loopCb = domCache.get('bag-player-loop');
+        if (loopCb && state.loop !== undefined) {
+            loopCb.checked = state.loop;
         }
     }
 }
@@ -863,12 +894,12 @@ async function convertToRos1() {
  */
 function onDatasetFormatChange(format) {
     const kittiUi = domCache.get('kitti-ui');
-    const saveBagBtn = domCache.get('save-bag-btn');
+    const conprSaveRow = domCache.get('conpr-save-row');
 
     if (format === 'kitti') {
         kittiUi.style.display = 'block';
-        // KITTI 모드에서는 Save bag 버튼 숨김 (변환 후 별도 처리)
-        if (saveBagBtn) { saveBagBtn.style.display = 'none'; }
+        // KITTI 모드에서는 ConPR 전체 row (bag-format-select, save-bag-btn) 숨김
+        if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
         // 이전 KITTI 상태 초기화
         kittiState.baseDir = null;
         kittiState.calibDir = null;
@@ -878,7 +909,7 @@ function onDatasetFormatChange(format) {
         _resetKittiProgressBar();
     } else {
         kittiUi.style.display = 'none';
-        if (saveBagBtn) { saveBagBtn.style.display = ''; }
+        if (conprSaveRow) { conprSaveRow.style.display = ''; }
     }
 }
 
@@ -961,6 +992,9 @@ async function onKittiDriveChange(driveIdx) {
     if (result && result.success) {
         domCache.get('player-path-label').textContent = drive.data_path;
         console.log('[KITTI] Drive auto-loaded:', drive.data_path);
+        if (typeof resetViewerTopicSubscriptions === 'function') {
+            resetViewerTopicSubscriptions();
+        }
 
         // Auto-start: 체크박스가 켜져 있으면 로드 직후 자동 재생
         const autoStartCheck = domCache.get('player-auto-start');
@@ -1009,6 +1043,9 @@ async function loadKittiDrive() {
     btn.textContent = 'Load';
 
     if (result && result.success) {
+        if (typeof resetViewerTopicSubscriptions === 'function') {
+            resetViewerTopicSubscriptions();
+        }
         domCache.get('player-path-label').textContent = drive.data_path;
         console.log('[KITTI] Drive loaded:', drive.data_path);
     } else {
@@ -1111,6 +1148,9 @@ async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
         domCache.get('player-path-label').textContent = bagPath;
         msg.textContent = 'Ready to play';
         console.log('[KITTI] Bag loaded:', bagPath);
+        if (typeof resetViewerTopicSubscriptions === 'function') {
+            resetViewerTopicSubscriptions();
+        }
     } else {
         msg.textContent = 'Load failed';
         alert('Failed to load converted bag: ' + (loadResult ? (loadResult.message || loadResult.error || 'Unknown error') : 'No response'));
@@ -1141,6 +1181,9 @@ async function loadPlayerPath() {
         if (result.success) {
             domCache.get('player-path-label').textContent = path;
             console.log('Player data loaded successfully');
+            if (typeof resetViewerTopicSubscriptions === 'function') {
+                resetViewerTopicSubscriptions();
+            }
 
             // Auto start: 체크박스가 켜져 있으면 로드 직후 자동 재생
             const autoStartCheck = domCache.get('player-auto-start');
@@ -1172,53 +1215,60 @@ async function pausePlayer() {
 }
 
 async function saveBag() {
-    const button = event.target;
-    if (button.classList.contains('save-progress-btn')) {
+    const bar = domCache.get('conpr-progress-bar');
+    const fill = domCache.get('conpr-progress-fill');
+    const text = domCache.get('conpr-progress-text');
+    const msgEl = domCache.get('conpr-progress-msg');
+    const bagFormatSel = domCache.get('bag-format-select');
+    const saveBagBtn = domCache.get('save-bag-btn');
+
+    if (bar && bar.style.display === 'block') {
         return; // 이미 저장 중
     }
 
-    const originalHTML = button.innerHTML;
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+    const originalBtnText = saveBagBtn ? saveBagBtn.textContent : 'Save bag';
 
-    // 버튼 → 진행바로 변환
+    // KITTI와 완전 동일한 레이아웃: 진행바+메시지+format select+버튼 모두 표시, 버튼만 비활성화
+    if (bar) { bar.style.display = 'block'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msgEl) { msgEl.textContent = 'Starting conversion...'; }
+    if (bagFormatSel) { bagFormatSel.disabled = true; }
+    if (saveBagBtn) {
+        saveBagBtn.disabled = true;
+        saveBagBtn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…';
+    }
+
     function setProgress(pct) {
-        const fill = button.querySelector('.save-progress-fill');
-        const text = button.querySelector('.save-progress-text');
         if (fill) { fill.style.width = pct + '%'; }
         if (text) { text.textContent = pct + '%'; }
     }
 
-    function toProgressBar(pct) {
-        button.classList.add('save-progress-btn');
-        button.disabled = true;
-        button.innerHTML = `
-            <div class="save-progress-fill" style="width:${pct}%"></div>
-            <span class="save-progress-text">${pct}%</span>
-        `;
-    }
-
-    function restoreButton(success) {
-        button.classList.remove('save-progress-btn');
-        button.disabled = false;
-        button.innerHTML = originalHTML;
+    function restoreUi(success) {
+        if (bar) { bar.style.display = 'none'; }
+        if (fill) { fill.style.width = '0%'; }
+        if (text) { text.textContent = '0%'; }
+        if (msgEl) { msgEl.textContent = ''; }
+        if (bagFormatSel) { bagFormatSel.disabled = false; }
+        if (saveBagBtn) {
+            saveBagBtn.disabled = false;
+            saveBagBtn.textContent = originalBtnText;
+        }
         if (!success) {
             alert('Bag save failed.');
         }
     }
 
-    const bagFormatSel = domCache.get('bag-format-select');
-    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
-
-    toProgressBar(0);
-
     // 저장 시작 (백그라운드 스레드 실행 — 즉시 응답)
     const startResult = await apiCall('/api/player/save_bag', { bag_format: bagFormat });
     if (!startResult || !startResult.success) {
-        restoreButton(false);
+        restoreUi(false);
         alert('Failed to start bag save: ' + (startResult ? startResult.message : 'Unknown error'));
         return;
     }
 
-    // save_bag_saving이 false가 될 때까지 300ms마다 폴링
+    // save_bag_saving이 false가 될 때까지 500ms마다 폴링
     const success = await new Promise((resolve) => {
         const interval = setInterval(async () => {
             const state = await apiCall('/api/player/state');
@@ -1227,6 +1277,9 @@ async function saveBag() {
             if (state.save_bag_progress !== null && state.save_bag_progress !== undefined) {
                 const pct = parseInt(state.save_bag_progress);
                 if (!isNaN(pct)) { setProgress(pct); }
+                if (msgEl && state.save_bag_message) {
+                    msgEl.textContent = state.save_bag_message;
+                }
             }
 
             if (!state.save_bag_saving) {
@@ -1236,13 +1289,18 @@ async function saveBag() {
         }, 500);
     });
 
-    // 완료 시 100%로 채운 뒤 버튼 복원
+    // 완료 시 100%로 채운 뒤 UI 복원
     setProgress(100);
-    setTimeout(() => restoreButton(success), 1200);
+    if (msgEl) { msgEl.textContent = 'Conversion complete!'; }
+    setTimeout(() => restoreUi(success), 1200);
 }
 
 async function setLoop(loop) {
     await apiCall('/api/player/set_loop', { loop });
+}
+
+async function setBagPlayerLoop(loop) {
+    await apiCall('/api/bag/set_loop', { loop });
 }
 
 async function setSkipStop(skip_stop) {

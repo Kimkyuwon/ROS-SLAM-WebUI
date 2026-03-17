@@ -185,7 +185,7 @@
                         <div></div>
                     </div>
 
-                    <!-- 재생 속도 슬라이더 (bag 로드 시 표시, ROS1/ROS2 공용) -->
+                    <!-- 재생 속도 + Loop (bag 로드 시 표시, ROS1/ROS2 공용) -->
                     <div id="ros1-playback-controls" style="display:none; padding: 8px 0 4px 0;">
                         <div class="form-group">
                             <label>Playback Rate:</label>
@@ -194,6 +194,10 @@
                                        style="flex: 1; min-width: 160px;"
                                        oninput="updatePlaybackRate(this.value)" />
                                 <span id="playback-rate-label" style="min-width: 36px; color: var(--accent, #4ad6ff); font-weight: 600;">1.0x</span>
+                                <label style="cursor:pointer; margin-left: 8px;">
+                                    <input type="checkbox" id="bag-player-loop" onchange="setBagPlayerLoop(this.checked)">
+                                    Loop
+                                </label>
                             </div>
                             <div></div>
                         </div>
@@ -277,8 +281,13 @@
                                 <button onclick="loadPlayerPath()">Load</button>
                             </div>
                         </div>
-                        <div class="player-row">
+                        <div class="player-row" id="conpr-save-row">
                             <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
+                                <div id="conpr-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                                    <div id="conpr-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
+                                    <span id="conpr-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
+                                </div>
+                                <span id="conpr-progress-msg" style="font-size:12px; color:var(--muted);"></span>
                                 <select id="bag-format-select"
                                         style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
                                     <option value="ros2">ROS2</option>

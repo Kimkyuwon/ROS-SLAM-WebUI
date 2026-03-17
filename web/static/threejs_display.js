@@ -1385,6 +1385,30 @@ function parseLivoxCustomMsg(message, settings, prevMin, prevMax) {
     return { count, newMin, newMax };
 }
 
+/**
+ * 3D Viewer 토픽 구독 전체 리셋 (ConPR ↔ ROS1 bag 전환 시 /livox/lidar 타입 충돌 방지)
+ * load_data 성공 시 호출 → 이전 구독 해제 후 사용자가 새 토픽 목록에서 재선택
+ */
+function resetViewerTopicSubscriptions() {
+    const topicNames = Array.from(viewer3DState.topicSubscriptions.keys());
+    if (topicNames.length === 0) return;
+    topicNames.forEach(function(topicName) {
+        try {
+            unsubscribeFromTopic(topicName);
+        } catch (e) {
+            console.warn('[Viewer] Reset unsubscribe:', topicName, e);
+        }
+    });
+    viewer3DState.displaySelectedTopics = [];
+    viewer3DState.selectedLivoxTopics = [];
+    viewer3DState.selectedPathTopics = [];
+    viewer3DState.selectedOdomTopics = [];
+    viewer3DState.selectedTFTopics = [];
+    viewer3DState.selectedImageTopics = [];
+    if (typeof renderDisplayPanel === 'function') renderDisplayPanel();
+    console.log('[Viewer] Topic subscriptions reset (re-select from fresh list)');
+}
+
 // 토픽 구독 해제 및 리소스 정리
 function unsubscribeFromTopic(topicName) {
     // ROSLIB.Topic 구독 해제
@@ -1942,39 +1966,18 @@ function subscribeToPointCloud(topicName) {
 }
 
 /**
- * Livox LiDAR 토픽 구독 (subscribeToPointCloud 구조 재사용)
- * messageType: livox_ros_driver2/msg/CustomMsg
- * pointCloudMeshes / pcFrameGroups 를 PC2와 동일한 Map으로 공유하여
- * updatePointSize, updatePointAlpha, clearDecayObjects, unsubscribeFromTopic 등을 변경 없이 재사용.
+ * Livox LiDAR 토픽 구독 (Python 백엔드 binary 스트리밍 — rosbridge 불필요)
+ * PC2와 동일한 Worker 경로 사용. 서버가 CustomMsg → PC2 호환 binary로 변환하여 전송.
  */
 function subscribeToLivox(topicName) {
-    if (!viewer3DState.rosConnected) {
-        console.warn('[Livox] Not connected to ROS');
-        return;
-    }
-
     // 재구독 방지: 이미 구독 중인 토픽이면 건너뜀
     if (viewer3DState.topicSubscriptions.has(topicName)) {
         return viewer3DState.topicSubscriptions.get(topicName);
     }
 
-    console.log('[Livox] Subscribing to topic:', topicName);
+    console.log('[Livox] Subscribing to topic (StreamWorker):', topicName);
 
-    let frameCount = 0;
-    let adaptiveMin = Infinity;   // rainbow x/y/z 적응형 범위
-    let adaptiveMax = -Infinity;
-
-    const topic = new ROSLIB.Topic({
-        ros: viewer3DState.ros,
-        name: topicName,
-        messageType: 'livox_ros_driver2/msg/CustomMsg',
-        throttle_rate: 200,   // 5 Hz: 200ms마다 1프레임 → 프레임당 처리 시간 확보
-        queue_length: 1       // 오래된 메시지 드롭 → 항상 최신 프레임 처리
-    });
-
-    viewer3DState.topicSubscriptions.set(topicName, topic);
-
-    // PC2 frame 래퍼 그룹 (frame_id → fixedFrame 변환 적용 대상)
+    // PC2 frame 래퍼 그룹
     let pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
     if (!pcFrameGroup) {
         pcFrameGroup = new THREE.Group();
@@ -1982,201 +1985,31 @@ function subscribeToLivox(topicName) {
         viewer3DState.pcFrameGroups.set(topicName, pcFrameGroup);
     }
 
-    topic.subscribe(function(message) {
-        // 숨겨진 토픽은 파싱 자체를 건너뜀 (CPU 절약)
-        const mesh = viewer3DState.pointCloudMeshes[topicName];
-        if (mesh && mesh.visible === false) return;
-
-        // frame_id 저장 및 frame 변환 적용
-        const frameId = (message.header && message.header.frame_id) ? message.header.frame_id : '';
-        viewer3DState.topicFrameIds.set(topicName, frameId);
-        applyFrameTransformToObject(pcFrameGroup, frameId);
-
-        // 새 데이터 → 다음 animate()에서 렌더 트리거 (dirty 렌더링)
-        viewer3DState.needsRender = true;
-
-        const settings  = viewer3DState.topicSettings.get(topicName) || {};
-        const pointSize = settings.pointSize !== undefined ? settings.pointSize : 0.1;
-        const alpha     = settings.alpha     !== undefined ? settings.alpha     : 1.0;
-        const decayTime = settings.decayTime !== undefined ? settings.decayTime : 0;
-        const pcStyle   = settings.style     || 'squares';  // RViz 스타일
-
-        // ── Livox CustomMsg 고성능 파싱 (단일 패스, 재사용 버퍼) ──
-        const { count, newMin, newMax } = parseLivoxCustomMsg(message, settings, adaptiveMin, adaptiveMax);
-        if (count === 0) return;
-
-        // 적응형 범위 갱신 (x/y/z rainbow용, 다음 프레임에 사용)
-        if (isFinite(newMin)) adaptiveMin = newMin;
-        if (isFinite(newMax)) adaptiveMax = newMax;
-        frameCount++;
-
-        // ── Helper: PointsMaterial 생성 (스타일 텍스처 적용) ──
-        function makeMaterial(sz, a) {
-            let renderSz = sz;
-            if (viewer3DState.currentViewType === 'topdown') {
-                renderSz = Math.max(1, sz * _getTopdownPixelsPerUnit());
-            }
-            const tex = _getStyleTexture(pcStyle);
-            return new THREE.PointsMaterial({
-                size:            renderSz,
-                vertexColors:    true,
-                sizeAttenuation: true,   // 항상 true 유지 (셰이더 재컴파일 방지)
-                transparent:     a < 1.0,
-                opacity:         a,
-                map:             tex,
-                alphaTest:       tex ? 0.01 : 0,
-                depthWrite:      a >= 1.0,
-            });
-        }
-
-        // ── Helper: Boxes InstancedMesh 생성 (Livox용) ──
-        function makeBoxMesh(sz, a) {
-            const n = Math.min(count, PC2_BOX_MAX_INSTANCES);
-            const geo = new THREE.BoxGeometry(sz, sz, sz);
-            const mat = new THREE.MeshLambertMaterial({
-                transparent: a < 1.0,
-                opacity:     a,
-            });
-            const im = new THREE.InstancedMesh(geo, mat, n);
-            im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-            im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(n * 3), 3);
-            im.instanceColor.setUsage(THREE.DynamicDrawUsage);
-            const dummy  = new THREE.Object3D();
-            const colBuf = im.instanceColor.array;
-            for (let i = 0; i < n; i++) {
-                const pi = i * 3;
-                dummy.position.set(_pc2PosBuffer[pi], _pc2PosBuffer[pi + 1], _pc2PosBuffer[pi + 2]);
-                dummy.updateMatrix();
-                im.setMatrixAt(i, dummy.matrix);
-                colBuf[pi]     = _pc2ColBuffer[pi];
-                colBuf[pi + 1] = _pc2ColBuffer[pi + 1];
-                colBuf[pi + 2] = _pc2ColBuffer[pi + 2];
-            }
-            im.count = n;
-            im.instanceMatrix.needsUpdate = true;
-            im.instanceColor.needsUpdate  = true;
-            im._isBoxMesh = true;
-            return im;
-        }
-
-        // ── 스타일 전환 감지: boxes ↔ Points 계열 전환 시 기존 mesh 강제 제거 ──
-        const existMesh = viewer3DState.pointCloudMeshes[topicName];
-        if (existMesh) {
-            const wasBox   = existMesh._isBoxMesh === true;
-            const isNowBox = pcStyle === 'boxes';
-            if (wasBox !== isNowBox) {
-                pcFrameGroup.remove(existMesh);
-                existMesh.geometry.dispose();
-                existMesh.material.dispose();
-                viewer3DState.pointCloudMeshes[topicName] = null;
-            }
-        }
-
-        if (decayTime > 0) {
-            // ═══ DECAY 모드: 매 프레임 독립 Points/Boxes 객체 생성·누적 ═══
-            const curMesh = viewer3DState.pointCloudMeshes[topicName];
-            if (curMesh) {
-                pcFrameGroup.remove(curMesh);
-                curMesh.geometry.dispose();
-                curMesh.material.dispose();
-                viewer3DState.pointCloudMeshes[topicName] = null;
-            }
-
-            let decayObj;
-            if (pcStyle === 'boxes') {
-                // Boxes 스타일: InstancedMesh를 프레임마다 생성하여 누적
-                decayObj = makeBoxMesh(pointSize, alpha);
-            } else {
-                const posArr = _pc2PosBuffer.subarray(0, count * 3).slice();
-                const colArr = _pc2ColBuffer.subarray(0, count * 3).slice();
-                const geo = new THREE.BufferGeometry();
-                geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
-                geo.setAttribute('color',    new THREE.BufferAttribute(colArr, 3));
-                decayObj = new THREE.Points(geo, makeMaterial(pointSize, alpha));
-            }
-
-            pcFrameGroup.add(decayObj);
-            const arr = viewer3DState.decayObjects.get(topicName) || [];
-            arr.push({ points: decayObj, time: performance.now() });
-            viewer3DState.decayObjects.set(topicName, arr);
-
-        } else {
-            // ═══ 일반 모드: 단일 mesh in-place 업데이트 ═══
-            const decayArr = viewer3DState.decayObjects.get(topicName);
-            if (decayArr && decayArr.length > 0) {
-                decayArr.forEach(item => {
-                    pcFrameGroup.remove(item.points);
-                    item.points.geometry.dispose();
-                    item.points.material.dispose();
-                });
-                viewer3DState.decayObjects.set(topicName, []);
-            }
-
-            const curMesh = viewer3DState.pointCloudMeshes[topicName];
-
-            if (pcStyle === 'boxes') {
-                // ── Boxes: 매 프레임 InstancedMesh 재생성 (수 변동 대응) ──
-                if (curMesh) {
-                    pcFrameGroup.remove(curMesh);
-                    curMesh.geometry.dispose();
-                    curMesh.material.dispose();
-                }
-                const newBox = makeBoxMesh(pointSize, alpha);
-                viewer3DState.pointCloudMeshes[topicName] = newBox;
-                pcFrameGroup.add(newBox);
-
-            } else if (!curMesh) {
-                // ── 첫 메시지(Points 계열): GPU 버퍼를 MAX_POINTS 크기로 미리 할당 ──
-                const posArr = new Float32Array(PC2_MAX_POINTS * 3);
-                const colArr = new Float32Array(PC2_MAX_POINTS * 3);
-                posArr.set(_pc2PosBuffer.subarray(0, count * 3));
-                colArr.set(_pc2ColBuffer.subarray(0, count * 3));
-
-                const posAttr = new THREE.BufferAttribute(posArr, 3);
-                const colAttr = new THREE.BufferAttribute(colArr, 3);
-                posAttr.setUsage(THREE.DynamicDrawUsage);
-                colAttr.setUsage(THREE.DynamicDrawUsage);
-
-                const geometry = new THREE.BufferGeometry();
-                geometry.setAttribute('position', posAttr);
-                geometry.setAttribute('color',    colAttr);
-                geometry.setDrawRange(0, count);
-                geometry.computeBoundingSphere();
-
-                const newMesh = new THREE.Points(geometry, makeMaterial(pointSize, alpha));
-                viewer3DState.pointCloudMeshes[topicName] = newMesh;
-                pcFrameGroup.add(newMesh);
-                console.log('[Livox] Mesh added:', topicName, '|', count, 'pts', '| style:', pcStyle);
-
-            } else {
-                // ── 업데이트: 기존 GPU 버퍼를 in-place 갱신 (할당 0회) ──
-                const geometry = curMesh.geometry;
-                const posAttr  = geometry.attributes.position;
-                const colAttr  = geometry.attributes.color;
-
-                posAttr.array.set(_pc2PosBuffer.subarray(0, count * 3));
-                colAttr.array.set(_pc2ColBuffer.subarray(0, count * 3));
-                posAttr.needsUpdate = true;
-                colAttr.needsUpdate = true;
-                geometry.setDrawRange(0, count);
-
-                curMesh.material.size        = pointSize;
-                curMesh.material.opacity     = alpha;
-                curMesh.material.transparent = alpha < 1.0;
-                curMesh.material.depthWrite  = alpha >= 1.0;
-                curMesh.material.needsUpdate = true;
-
-                if (frameCount % 30 === 0) geometry.computeBoundingSphere();
-            }
-        }
+    const settings = viewer3DState.topicSettings.get(topicName) || {};
+    const worker = _getPC2StreamWorker();
+    worker.postMessage({
+        cmd:        'subscribe',
+        topicName,
+        colorMode:  settings.colorMode  || 'rainbow',
+        colorField: settings.colorField || 'intensity',  // binary의 colorField=reflectivity
+        solidColor: settings.solidColor || '#ffffff',
     });
 
-    // selectedLivoxTopics에 추가 (중복 방지)
+    const sentinel = {
+        unsubscribe: function () {
+            if (_pc2StreamWorker) {
+                _pc2StreamWorker.postMessage({ cmd: 'unsubscribe', topicName });
+            }
+            _pc2FrameCounts.delete(topicName);
+        },
+    };
+    viewer3DState.topicSubscriptions.set(topicName, sentinel);
+
     if (!viewer3DState.selectedLivoxTopics.includes(topicName)) {
         viewer3DState.selectedLivoxTopics.push(topicName);
     }
 
-    return topic;
+    return sentinel;
 }
 
 // Wait for ROS connection with timeout
@@ -2208,36 +2041,19 @@ async function getAvailablePointCloudTopics() {
 }
 
 // Get available Livox LiDAR topics (livox_ros_driver2/msg/CustomMsg)
+// Python 백엔드 API 사용 — rosbridge 불필요, PC2와 동일한 binary 스트리밍 경로
 async function getAvailableLivoxTopics() {
-    if (!viewer3DState.rosConnected) {
-        console.log('[Livox] Waiting for ROS connection...');
-        const connected = await waitForROSConnection(5000);
-        if (!connected) {
-            console.warn('[Livox] Not connected to ROS after timeout');
-            return [];
-        }
+    try {
+        const res = await fetch('/api/viewer/livox_topics');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const topics = data.topics || [];
+        console.log('[Livox] Available Livox topics (via API):', topics);
+        return topics;
+    } catch (e) {
+        console.error('[Livox] Failed to get topics from API:', e);
+        return [];
     }
-
-    return new Promise((resolve) => {
-        viewer3DState.ros.getTopics(function(topics) {
-            const livoxTopics = [];
-
-            if (topics.topics && topics.types) {
-                topics.topics.forEach((topic, index) => {
-                    const type = topics.types[index];
-                    if (type === 'livox_ros_driver2/msg/CustomMsg') {
-                        livoxTopics.push(topic);
-                    }
-                });
-            }
-
-            console.log('[Livox] Available Livox topics:', livoxTopics);
-            resolve(livoxTopics);
-        }, function(error) {
-            console.error('[Livox] Failed to get topics:', error);
-            resolve([]);
-        });
-    });
 }
 
 // =============================================
@@ -5849,6 +5665,7 @@ function confirmAddDisplaySelection() {
 
 // Expose functions to global scope for onclick handlers
 window.initThreeJSDisplay = initThreeJSDisplay;
+window.resetViewerTopicSubscriptions = resetViewerTopicSubscriptions;
 window.initialize3DViewer = initialize3DViewer;
 // 통합 Add Display 다이얼로그
 window.openAddDisplayModal = openAddDisplayModal;
