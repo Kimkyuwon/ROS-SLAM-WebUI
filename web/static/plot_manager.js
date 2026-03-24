@@ -440,7 +440,7 @@ class PlotlyPlotManager {
                     max-width: 400px;
                     line-height: 1.6;
                 ">
-                    Select topics from the left panel and drag them here to create real-time plots
+                    Use 「+ Add」in the left panel to choose topics, then drag fields here to plot
                 </div>
             </div>
         `;

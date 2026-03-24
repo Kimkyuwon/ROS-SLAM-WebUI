@@ -552,6 +552,7 @@ h3 {
     gap: 16px;
     height: 700px;
     min-height: 700px;
+    transition: grid-template-columns 0.2s ease;
 }
 
 .plot-display-panel {
@@ -559,16 +560,48 @@ h3 {
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 12px;
-    overflow-y: visible;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     height: 100%;
+    min-width: 0;
 }
 
-.plot-display-panel h3 {
-    margin: 0 0 12px 0;
+.plot-display-panel-header h3 {
+    margin: 0;
     font-size: 14px;
     color: var(--muted);
+}
+
+.plot-display-panel-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    flex: 1;
+    min-height: 0;
+    margin-top: 10px;
+}
+
+.plot-display-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-shrink: 0;
+}
+
+.plot-tree-scroll {
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+}
+
+.plot-display-panel.collapsed .plot-display-panel-body {
+    display: none;
+}
+
+.plot-display-panel.collapsed .plot-display-panel-header h3 {
+    display: none;
 }
 
 .plot-tree-container {
@@ -1311,16 +1344,35 @@ h3 {
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 12px;
-    overflow-y: auto;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 0;
+}
+
+.viewer-display-panel-header h3 {
+    margin: 0;
+    font-size: 14px;
+    color: var(--muted);
+}
+
+.viewer-display-panel-body {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    flex: 1;
+    min-height: 0;
+    margin-top: 8px;
+    overflow: hidden;
 }
 
-.viewer-display-panel h3 {
-    margin: 0 0 4px 0;
-    font-size: 14px;
-    color: var(--muted);
+.viewer-display-panel.collapsed .viewer-display-panel-body {
+    display: none;
+}
+
+.viewer-display-panel.collapsed .viewer-display-panel-header h3 {
+    display: none;
 }
 
 /* #viewer-add-topic-btn 스타일은 하단 .viewer-add-btn-group 내 그룹 선택자로 통합 */
@@ -1982,8 +2034,9 @@ h3 {
     margin-bottom: 4px;
 }
 
-/* 통합 Add 버튼 스타일 */
-#viewer-add-display-btn {
+/* 통합 Add 버튼 스타일 (3D Viewer Displays / Plot 토픽 패널 공통) */
+#viewer-add-display-btn,
+#plot-add-topics-btn {
     background: linear-gradient(135deg, #1f3a56, #1b3046);
     color: var(--text);
     border: 1px solid var(--border);
@@ -1997,12 +2050,14 @@ h3 {
     width: 100%;
 }
 
-#viewer-add-display-btn:hover {
+#viewer-add-display-btn:hover,
+#plot-add-topics-btn:hover {
     border-color: rgba(74, 214, 255, 0.5);
     box-shadow: 0 4px 16px rgba(74, 214, 255, 0.18);
 }
 
-#viewer-add-display-btn:disabled {
+#viewer-add-display-btn:disabled,
+#plot-add-topics-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
 }

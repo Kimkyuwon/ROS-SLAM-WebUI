@@ -16,6 +16,14 @@ class PlotJugglerTree {
             return;
         }
 
+        // DOM에서 루트가 제거된 경우(예: 컨테이너 innerHTML 초기화) 내부 상태만 리셋
+        if (this.rootNode && !this.container.contains(this.rootNode)) {
+            this.nodeMap.clear();
+            this.messageData.clear();
+            this.selectedItems.clear();
+            this.rootNode = null;
+        }
+
         // 이미 초기화되었으면 스킵
         if (this.rootNode && this.container.contains(this.rootNode)) {
             console.log('[PlotJugglerTree] Already initialized, skipping...');
@@ -184,6 +192,33 @@ class PlotJugglerTree {
         }
 
         return node;
+    }
+
+    /**
+     * 토픽 제거 시 nodeMap / messageData / selectedItems 에서 해당 토픽 하위 경로 정리
+     * @param {string} topicRosPath ROS 토픽 이름 (예: /imu/data)
+     */
+    pruneNodeMapForTopic(topicRosPath) {
+        const tn = topicRosPath.startsWith('/') ? topicRosPath.slice(1) : topicRosPath;
+        const toDel = [];
+        this.nodeMap.forEach((node, path) => {
+            if (path === tn || path.startsWith(tn + '/')) {
+                toDel.push(path);
+            }
+        });
+        toDel.forEach((p) => this.nodeMap.delete(p));
+
+        const selDel = [];
+        this.selectedItems.forEach((p) => {
+            if (p === tn || p.startsWith(tn + '/')) selDel.push(p);
+        });
+        selDel.forEach((p) => this.selectedItems.delete(p));
+
+        const mdDel = [];
+        this.messageData.forEach((v, p) => {
+            if (p === tn || p.startsWith(tn + '/')) mdDel.push(p);
+        });
+        mdDel.forEach((p) => this.messageData.delete(p));
     }
 
     findChildByName(parent, name) {

@@ -6329,6 +6329,35 @@ function confirmTFTopicSelection() {
 // ============================================================
 
 /**
+ * 3D Viewer 그리드 열 너비: Displays / 캔버스 / Views 접힘 상태 조합
+ */
+function updateViewerLayoutColumns() {
+    const layout = document.querySelector('.viewer-layout');
+    if (!layout) return;
+    const displayPanel = document.getElementById('viewer-display-panel');
+    const viewsPanel = document.getElementById('viewer-views-panel');
+    const displayCollapsed = displayPanel && displayPanel.classList.contains('collapsed');
+    const viewsCollapsed = viewsPanel && viewsPanel.classList.contains('collapsed');
+    const left = displayCollapsed ? '28px' : '260px';
+    const right = viewsCollapsed ? '28px' : '200px';
+    layout.style.gridTemplateColumns = `${left} 1fr ${right}`;
+}
+
+/**
+ * Displays 패널 접기/펼치기 (Views 패널과 동일한 화살표 UX)
+ */
+function toggleViewerDisplayPanel() {
+    const panel = document.getElementById('viewer-display-panel');
+    if (!panel) return;
+    const isCollapsed = panel.classList.toggle('collapsed');
+    const btn = document.getElementById('viewer-display-collapse-btn');
+    if (btn) btn.textContent = isCollapsed ? '◀' : '▶';
+    updateViewerLayoutColumns();
+    setTimeout(onWindowResize, 220);
+}
+window.toggleViewerDisplayPanel = toggleViewerDisplayPanel;
+
+/**
  * Views 패널 접기/펼치기 토글
  * - 패널 본문(#views-body)을 숨기거나 표시
  * - .viewer-layout의 3번째 열 너비를 28px(접힘) / 200px(펼침)로 전환
@@ -6336,13 +6365,11 @@ function confirmTFTopicSelection() {
  */
 function toggleViewsPanel() {
     const panel = document.getElementById('viewer-views-panel');
-    const layout = document.querySelector('.viewer-layout');
+    if (!panel) return;
     const isCollapsed = panel.classList.toggle('collapsed');
-    layout.style.gridTemplateColumns = isCollapsed
-        ? '260px 1fr 28px'
-        : '260px 1fr 200px';
     const btn = document.getElementById('views-collapse-btn');
     if (btn) btn.textContent = isCollapsed ? '◀' : '▶';
+    updateViewerLayoutColumns();
     // CSS transition(0.2s) 완료 후 Three.js 렌더러 크기 재조정
     setTimeout(onWindowResize, 220);
 }

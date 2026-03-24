@@ -131,19 +131,59 @@ function openSubTab(subtabId, skipEvent = false) {
     }
 }
 
+/** Plot 영역 크기 변경 시 rAF로 한 번만 Plotly 리사이즈 (ResizeObserver 콜백 폭주 완화) */
+let _plotAreaResizeRafId = null;
+
+/**
+ * 현재 표시 중인 Plot 탭의 Plotly 그래프를 컨테이너에 맞게 리사이즈
+ * (좌측 토픽 패널 접기/창 크기 변경 등)
+ */
+function resizeVisiblePlotlyPlots() {
+    if (!plotState.plotTabManager || typeof Plotly === 'undefined' || !Plotly.Plots || typeof Plotly.Plots.resize !== 'function') {
+        return;
+    }
+    for (const tab of plotState.plotTabManager.tabs) {
+        if (!tab.plotDiv || tab.plotDiv.style.display === 'none') continue;
+        if (!tab.plotManager || !tab.plotManager.isInitialized) continue;
+        try {
+            Plotly.Plots.resize(tab.plotDiv);
+        } catch (err) {
+            console.warn('[resizeVisiblePlotlyPlots]', err);
+        }
+    }
+}
+
+function scheduleResizeVisiblePlotlyPlots() {
+    if (_plotAreaResizeRafId !== null) cancelAnimationFrame(_plotAreaResizeRafId);
+    _plotAreaResizeRafId = requestAnimationFrame(() => {
+        _plotAreaResizeRafId = null;
+        resizeVisiblePlotlyPlots();
+    });
+}
+
+function setupPlotAreaPlotlyResizeObserver() {
+    const el = document.getElementById('plot-area-container');
+    if (!el || plotState._plotAreaResizeObserver) return;
+    if (typeof ResizeObserver === 'undefined') return;
+    plotState._plotAreaResizeObserver = new ResizeObserver(() => {
+        scheduleResizeVisiblePlotlyPlots();
+    });
+    plotState._plotAreaResizeObserver.observe(el);
+}
+
+window.resizeVisiblePlotlyPlots = resizeVisiblePlotlyPlots;
+
 // Plot subtab 초기화
 function initPlotSubtab() {
-    if (!plotState.tree) {
-        console.log('[initPlotSubtab] Initializing PlotJugglerTree');
-        initPlotTree();
-    }
-    
+    initPlotTree();
+
     // PlotTabManager 초기화 (처음 한 번만)
     if (!plotState.plotTabManager) {
         console.log('[initPlotSubtab] Initializing PlotTabManager');
         plotState.plotTabManager = new PlotTabManager('plot-tab-bar-container', 'plot-area-container', 5.0);
         plotState.plotTabManager.init();
-        
+        setupPlotAreaPlotlyResizeObserver();
+
         // 드롭 존 설정 (PlotTabManager 초기화 후)
         setupPlotDropZone();
     }
@@ -2409,6 +2449,10 @@ const plotState = {
     topicRefreshInterval: null, // 토픽 목록 갱신 인터벌
     topicRefreshRate: 5000, // 5초마다 토픽 목록 갱신 (타임아웃 방지)
     plotTabManager: null, // PlotTabManager 인스턴스 (탭 관리)
+    /** @type {ResizeObserver|null} */
+    _plotAreaResizeObserver: null,
+    /** Plot 왼쪽 패널에 표시할 토픽 (모달에서 선택, ROS 전체 목록과 별도) */
+    addedPlotTopics: [],
     plottedPaths: [], // 현재 Plot에 표시된 path들 (모든 탭 공유)
     isLoadingTopics: false, // 토픽 로딩 중 플래그
     pathsRestored: false, // 저장된 paths 복원 여부 (최초 1회만)
@@ -2565,6 +2609,30 @@ function _sendBackendSubscribePlot(topic, fieldPath, msgType) {
     }
 }
 
+/**
+ * 필드 경로(예: imu/data/angular_velocity/x)에서 ROS 토픽 이름(예: /imu/data) 추출
+ * @param {string} fullPath
+ * @returns {string|null}
+ */
+function extractRosTopicFromFieldPath(fullPath) {
+    if (!plotState.topicTypes || plotState.topicTypes.size === 0) {
+        return null;
+    }
+    const fp = fullPath.startsWith('/') ? fullPath.slice(1) : fullPath;
+    let best = null;
+    let maxLen = 0;
+    for (const topicName of plotState.topicTypes.keys()) {
+        const tn = topicName.startsWith('/') ? topicName.slice(1) : topicName;
+        if (fp === tn || fp.startsWith(tn + '/')) {
+            if (tn.length > maxLen) {
+                maxLen = tn.length;
+                best = topicName;
+            }
+        }
+    }
+    return best;
+}
+
 // Plot subscriber 키 생성 헬퍼 함수 (setupPlotDataUpdate와 동일한 형식)
 function getPlotSubscriberKey(fullPath) {
     // plotState가 초기화되지 않았거나 topicTypes가 없으면 null 반환
@@ -2601,99 +2669,108 @@ function getPlotSubscriberKey(fullPath) {
     return `${topic}_plot_${fieldPath.replace(/\//g, '_')}`;
 }
 
+/**
+ * Plot 탭을 닫거나 비울 때: 해당 탭의 path에 대해 백엔드 구독 해제 및 전역 plottedPaths 정리.
+ * 다른 탭이 동일 path를 쓰면 구독은 유지한다.
+ * @param {PlotTabManager} tabManager
+ * @param {object|null} plotManager — PlotlyPlotManager 인스턴스
+ */
+function releasePlotPathsFromPlotManager(tabManager, plotManager) {
+    if (!plotManager || !plotManager.dataBuffers || typeof plotManager.dataBuffers.keys !== 'function') {
+        return;
+    }
+    const paths = Array.from(plotManager.dataBuffers.keys());
+    paths.forEach((fullPath) => {
+        const usedElsewhere = tabManager.tabs.some(
+            (t) => t.plotManager && t.plotManager !== plotManager && t.plotManager.dataBuffers.has(fullPath)
+        );
+        if (usedElsewhere) {
+            return;
+        }
+        const key = getPlotSubscriberKey(fullPath);
+        if (key && plotState.subscribers.has(key)) {
+            const sub = plotState.subscribers.get(key);
+            if (sub && typeof sub.unsubscribe === 'function') {
+                sub.unsubscribe();
+            }
+            plotState.subscribers.delete(key);
+        }
+        plotState.plottedPaths = plotState.plottedPaths.filter((p) => p !== fullPath);
+    });
+}
+
+window.releasePlotPathsFromPlotManager = releasePlotPathsFromPlotManager;
+
 // PlotJugglerTree 초기화 및 토픽 노드 생성
 function initPlotTree() {
     if (!plotState.tree) {
         plotState.tree = new PlotJugglerTree('plot-tree');
-        plotState.tree.init();
-        console.log('[initPlotTree] PlotJugglerTree initialized');
+        console.log('[initPlotTree] PlotJugglerTree instance created');
     }
+    plotState.tree.init();
 }
 
-// 토픽 노드를 트리 최상위에 추가 (PlotJuggler 스타일)
+// 토픽 노드를 트리 최상위에 추가 (모달에서 선택한 addedPlotTopics 만)
 function createTopicNodes() {
     initPlotTree();
-    
-    // 새로운 토픽과 기존 토픽 비교
-    const newTopics = new Set(plotState.topics);
+
+    const topicsToShow = Array.isArray(plotState.addedPlotTopics) ? plotState.addedPlotTopics.slice() : [];
+    const newTopics = new Set(topicsToShow);
     const oldTopics = new Set(plotState.topicNodes.keys());
-    
-    // 삭제된 토픽 제거
-    oldTopics.forEach(topic => {
+
+    oldTopics.forEach((topic) => {
         if (!newTopics.has(topic)) {
+            unselectPlotTopic(topic);
+            if (plotState.tree && typeof plotState.tree.pruneNodeMapForTopic === 'function') {
+                plotState.tree.pruneNodeMapForTopic(topic);
+            }
             const node = plotState.topicNodes.get(topic);
             if (node && node.parentElement) {
                 node.parentElement.removeChild(node);
             }
             plotState.topicNodes.delete(topic);
+            plotState.messageTrees.delete(topic);
             console.log(`[createTopicNodes] Removed topic node: ${topic}`);
         }
     });
-    
-    // 새로 추가된 토픽만 생성
-    plotState.topics.forEach(topic => {
+
+    topicsToShow.forEach((topic) => {
         if (!plotState.topicNodes.has(topic)) {
-            // 토픽 이름에서 /를 제거
             const topicName = topic.startsWith('/') ? topic.substring(1) : topic;
-            
-            // 토픽 노드 생성 (비리프 노드)
             const topicNode = plotState.tree.createNode(topic, topicName, false);
-            
-            // 토픽 노드 클릭 이벤트 (확장/구독)
+
             topicNode.addEventListener('click', (e) => {
-                // 확장 아이콘 클릭은 제외
                 if (e.target.classList.contains('plot-tree-expand-icon')) {
                     return;
                 }
-                
                 e.stopPropagation();
-                
-                // Ctrl+클릭: 복수 선택 (토글)
+
                 if (e.ctrlKey || e.metaKey) {
-                    console.log(`[createTopicNodes] Ctrl+click on topic: ${topic}`);
                     if (plotState.selectedTopics.has(topic)) {
                         unselectPlotTopic(topic);
                     } else {
                         selectPlotTopic(topic);
                     }
                 } else {
-                    // 일반 클릭: 해당 토픽만 선택, 다른 토픽 선택 해제
-                    console.log(`[createTopicNodes] Normal click on topic: ${topic}`);
-                    
-                    // 이미 선택된 토픽이면 토글 (선택 해제)
                     if (plotState.selectedTopics.has(topic) && plotState.selectedTopics.size === 1) {
                         unselectPlotTopic(topic);
                     } else {
-                        // 모든 토픽 선택 해제
-                        const selectedTopics = Array.from(plotState.selectedTopics);
-                        selectedTopics.forEach(t => unselectPlotTopic(t));
-                        
-                        // 해당 토픽만 선택
+                        Array.from(plotState.selectedTopics).forEach((t) => unselectPlotTopic(t));
                         selectPlotTopic(topic);
                     }
                 }
             });
-            
-            // 루트에 추가
+
             plotState.tree.rootNode.childrenContainer.appendChild(topicNode);
             plotState.topicNodes.set(topic, topicNode);
-            
             console.log(`[createTopicNodes] Added new topic node: ${topic}`);
         }
     });
-    
+
     const totalNodes = plotState.tree.rootNode.childrenContainer.children.length;
-    console.log(`[createTopicNodes] Total nodes in DOM: ${totalNodes}`);
-    
-    // DOM에 제대로 추가되었는지 확인
+    console.log(`[createTopicNodes] Total topic nodes in DOM: ${totalNodes}`);
     if (totalNodes > 0) {
         console.log('[createTopicNodes] First node:', plotState.tree.rootNode.childrenContainer.children[0]);
-    } else {
-        console.error('[createTopicNodes] No nodes in DOM! Debug info:', {
-            rootNode: plotState.tree.rootNode,
-            childrenContainer: plotState.tree.rootNode.childrenContainer,
-            topics: plotState.topics
-        });
     }
 }
 
@@ -2743,20 +2820,20 @@ function initRosbridge() {
         plotState.ros.on('error', (error) => {
             console.error('[rosbridge] Connection error:', error);
             updateRosbridgeStatusChip('disconnected');
-            // 연결 실패 메시지 표시
             const container = domCache.get('plot-tree');
             if (container) {
-                container.innerHTML = '<div style="color: var(--warning); padding: 12px; text-align: center;">rosbridge connection failed. Make sure rosbridge is running on port 9090.</div>';
+                plotState.tree = null;
+                container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--warning); padding: 12px; text-align: center;">rosbridge connection failed. Make sure rosbridge is running on port 9090.</div>';
             }
         });
 
         plotState.ros.on('close', () => {
             console.log('[rosbridge] Connection closed. Attempting to reconnect...');
             updateRosbridgeStatusChip('reconnecting');
-            // 연결 끊김 메시지 표시
             const container = domCache.get('plot-tree');
             if (container) {
-                container.innerHTML = '<div style="color: var(--muted); padding: 12px; text-align: center;">rosbridge disconnected. Reconnecting...</div>';
+                plotState.tree = null;
+                container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--muted); padding: 12px; text-align: center;">rosbridge disconnected. Reconnecting...</div>';
             }
             setTimeout(() => {
                 initRosbridge(); // 재연결 시도
@@ -2775,7 +2852,8 @@ async function loadPlotTopics() {
         console.warn('[loadPlotTopics] rosbridge not connected');
         const container = domCache.get('plot-tree');
         if (container) {
-            container.innerHTML = '<div style="color: var(--warning); padding: 12px; text-align: center;">rosbridge not connected. Waiting for connection...</div>';
+            plotState.tree = null;
+            container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--warning); padding: 12px; text-align: center;">rosbridge not connected. Waiting for connection...</div>';
         }
         return;
     }
@@ -2837,33 +2915,27 @@ async function loadPlotTopics() {
             topicTypesMap.set(name, types[index] || 'unknown');
         });
         plotState.topicTypes = topicTypesMap;
-        
-        // 이전 토픽 목록과 비교
+
         const oldTopicsSet = new Set(plotState.topics);
         const newTopicsSet = new Set(topics);
-        
-        // 추가된 토픽 찾기
-        const addedTopics = topics.filter(t => !oldTopicsSet.has(t));
+        const addedTopics = topics.filter((t) => !oldTopicsSet.has(t));
         if (addedTopics.length > 0) {
             console.log('[loadPlotTopics] New topics detected:', addedTopics);
         }
-        
-        // 제거된 토픽 찾기
-        const removedTopics = plotState.topics.filter(t => !newTopicsSet.has(t));
+        const removedTopics = plotState.topics.filter((t) => !newTopicsSet.has(t));
         if (removedTopics.length > 0) {
             console.log('[loadPlotTopics] Removed topics:', removedTopics);
         }
-        
+
         plotState.topics = topics;
-        
-        if (plotState.topics.length === 0) {
-            const container = domCache.get('plot-tree');
-            if (container) {
-                container.innerHTML = '<div style="color: var(--muted); padding: 12px; text-align: center;">No topics available. Start publishing topics to see them here.</div>';
-            }
-        } else {
-            displayTopicList();
-        }
+
+        // ROS 그래프에 없어진 토픽은 왼쪽 패널에서 자동 제거
+        const rosSet = new Set(plotState.topics);
+        const removedFromPanel = plotState.addedPlotTopics.filter((t) => !rosSet.has(t));
+        removedFromPanel.forEach((t) => unselectPlotTopic(t));
+        plotState.addedPlotTopics = plotState.addedPlotTopics.filter((t) => rosSet.has(t));
+
+        displayTopicList();
     } catch (error) {
         console.error('[loadPlotTopics] Error:', error);
         
@@ -2874,10 +2946,10 @@ async function loadPlotTopics() {
             return;
         }
         
-        // 토픽 목록이 없는 경우에만 에러 메시지 표시
         const container = domCache.get('plot-tree');
         if (container) {
-            container.innerHTML = `<div style="color: var(--danger); padding: 12px; text-align: center;">Failed to load topics: ${error.message}</div>`;
+            plotState.tree = null;
+            container.innerHTML = `<div class="plot-tree-status-msg" style="color: var(--danger); padding: 12px; text-align: center;">Failed to load topics: ${error.message}</div>`;
         }
     } finally {
         plotState.isLoadingTopics = false;
@@ -2899,54 +2971,64 @@ function restoreSavedPaths() {
     }
 
     console.log('[restoreSavedPaths] Restoring saved paths for all tabs...');
-    
-    // 각 탭의 savedPaths 복원
-    plotState.plotTabManager.tabs.forEach((tab, tabIndex) => {
-        if (tab.savedPaths && tab.savedPaths.length > 0) {
-            console.log(`[restoreSavedPaths] Restoring ${tab.savedPaths.length} path(s) for tab ${tab.id}:`, tab.savedPaths);
-            
-            // 탭을 활성화 (plot 생성을 위해)
+
+    const tabsWithSaved = plotState.plotTabManager.tabs.filter((t) => t.savedPaths && t.savedPaths.length > 0);
+    if (tabsWithSaved.length === 0) {
+        if (plotState.plotTabManager.tabs.length > 0) {
+            const activeTabId = plotState.plotTabManager.activeTabId || plotState.plotTabManager.tabs[0].id;
+            plotState.plotTabManager.switchTab(activeTabId);
+        }
+        return;
+    }
+
+    const allTopics = new Set(plotState.addedPlotTopics);
+    tabsWithSaved.forEach((tab) => {
+        tab.savedPaths.forEach((p) => {
+            const t = extractRosTopicFromFieldPath(p);
+            if (t) allTopics.add(t);
+        });
+    });
+    plotState.addedPlotTopics = Array.from(allTopics);
+    displayTopicList();
+    plotState.addedPlotTopics.forEach((t) => {
+        if (!plotState.messageTrees.has(t)) {
+            selectPlotTopic(t);
+        }
+    });
+
+    setTimeout(() => {
+        tabsWithSaved.forEach((tab) => {
+            const paths = tab.savedPaths;
+            if (!paths || paths.length === 0) return;
+
+            console.log(`[restoreSavedPaths] Restoring ${paths.length} path(s) for tab ${tab.id}:`, paths);
             plotState.plotTabManager.switchTab(tab.id);
-            
-            // Plot 생성
-            const success = tab.plotManager.createPlot(tab.savedPaths);
+
+            const success = tab.plotManager.createPlot(paths);
             if (success) {
-                console.log(`[restoreSavedPaths] Plot created for tab ${tab.id}`);
-                
-                // 전역 plottedPaths에 추가 (중복 제거)
-                const newPaths = tab.savedPaths.filter(p => !plotState.plottedPaths.includes(p));
+                const newPaths = paths.filter((p) => !plotState.plottedPaths.includes(p));
                 plotState.plottedPaths = plotState.plottedPaths.concat(newPaths);
-                console.log(`[restoreSavedPaths] Added ${newPaths.length} new path(s) to global plottedPaths`);
-                
-                // 각 path에 대해 실시간 데이터 업데이트 설정
-                tab.savedPaths.forEach(path => {
-                    // 이미 구독 중인지 확인 (setupPlotDataUpdate와 동일한 키 형식 사용)
+                paths.forEach((path) => {
                     const plotSubscriberKey = getPlotSubscriberKey(path);
                     if (!plotSubscriberKey || !plotState.subscribers.has(plotSubscriberKey)) {
-                        console.log(`[restoreSavedPaths] Setting up data update for: ${path}`);
                         setupPlotDataUpdate(path);
-                    } else {
-                        console.log(`[restoreSavedPaths] Already subscribed to: ${path}`);
                     }
                 });
             } else {
                 console.error(`[restoreSavedPaths] Failed to create plot for tab ${tab.id}`);
             }
-            
-            // savedPaths 제거 (이미 복원됨)
             delete tab.savedPaths;
+        });
+
+        if (plotState.plotTabManager.tabs.length > 0) {
+            const activeTabId = plotState.plotTabManager.activeTabId || plotState.plotTabManager.tabs[0].id;
+            plotState.plotTabManager.switchTab(activeTabId);
+            console.log(`[restoreSavedPaths] Switched to active tab: ${activeTabId}`);
         }
-    });
-    
-    // 첫 번째 탭으로 전환 (또는 활성 탭 복원)
-    if (plotState.plotTabManager.tabs.length > 0) {
-        const activeTabId = plotState.plotTabManager.activeTabId || plotState.plotTabManager.tabs[0].id;
-        plotState.plotTabManager.switchTab(activeTabId);
-        console.log(`[restoreSavedPaths] Switched to active tab: ${activeTabId}`);
-    }
+    }, 450);
 }
 
-// 토픽 목록 표시 (PlotJuggler 스타일 - 통합 트리)
+// 토픽 목록 표시 (PlotJuggler 스타일 - addedPlotTopics 만 트리에 표시)
 function displayTopicList() {
     const container = domCache.get('plot-tree');
     if (!container) {
@@ -2954,23 +3036,23 @@ function displayTopicList() {
         return;
     }
 
-    if (plotState.topics.length === 0) {
-        container.innerHTML = '<div style="color: var(--muted); padding: 12px; text-align: center;">No topics available</div>';
-        return;
-    }
+    container.querySelector('.plot-tree-empty-hint')?.remove();
+    container.querySelector('.plot-tree-status-msg')?.remove();
 
-    // 기존 에러 메시지나 임시 메시지 제거
-    const errorMsg = container.querySelector('div[style*="color"]');
-    if (errorMsg && !errorMsg.classList.contains('plot-tree-root')) {
-        errorMsg.remove();
-        console.log('[displayTopicList] Removed error/info message');
-    }
-
-    // 토픽 노드 생성
     createTopicNodes();
-    console.log(`[displayTopicList] Created ${plotState.topics.length} topic nodes`);
-    console.log('[displayTopicList] Container:', container);
-    console.log('[displayTopicList] Root children:', plotState.tree.rootNode.childrenContainer.children.length);
+
+    const cc = plotState.tree && plotState.tree.rootNode && plotState.tree.rootNode.childrenContainer;
+    if (cc && plotState.addedPlotTopics.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'plot-tree-empty-hint';
+        hint.style.cssText = 'color: var(--muted); padding: 10px 8px; text-align: center; font-size: 12px; line-height: 1.45;';
+        hint.textContent = (plotState.topics && plotState.topics.length === 0)
+            ? '「+ Add」로 토픽을 선택하세요. 지금은 ROS에 publish된 토픽이 없어 목록이 비어 있을 수 있습니다.'
+            : '「+ Add」에서 표시할 토픽을 선택하세요. 선택한 토픽만 아래 트리에 나타납니다.';
+        cc.appendChild(hint);
+    }
+
+    console.log('[displayTopicList] addedPlotTopics:', plotState.addedPlotTopics.length);
 }
 
 // 토픽 선택 및 구독 (PlotJuggler 스타일)
@@ -3229,61 +3311,77 @@ function collapseAllPlotTree() {
     }
 }
 
-// 트리 필터링 (검색)
-
-function filterPlotTree(searchText) {
-    if (!plotState.tree) {
+/**
+ * Plot 패널: 현재 ROS에 publish된 토픽을 모달에서 선택 (Bag Player Select Topic과 유사)
+ */
+async function openPlotTopicSelectionModal() {
+    if (!plotState.ros || !plotState.ros.isConnected) {
+        alert('rosbridge에 연결된 뒤 토픽을 선택할 수 있습니다.');
         return;
     }
-    
-    const lowerSearch = searchText.toLowerCase();
-    
-    // 모든 노드를 확인하여 필터링
-    plotState.tree.nodeMap.forEach((node, path) => {
-        const nodeName = node.querySelector('.plot-tree-label')?.textContent || '';
-        const isMatch = nodeName.toLowerCase().includes(lowerSearch) || path.toLowerCase().includes(lowerSearch);
-        
-        if (searchText === '') {
-            // 검색어가 없으면 모두 표시
-            node.style.display = '';
-        } else if (isMatch) {
-            // 매칭되면 표시 및 부모 노드들도 표시
-            node.style.display = '';
-            
-            // 토픽 노드 자체가 매칭된 경우: 하위 노드 확장
-            if (plotState.topicNodes && plotState.topicNodes.has(path)) {
-                const topicNode = plotState.topicNodes.get(path);
-                if (topicNode && topicNode.childrenContainer && 
-                    (topicNode.childrenContainer.style.display === 'none' || topicNode.childrenContainer.style.display === '')) {
-                    plotState.tree.toggleExpand(topicNode);
-                }
-            }
-            
-            // 부모 노드들 표시 및 확장
-            let parent = node.parentElement;
-            while (parent && parent.classList.contains('plot-tree-children')) {
-                parent.style.display = 'block';
-                // 부모 노드를 찾아서 표시 및 확장 (children -> node)
-                const parentNode = parent.parentElement;
-                if (parentNode && parentNode.classList.contains('plot-tree-node')) {
-                    // 부모 노드도 표시
-                    parentNode.style.display = '';
-                    // 부모 노드가 확장되지 않았으면 확장
-                    if (parentNode.childrenContainer && 
-                        (parentNode.childrenContainer.style.display === 'none' || parentNode.childrenContainer.style.display === '')) {
-                        plotState.tree.toggleExpand(parentNode);
-                    }
-                }
-                parent = parentNode?.parentElement; // node -> children
-            }
+    await loadPlotTopics();
+    if (!plotState.topics || plotState.topics.length === 0) {
+        alert('현재 publish된 토픽이 없습니다.');
+        return;
+    }
+
+    const topicList = document.getElementById('plot-modal-topic-list');
+    if (!topicList) return;
+    topicList.innerHTML = '';
+
+    plotState.topics.forEach((topicName, index) => {
+        const topicType = plotState.topicTypes.get(topicName) || '';
+
+        const div = document.createElement('div');
+        div.className = 'topic-item';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        const safeId = `plot-topic-${index}-${topicName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        checkbox.id = safeId;
+        checkbox.value = topicName;
+        checkbox.checked = plotState.addedPlotTopics.includes(topicName);
+
+        const label = document.createElement('label');
+        label.htmlFor = safeId;
+        if (topicType) {
+            label.innerHTML = `<span style="font-weight:600;">${topicName}</span> <span style="color:#888; font-size:0.85em;">${topicType}</span>`;
         } else {
-            // 매칭되지 않으면 숨김
-            node.style.display = 'none';
+            label.textContent = topicName;
         }
+
+        div.appendChild(checkbox);
+        div.appendChild(label);
+        topicList.appendChild(div);
     });
-    
-    console.log(`[filterPlotTree] Filtered with: "${searchText}"`);
+
+    const modal = document.getElementById('plot-topic-selection-modal');
+    if (modal) modal.style.display = 'block';
 }
+
+function closePlotTopicSelectionModal() {
+    const modal = document.getElementById('plot-topic-selection-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function confirmPlotTopicSelectionModal() {
+    const checkboxes = document.querySelectorAll('#plot-modal-topic-list input[type="checkbox"]:checked');
+    const next = [];
+    checkboxes.forEach((cb) => next.push(cb.value));
+
+    const prevSet = new Set(plotState.addedPlotTopics);
+    const added = next.filter((t) => !prevSet.has(t));
+
+    plotState.addedPlotTopics = next;
+    displayTopicList();
+    added.forEach((t) => selectPlotTopic(t));
+
+    closePlotTopicSelectionModal();
+}
+
+window.openPlotTopicSelectionModal = openPlotTopicSelectionModal;
+window.closePlotTopicSelectionModal = closePlotTopicSelectionModal;
+window.confirmPlotTopicSelectionModal = confirmPlotTopicSelectionModal;
 
 // 버퍼 시간 업데이트
 function updateBufferTime(seconds) {
@@ -4309,6 +4407,23 @@ window.addEventListener('click', (event) => {
         window.closeFilterDialog();
     }
 });
+
+/**
+ * Plot 탭 왼쪽 토픽 목록 패널 접기/펼치기 (Views 패널과 동일한 화살표 UX)
+ */
+function togglePlotDisplayPanel() {
+    const panel = document.getElementById('plot-display-panel');
+    const container = document.getElementById('plot-container');
+    if (!panel || !container) return;
+    const isCollapsed = panel.classList.toggle('collapsed');
+    container.style.gridTemplateColumns = isCollapsed ? '28px 1fr' : '300px 1fr';
+    const btn = document.getElementById('plot-display-collapse-btn');
+    if (btn) btn.textContent = isCollapsed ? '◀' : '▶';
+    // 그리드 transition(0.2s) 이후 Plotly가 실제 너비를 반영하도록 리사이즈
+    setTimeout(resizeVisiblePlotlyPlots, 230);
+}
+
+window.togglePlotDisplayPanel = togglePlotDisplayPanel;
 
 // ==============================================================
 // 페이지 로드 시 초기화

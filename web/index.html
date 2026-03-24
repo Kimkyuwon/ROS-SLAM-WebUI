@@ -404,26 +404,28 @@
             <div id="plot-subtab" class="subtab-content active">
                 <div class="section card">
                     <h2>Plot</h2>
-                    <div class="plot-container">
+                    <div class="plot-container" id="plot-container">
                         <!-- 왼쪽 Display 창 (통합 트리 뷰) -->
-                        <div class="plot-display-panel">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <div class="plot-display-panel" id="plot-display-panel">
+                            <div class="plot-display-panel-header views-panel-header">
                                 <h3>Topic List</h3>
-                                <div style="display: flex; gap: 8px;">
-                                    <button onclick="expandAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Expand All</button>
-                                    <button onclick="collapseAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Collapse All</button>
+                                <button type="button" id="plot-display-collapse-btn" class="views-collapse-btn"
+                                        onclick="togglePlotDisplayPanel()"
+                                        title="토픽 목록 패널 접기/펼치기">▶</button>
+                            </div>
+                            <div id="plot-display-panel-body" class="plot-display-panel-body">
+                                <div class="plot-display-toolbar">
+                                    <button type="button" onclick="expandAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Expand All</button>
+                                    <button type="button" onclick="collapseAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Collapse All</button>
                                 </div>
-                            </div>
-                            <!-- 검색창 -->
-                            <div style="margin-bottom: 12px;">
-                                <input type="text" id="plot-search-input" placeholder="Search by name for topics..." 
-                                       style="width: 100%; padding: 8px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text);"
-                                       oninput="filterPlotTree(this.value)">
-                            </div>
-                            <!-- 통합 트리 (토픽 + 메시지) -->
-                            <div id="plot-tree" style="overflow-y: auto; max-height: 600px;">
-                                <div style="color: var(--muted); padding: 12px; text-align: center;">
-                                    Loading topics...
+                                <div class="viewer-add-btn-group plot-add-btn-group">
+                                    <button type="button" id="plot-add-topics-btn" onclick="openPlotTopicSelectionModal()">+ Add</button>
+                                </div>
+                                <!-- 통합 트리 (토픽 + 메시지) -->
+                                <div id="plot-tree" class="plot-tree-scroll">
+                                    <div style="color: var(--muted); padding: 12px; text-align: center;">
+                                        Loading topics...
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -474,32 +476,39 @@
                     </div>
                     <div class="viewer-layout">
                         <!-- 왼쪽: Display 패널 -->
-                        <div class="viewer-display-panel">
-                            <h3>Displays</h3>
-                            <!-- Fixed Frame 입력 (RViz 스타일 커스텀 드롭다운) -->
-                            <div class="fixed-frame-row">
-                                <label class="fixed-frame-label">Fixed Frame:</label>
-                                <div class="fixed-frame-combo" id="fixed-frame-combo">
-                                    <input id="fixed-frame-input" class="fixed-frame-input"
-                                           value="map"
-                                           placeholder="e.g. map"
-                                           title="TF 기준 프레임 (클릭 또는 직접 입력)"
-                                           onfocus="onFixedFrameFocus()"
-                                           oninput="onFixedFrameInput(this.value)"
-                                           onkeydown="onFixedFrameKeydown(event)"
-                                           onblur="onFixedFrameBlur(event)"
-                                           autocomplete="off" />
-                                    <button class="fixed-frame-dropdown-btn"
-                                            onmousedown="event.preventDefault(); toggleFixedFrameDropdown();"
-                                            title="사용 가능한 TF 프레임 목록">▾</button>
-                                    <div id="fixed-frame-dropdown" class="fixed-frame-dropdown" style="display:none;"></div>
+                        <div class="viewer-display-panel" id="viewer-display-panel">
+                            <div class="viewer-display-panel-header views-panel-header">
+                                <h3>Displays</h3>
+                                <button type="button" id="viewer-display-collapse-btn" class="views-collapse-btn"
+                                        onclick="toggleViewerDisplayPanel()"
+                                        title="Displays 패널 접기/펼치기">▶</button>
+                            </div>
+                            <div id="viewer-display-panel-body" class="viewer-display-panel-body">
+                                <!-- Fixed Frame 입력 (RViz 스타일 커스텀 드롭다운) -->
+                                <div class="fixed-frame-row">
+                                    <label class="fixed-frame-label">Fixed Frame:</label>
+                                    <div class="fixed-frame-combo" id="fixed-frame-combo">
+                                        <input id="fixed-frame-input" class="fixed-frame-input"
+                                               value="map"
+                                               placeholder="e.g. map"
+                                               title="TF 기준 프레임 (클릭 또는 직접 입력)"
+                                               onfocus="onFixedFrameFocus()"
+                                               oninput="onFixedFrameInput(this.value)"
+                                               onkeydown="onFixedFrameKeydown(event)"
+                                               onblur="onFixedFrameBlur(event)"
+                                               autocomplete="off" />
+                                        <button class="fixed-frame-dropdown-btn"
+                                                onmousedown="event.preventDefault(); toggleFixedFrameDropdown();"
+                                                title="사용 가능한 TF 프레임 목록">▾</button>
+                                        <div id="fixed-frame-dropdown" class="fixed-frame-dropdown" style="display:none;"></div>
+                                    </div>
                                 </div>
-                            </div>
-                            <div class="viewer-add-btn-group">
-                                <button id="viewer-add-display-btn" onclick="openAddDisplayModal()">+ Add</button>
-                            </div>
-                            <div id="viewer-display-panel-content">
-                                <!-- renderDisplayPanel()로 동적 렌더링 -->
+                                <div class="viewer-add-btn-group">
+                                    <button id="viewer-add-display-btn" onclick="openAddDisplayModal()">+ Add</button>
+                                </div>
+                                <div id="viewer-display-panel-content">
+                                    <!-- renderDisplayPanel()로 동적 렌더링 -->
+                                </div>
                             </div>
                         </div>
                         <!-- 오른쪽: 3D 뷰어 캔버스 -->
@@ -602,6 +611,25 @@
             <div class="modal-footer">
                 <button onclick="confirmTopicSelection()">Confirm</button>
                 <button onclick="closeTopicSelection()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Plot: 표시할 ROS 토픽 선택 (Bag Player Select Topic과 동일 UX) -->
+    <div id="plot-topic-selection-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Select Topics</h3>
+                <span class="close" onclick="closePlotTopicSelectionModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="topic-list" id="plot-modal-topic-list">
+                    <!-- checkboxes filled by openPlotTopicSelectionModal() -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" onclick="confirmPlotTopicSelectionModal()">Confirm</button>
+                <button type="button" onclick="closePlotTopicSelectionModal()">Cancel</button>
             </div>
         </div>
     </div>

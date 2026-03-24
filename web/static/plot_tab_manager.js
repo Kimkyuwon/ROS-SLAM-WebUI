@@ -182,47 +182,45 @@ class PlotTabManager {
         });
         
         tabElement.appendChild(titleSpan);
-        
-        // 닫기 버튼 (탭이 2개 이상일 때만 표시)
-        if (this.tabs.length > 1 || this.tabs.length === 0) {  // 렌더링 시점에는 아직 추가 전이므로 조건 확인
-            const closeBtn = document.createElement('button');
-            closeBtn.id = `plot-tab-close-${tab.id}`;
-            closeBtn.textContent = '×';
-            closeBtn.style.cssText = `
-                padding: 0;
-                width: 16px;
-                height: 16px;
-                background: transparent;
-                border: none;
-                color: rgba(255, 255, 255, 0.6);
-                font-size: 16px;
-                cursor: pointer;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                border-radius: 3px;
-                transition: all 0.2s ease;
-                flex-shrink: 0;
-            `;
-            closeBtn.title = 'Close tab';
-            
-            closeBtn.addEventListener('mouseenter', () => {
-                closeBtn.style.background = 'rgba(255, 70, 85, 0.25)';
-                closeBtn.style.color = 'rgba(255, 255, 255, 0.95)';
-                closeBtn.style.transform = 'scale(1.1)';
-            });
-            closeBtn.addEventListener('mouseleave', () => {
-                closeBtn.style.background = 'transparent';
-                closeBtn.style.color = 'rgba(255, 255, 255, 0.6)';
-                closeBtn.style.transform = 'scale(1)';
-            });
-            closeBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.closeTab(tab.id);
-            });
-            
-            tabElement.appendChild(closeBtn);
-        }
+
+        // 닫기 버튼 (탭이 1개일 때도 표시 — 마지막 탭은 플롯만 초기화)
+        const closeBtn = document.createElement('button');
+        closeBtn.id = `plot-tab-close-${tab.id}`;
+        closeBtn.textContent = '×';
+        closeBtn.style.cssText = `
+            padding: 0;
+            width: 16px;
+            height: 16px;
+            background: transparent;
+            border: none;
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 16px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 3px;
+            transition: all 0.2s ease;
+            flex-shrink: 0;
+        `;
+        closeBtn.title = 'Close tab';
+
+        closeBtn.addEventListener('mouseenter', () => {
+            closeBtn.style.background = 'rgba(255, 70, 85, 0.25)';
+            closeBtn.style.color = 'rgba(255, 255, 255, 0.95)';
+            closeBtn.style.transform = 'scale(1.1)';
+        });
+        closeBtn.addEventListener('mouseleave', () => {
+            closeBtn.style.background = 'transparent';
+            closeBtn.style.color = 'rgba(255, 255, 255, 0.6)';
+            closeBtn.style.transform = 'scale(1)';
+        });
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.closeTab(tab.id);
+        });
+
+        tabElement.appendChild(closeBtn);
         
         // 탭 클릭 이벤트 (전환)
         tabElement.addEventListener('click', () => {
@@ -308,28 +306,52 @@ class PlotTabManager {
         }
         
         console.log(`[PlotTabManager] Switched to tab: ${tabId}`);
+
+        // 탭 전환 직후 표시되는 Plot div 크기에 맞게 Plotly 리사이즈
+        if (typeof window.resizeVisiblePlotlyPlots === 'function') {
+            requestAnimationFrame(() => {
+                window.resizeVisiblePlotlyPlots();
+            });
+        }
     }
 
     closeTab(tabId) {
-        if (this.tabs.length === 1) {
-            console.warn('[PlotTabManager] Cannot close the last tab');
-            return;
-        }
-        
-        const tabIndex = this.tabs.findIndex(t => t.id === tabId);
+        const tabIndex = this.tabs.findIndex((t) => t.id === tabId);
         if (tabIndex === -1) {
             console.warn(`[PlotTabManager] Tab not found: ${tabId}`);
             return;
         }
-        
+
         const tab = this.tabs[tabIndex];
-        
-        // PlotlyPlotManager 정리
-        if (tab.plotManager) {
-            // 메모리 해제 로직 (필요시 구현)
-            console.log(`[PlotTabManager] Cleaning up PlotlyPlotManager for tab: ${tabId}`);
+
+        // 마지막 탭: 탭 UI는 유지하고 드래그 안내 초기 화면만 복원
+        if (this.tabs.length === 1) {
+            if (typeof window.releasePlotPathsFromPlotManager === 'function') {
+                window.releasePlotPathsFromPlotManager(this, tab.plotManager);
+            }
+            if (tab.plotManager) {
+                tab.plotManager.destroy();
+                tab.plotManager.initEmptyPlot();
+            }
+            if (typeof window.resizeVisiblePlotlyPlots === 'function') {
+                requestAnimationFrame(() => window.resizeVisiblePlotlyPlots());
+            }
+            try {
+                this.saveState();
+            } catch (e) {
+                console.warn('[PlotTabManager] saveState after reset:', e);
+            }
+            console.log('[PlotTabManager] Last tab cleared to empty plot placeholder');
+            return;
         }
-        
+
+        if (typeof window.releasePlotPathsFromPlotManager === 'function') {
+            window.releasePlotPathsFromPlotManager(this, tab.plotManager);
+        }
+        if (tab.plotManager) {
+            tab.plotManager.destroy();
+        }
+
         // Plot div 제거
         if (tab.plotDiv && tab.plotDiv.parentNode) {
             tab.plotDiv.parentNode.removeChild(tab.plotDiv);
@@ -427,19 +449,10 @@ class PlotTabManager {
     }
 
     updateCloseButtons() {
-        // 탭이 2개 이상일 때만 닫기 버튼 표시
-        this.tabs.forEach(tab => {
+        this.tabs.forEach((tab) => {
             const closeBtn = document.getElementById(`plot-tab-close-${tab.id}`);
             if (closeBtn) {
-                closeBtn.style.display = this.tabs.length > 1 ? 'flex' : 'none';
-            } else if (this.tabs.length > 1) {
-                // 닫기 버튼이 없으면 추가 (재렌더링)
-                const tabUI = document.getElementById(`plot-tab-ui-${tab.id}`);
-                if (tabUI) {
-                    // 기존 UI 제거 후 재생성
-                    tabUI.remove();
-                    this.renderTabUI(tab);
-                }
+                closeBtn.style.display = 'flex';
             }
         });
     }
