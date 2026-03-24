@@ -269,7 +269,12 @@ class KittiConverter:
 
         # ── 8. Static TF 계산 (calib 행렬에서) ───────────────────────
         _progress(3, 'Computing static TF transforms...')
-        static_tf_msg = self._build_static_tf(calib_imu_to_velo, calib_velo_to_cam)
+        first_stamp = self._ns_to_time_msg(oxts_timestamps[0]) if oxts_timestamps else None
+        static_tf_msg = self._build_static_tf(
+            calib_imu_to_velo, calib_velo_to_cam,
+            calib_cam_to_cam=calib_cam_to_cam,
+            stamp=first_stamp,
+        )
 
         # ── 9. Mercator 투영 원점 설정 ───────────────────────────────
         origin_oxts = None
@@ -566,7 +571,12 @@ class KittiConverter:
 
         # ── 8. Static TF 계산 ────────────────────────────────────────
         _progress(2, 'Initializing ROS1 bag writer...')
-        static_tf_msg = self._build_static_tf(calib_imu_to_velo, calib_velo_to_cam)
+        first_stamp = self._ns_to_time_msg(oxts_timestamps[0]) if oxts_timestamps else None
+        static_tf_msg = self._build_static_tf(
+            calib_imu_to_velo, calib_velo_to_cam,
+            calib_cam_to_cam=calib_cam_to_cam,
+            stamp=first_stamp,
+        )
 
         # ── 9. Mercator 투영 원점 ────────────────────────────────────
         origin_oxts = None
@@ -732,33 +742,60 @@ class KittiConverter:
     def _parse_calib_file(self, filepath: str) -> dict:
         """KITTI calibration 텍스트 파일을 파싱하여 딕셔너리로 반환한다.
 
-        각 행은 'key: value [value ...]' 형식이며,
-        숫자 값은 float 또는 float 리스트로 변환된다.
+        지원 형식:
+          - 단일 라인: 'key: v1 v2 v3 ...'
+          - 다중 라인: 'Tr_xxx:' 다음 3줄에 4값씩 (KITTI 표준 3x4 행렬)
         """
         result = {}
         if not os.path.exists(filepath):
             return result
         with open(filepath, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if ':' not in line:
-                    continue
-                key, val_str = line.split(':', 1)
-                key = key.strip()
-                vals = val_str.strip().split()
-                if not vals:
-                    result[key] = val_str.strip()
-                elif len(vals) == 1:
-                    try:
-                        result[key] = float(vals[0])
-                    except ValueError:
-                        result[key] = vals[0]
-                else:
-                    try:
-                        result[key] = [float(v) for v in vals]
-                    except ValueError:
-                        result[key] = vals
+            lines = [ln.strip() for ln in f if ln.strip()]
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if ':' not in line:
+                i += 1
+                continue
+            key, val_str = line.split(':', 1)
+            key = key.strip()
+            vals = val_str.strip().split()
+            # 다중 라인: Tr_* 또는 R, T 등 키 다음 줄들이 값 연속인 경우
+            if len(vals) < 9 and i + 1 < len(lines):
+                next_ln = lines[i + 1]
+                if ':' not in next_ln and next_ln:
+                    # 다음 줄에 숫자만 있으면 현재 키에 추가
+                    while i + 1 < len(lines):
+                        next_ln = lines[i + 1]
+                        if ':' in next_ln:
+                            break
+                        extra = next_ln.split()
+                        if all(self._is_float(s) for s in extra):
+                            vals.extend(extra)
+                            i += 1
+                        else:
+                            break
+            if not vals:
+                result[key] = val_str.strip() if val_str.strip() else []
+            elif len(vals) == 1:
+                try:
+                    result[key] = float(vals[0])
+                except ValueError:
+                    result[key] = vals[0]
+            else:
+                try:
+                    result[key] = [float(v) for v in vals]
+                except ValueError:
+                    result[key] = vals
+            i += 1
         return result
+
+    def _is_float(self, s: str) -> bool:
+        try:
+            float(s)
+            return True
+        except (ValueError, TypeError):
+            return False
 
     # ──────────────────────────────────────────────────────────────
     # Private helpers - 타임스탬프
@@ -890,6 +927,61 @@ class KittiConverter:
         return msg
 
     # ──────────────────────────────────────────────────────────────
+    # Private helpers - calib R/T 추출 (다양한 KITTI 형식 지원)
+    # ──────────────────────────────────────────────────────────────
+
+    def _extract_rt_from_calib(self, calib: dict, tr_key: str = None,
+                               r00_key: str = None) -> tuple:
+        """calib 딕셔너리에서 R(3x3), T(3x1)를 추출한다.
+
+        지원 형식:
+          - R: 9 values, T: 3 values (표준 KITTI)
+          - R_00: 9 values, T_00: 3 values (calib_velo_to_cam 대체)
+          - Tr_*: 12 values (3x4 행렬, row-major [R|T])
+        """
+        R, T = None, None
+
+        # 형식 1: R, T 별도 키 (R/T 또는 R_00/T_00)
+        pairs = [('R', 'T')]
+        if r00_key and len(r00_key) >= 4:
+            pairs.append((r00_key, f'T_{r00_key[-2:]}'))
+        for rk, tk in pairs:
+            if rk in calib and tk in calib:
+                r_vals = calib[rk]
+                t_vals = calib[tk]
+                if isinstance(r_vals, (list, tuple)) and len(r_vals) >= 9:
+                    R = np.array(r_vals, dtype=np.float64).reshape(3, 3)
+                if isinstance(t_vals, (list, tuple)) and len(t_vals) >= 3:
+                    T = np.array(t_vals[:3], dtype=np.float64)
+                if R is not None and T is not None:
+                    break
+
+        # 형식 2: Tr_* 3x4 행렬 (row-major)
+        if R is None or T is None:
+            keys_to_try = [tr_key] if tr_key else ['Tr_imu_to_velo', 'Tr_velo_to_cam']
+            for key in keys_to_try:
+                if not key or not key.startswith('Tr_') or key not in calib:
+                    continue
+                vals = calib[key]
+                if isinstance(vals, (list, tuple)) and len(vals) >= 12:
+                    arr = np.array(vals[:12], dtype=np.float64).reshape(3, 4)
+                    R = arr[:, :3]
+                    T = arr[:, 3]
+                    break
+
+        return (R, T)
+
+    def _invert_rt(self, R: np.ndarray, T: np.ndarray) -> tuple:
+        """KITTI calib (A→B: p_B = R*p_A + T)를 ROS TF (child→parent)용으로 역변환.
+
+        ROS TF: p_parent = R_inv * p_child + t_inv
+        반환: (R^T, -R^T @ T)
+        """
+        R_inv = R.T
+        T_inv = -R_inv @ np.array(T).flatten()
+        return R_inv, T_inv
+
+    # ──────────────────────────────────────────────────────────────
     # Private helpers - TF 변환
     # ──────────────────────────────────────────────────────────────
 
@@ -897,60 +989,141 @@ class KittiConverter:
         self,
         calib_imu_to_velo: dict,
         calib_velo_to_cam: dict,
+        calib_cam_to_cam: dict = None,
+        stamp: Time = None,
     ) -> TFMessage:
         """calib 행렬에서 Static TF 메시지를 생성한다.
 
         변환 체인:
           base_link → imu_link      (identity)
           imu_link  → velo_link     (calib_imu_to_velo)
-          velo_link → camera_gray_left_link (calib_velo_to_cam)
+          velo_link → camera_*_link  (calib_velo_to_cam + calib_cam_to_cam)
+
+        Args:
+            calib_imu_to_velo: calib_imu_to_velo.txt 파싱 결과
+            calib_velo_to_cam: calib_velo_to_cam.txt 파싱 결과
+            calib_cam_to_cam: calib_cam_to_cam.txt 파싱 결과 (카메라 1,2,3용, 선택)
+            stamp: TF header stamp (None이면 0,0)
         """
         transforms = []
+        if stamp is None:
+            stamp = Time()
+            stamp.sec = 0
+            stamp.nanosec = 0
 
         # base_link → imu_link (identity transform)
         t0 = TransformStamped()
+        if stamp:
+            t0.header.stamp = stamp
         t0.header.frame_id = 'base_link'
         t0.child_frame_id = 'imu_link'
         t0.transform.rotation.w = 1.0
         transforms.append(t0)
 
-        # imu_link → velo_link (from calib_imu_to_velo: R(9), T(3))
-        if 'R' in calib_imu_to_velo and 'T' in calib_imu_to_velo:
-            R = np.array(calib_imu_to_velo['R']).reshape(3, 3)
-            T = np.array(calib_imu_to_velo['T'])
-            qx, qy, qz, qw = self._rotation_matrix_to_quaternion(R)
+        # imu_link → velo_link (calib_imu_to_velo: imu→velo, ROS TF는 child→parent이므로 역변환)
+        R_imu, T_imu = self._extract_rt_from_calib(calib_imu_to_velo, 'Tr_imu_to_velo')
+        if R_imu is not None and T_imu is not None:
+            R_tf, T_tf = self._invert_rt(R_imu, T_imu)
+            qx, qy, qz, qw = self._rotation_matrix_to_quaternion(R_tf)
             t1 = TransformStamped()
+            if stamp:
+                t1.header.stamp = stamp
             t1.header.frame_id = 'imu_link'
             t1.child_frame_id = 'velo_link'
-            t1.transform.translation.x = float(T[0])
-            t1.transform.translation.y = float(T[1])
-            t1.transform.translation.z = float(T[2])
+            t1.transform.translation.x = float(T_tf[0])
+            t1.transform.translation.y = float(T_tf[1])
+            t1.transform.translation.z = float(T_tf[2])
             t1.transform.rotation.x = qx
             t1.transform.rotation.y = qy
             t1.transform.rotation.z = qz
             t1.transform.rotation.w = qw
             transforms.append(t1)
+        else:
+            # calib 파싱 실패 시 identity fallback (velo_link 연결 유지)
+            t1 = TransformStamped()
+            if stamp:
+                t1.header.stamp = stamp
+            t1.header.frame_id = 'imu_link'
+            t1.child_frame_id = 'velo_link'
+            t1.transform.rotation.w = 1.0
+            transforms.append(t1)
 
-        # velo_link → camera_gray_left_link (from calib_velo_to_cam: R(9), T(3))
-        if 'R' in calib_velo_to_cam and 'T' in calib_velo_to_cam:
-            R = np.array(calib_velo_to_cam['R']).reshape(3, 3)
-            T = np.array(calib_velo_to_cam['T'])
-            qx, qy, qz, qw = self._rotation_matrix_to_quaternion(R)
-            t2 = TransformStamped()
-            t2.header.frame_id = 'velo_link'
-            t2.child_frame_id = 'camera_gray_left_link'
-            t2.transform.translation.x = float(T[0])
-            t2.transform.translation.y = float(T[1])
-            t2.transform.translation.z = float(T[2])
-            t2.transform.rotation.x = qx
-            t2.transform.rotation.y = qy
-            t2.transform.rotation.z = qz
-            t2.transform.rotation.w = qw
-            transforms.append(t2)
+        # velo_link → camera_*_link (calib_velo_to_cam: velo→cam, ROS TF는 child→parent이므로 역변환)
+        R_velo, T_velo = self._extract_rt_from_calib(
+            calib_velo_to_cam, 'Tr_velo_to_cam', 'R_00')
+        if R_velo is not None and T_velo is not None:
+            # cam0 (gray left): velo → cam0, 역변환하여 velo_link(parent)→camera(child)
+            R_tf, T_tf = self._invert_rt(R_velo, T_velo)
+            self._append_velo_to_cam_tf(
+                transforms, R_tf, T_tf, 'camera_gray_left_link', stamp)
+
+            # cam1,2,3: velo → cam0 → cam_i (calib_cam_to_cam R_0i, T_0i)
+            if calib_cam_to_cam:
+                cam_specs = [
+                    ('01', 'camera_gray_right_link'),
+                    ('02', 'camera_color_left_link'),
+                    ('03', 'camera_color_right_link'),
+                ]
+                for cam_id, frame_id in cam_specs:
+                    R_0i = self._get_calib_matrix(calib_cam_to_cam, f'R_{cam_id}', 3, 3)
+                    T_0i = self._get_calib_matrix(calib_cam_to_cam, f'T_{cam_id}', 3, 1)
+                    if R_0i is not None and T_0i is not None:
+                        # KITTI: p_cam0 = R_velo @ p_velo + T_velo,
+                        #        p_cami = R_0i @ p_cam0 + T_0i
+                        #   =>  p_cami = (R_0i @ R_velo) @ p_velo + (R_0i @ T_velo + T_0i)
+                        # (기존 R_velo @ R_0i 는 행렬 순서가 반대라 좌우 배치가 전후로 뒤틀림)
+                        t_0i = np.array(T_0i, dtype=np.float64).flatten()
+                        R_combined = R_0i @ R_velo
+                        T_combined = R_0i @ np.array(T_velo, dtype=np.float64).flatten() + t_0i
+                        R_tf_i, T_tf_i = self._invert_rt(R_combined, T_combined)
+                        self._append_velo_to_cam_tf(
+                            transforms, R_tf_i, T_tf_i, frame_id, stamp)
+        else:
+            # calib_velo_to_cam 파싱 실패 시 velo→cam0 identity (최소 연결)
+            t_cam0 = TransformStamped()
+            if stamp:
+                t_cam0.header.stamp = stamp
+            t_cam0.header.frame_id = 'velo_link'
+            t_cam0.child_frame_id = 'camera_gray_left_link'
+            t_cam0.transform.rotation.w = 1.0
+            transforms.append(t_cam0)
 
         tf_msg = TFMessage()
         tf_msg.transforms = transforms
         return tf_msg
+
+    def _get_calib_matrix(self, calib: dict, key: str, rows: int, cols: int) -> np.ndarray:
+        """calib에서 key에 해당하는 행렬을 추출한다."""
+        if key not in calib:
+            return None
+        vals = calib[key]
+        if not isinstance(vals, (list, tuple)) or len(vals) < rows * cols:
+            return None
+        return np.array(vals[:rows * cols], dtype=np.float64).reshape(rows, cols)
+
+    def _append_velo_to_cam_tf(
+        self,
+        transforms: list,
+        R: np.ndarray,
+        T: np.ndarray,
+        child_frame_id: str,
+        stamp: Time,
+    ) -> None:
+        """velo_link → child_frame_id 변환을 transforms에 추가한다."""
+        qx, qy, qz, qw = self._rotation_matrix_to_quaternion(R)
+        t = TransformStamped()
+        if stamp:
+            t.header.stamp = stamp
+        t.header.frame_id = 'velo_link'
+        t.child_frame_id = child_frame_id
+        t.transform.translation.x = float(T[0])
+        t.transform.translation.y = float(T[1])
+        t.transform.translation.z = float(T[2])
+        t.transform.rotation.x = qx
+        t.transform.rotation.y = qy
+        t.transform.rotation.z = qz
+        t.transform.rotation.w = qw
+        transforms.append(t)
 
     def _make_dynamic_tf(
         self,

@@ -16,6 +16,7 @@
  *   { cmd: 'connect',          url: string }
  *   { cmd: 'subscribe',        topicName: string }
  *   { cmd: 'unsubscribe',      topicName: string }
+ *   { cmd: 'unsubscribeAll' }  — Image WS 구독 전부 해제
  *
  * Messages to main thread:
  *   { type: 'imgframe',   topicName, bitmap }  — ImageBitmap (transferable)
@@ -59,6 +60,18 @@ self.onmessage = function (e) {
         _decoding.delete(e.data.topicName);
         if (wsReady) {
             ws.send(JSON.stringify({ cmd: 'unsubscribe_image', topic: e.data.topicName }));
+        }
+
+    } else if (cmd === 'unsubscribeAll') {
+        const topics = Array.from(subscriptions);
+        subscriptions.clear();
+        _decoding.clear();
+        if (wsReady) {
+            for (let i = 0; i < topics.length; i++) {
+                try {
+                    ws.send(JSON.stringify({ cmd: 'unsubscribe_image', topic: topics[i] }));
+                } catch (err) { /* ignore */ }
+            }
         }
     }
 };

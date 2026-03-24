@@ -272,6 +272,11 @@ const viewer3DState = {
     selectedLivoxTopics: [],        // 선택된 Livox 토픽 목록
     livoxTagFilter: new Map(),      // topicName → boolean (true = 노이즈 제외)
 
+    // LaserScan (sensor_msgs/LaserScan) — RViz LaserScanDisplay 참조
+    selectedLaserScanTopics: [],    // 선택된 LaserScan 토픽 목록
+    laserScanObjects: new Map(),   // topicName → { frameGroup, points, visible }
+    laserScanLastMessage: new Map(), // topicName → 마지막 수신 메시지 (색상 모드 변경 시 즉시 재처리용)
+
     // Phase 2.7: Image 패널 관련 상태
     selectedImageTopics: [],        // 선택된 Image 토픽 목록
     imageSubscriptions: new Map(),  // topicName → true  (Worker 구독 중 표시용)
@@ -630,6 +635,11 @@ window.switchViewType = switchViewType;
 // 이전 프레임에서의 Target Frame 월드 좌표 (delta 계산용)
 let _tfTrackId  = null;  // 현재 추적 중인 frame ID
 let _tfLastPos  = null;  // THREE.Vector3 | null — 이전 프레임 Target Frame 위치
+
+function _resetTfCameraAssistState() {
+    _tfTrackId = null;
+    _tfLastPos = null;
+}
 
 /**
  * updateOrbitTargetFrame()
@@ -1385,13 +1395,43 @@ function parseLivoxCustomMsg(message, settings, prevMin, prevMax) {
     return { count, newMin, newMax };
 }
 
+/** PC2/Image 스트림 워커에 남은 구독 해제 후 워커 종료 → 다음 구독 시 새 연결(전환 누적·상태 꼬임 방지) */
+function _detachAllStreamWorkers() {
+    if (_pc2StreamWorker) {
+        try {
+            _pc2StreamWorker.postMessage({ cmd: 'unsubscribeAll' });
+        } catch (e) {
+            console.warn('[Viewer] PC2 worker unsubscribeAll:', e);
+        }
+        try {
+            _pc2StreamWorker.terminate();
+        } catch (e) {
+            console.warn('[Viewer] PC2 worker terminate:', e);
+        }
+        _pc2StreamWorker = null;
+    }
+    if (_imgStreamWorker) {
+        try {
+            _imgStreamWorker.postMessage({ cmd: 'unsubscribeAll' });
+        } catch (e) {
+            console.warn('[Viewer] Image worker unsubscribeAll:', e);
+        }
+        try {
+            _imgStreamWorker.terminate();
+        } catch (e) {
+            console.warn('[Viewer] Image worker terminate:', e);
+        }
+        _imgStreamWorker = null;
+    }
+    _pc2FrameCounts.clear();
+}
+
 /**
- * 3D Viewer 토픽 구독 전체 리셋 (ConPR ↔ ROS1 bag 전환 시 /livox/lidar 타입 충돌 방지)
- * load_data 성공 시 호출 → 이전 구독 해제 후 사용자가 새 토픽 목록에서 재선택
+ * 3D Viewer 토픽 구독 전체 리셋 (백·데이터셋 전환 시)
+ * 구독이 없어도 Display/설정/워커/백그라운드 TF 보조 구독을 비운다.
  */
 function resetViewerTopicSubscriptions() {
     const topicNames = Array.from(viewer3DState.topicSubscriptions.keys());
-    if (topicNames.length === 0) return;
     topicNames.forEach(function(topicName) {
         try {
             unsubscribeFromTopic(topicName);
@@ -1399,14 +1439,45 @@ function resetViewerTopicSubscriptions() {
             console.warn('[Viewer] Reset unsubscribe:', topicName, e);
         }
     });
+    // 백그라운드 /tf 구독을 먼저 끊어 큐에 남은 이전 백 메시지가 tfFrameTree 를 다시 채우지 않게 함
+    _unsubscribeAllBackgroundTf();
+    _detachAllStreamWorkers();
+    _resetTfCameraAssistState();
+    _bumpTfSessionId();
+
     viewer3DState.displaySelectedTopics = [];
     viewer3DState.selectedLivoxTopics = [];
     viewer3DState.selectedPathTopics = [];
     viewer3DState.selectedOdomTopics = [];
     viewer3DState.selectedTFTopics = [];
+    viewer3DState.selectedLaserScanTopics = [];
     viewer3DState.selectedImageTopics = [];
-    if (typeof renderDisplayPanel === 'function') renderDisplayPanel();
-    console.log('[Viewer] Topic subscriptions reset (re-select from fresh list)');
+    viewer3DState.topicSettings.clear();
+    viewer3DState.livoxTagFilter.clear();
+    _lastPlayerFilePc2Topics = [];
+
+    viewer3DState.tfFrameTree.clear();
+    _allKnownFrames.clear();
+    viewer3DState.topicFrameIds.clear();
+    viewer3DState.laserScanLastMessage.clear();
+
+    _tfLatestRosTimeNs = 0;
+    _lastKnownFramesSig = '';
+
+    resetFixedFrameAndViewTargetsToDefault();
+
+    if (typeof renderDisplayPanel === 'function') {
+        renderDisplayPanel();
+    }
+    if (typeof updateFixedFrameOptions === 'function') {
+        updateFixedFrameOptions();
+    }
+    if (typeof updateViewTargetFrameOptions === 'function') {
+        updateViewTargetFrameOptions();
+    }
+    viewer3DState.needsRender = true;
+    restartBackgroundTfPipeline({ skipUnsubscribe: true });
+    console.log('[Viewer] Full topic/display/TF-cache reset (re-select displays as needed)');
 }
 
 // 토픽 구독 해제 및 리소스 정리
@@ -1532,6 +1603,20 @@ function unsubscribeFromTopic(topicName) {
         viewer3DState.livoxTagFilter.delete(topicName);
     }
 
+    // LaserScan 객체 정리 (RViz LaserScanDisplay 스타일)
+    const laserScanObj = viewer3DState.laserScanObjects.get(topicName);
+    if (laserScanObj) {
+        const rootObj = laserScanObj.frameGroup || laserScanObj.points;
+        viewer3DState.scene.remove(rootObj);
+        laserScanObj.points.geometry.dispose();
+        laserScanObj.points.material.dispose();
+        viewer3DState.laserScanObjects.delete(topicName);
+        console.log('Removed LaserScan object for topic:', topicName);
+    }
+    const lsIdx = viewer3DState.selectedLaserScanTopics.indexOf(topicName);
+    if (lsIdx !== -1) viewer3DState.selectedLaserScanTopics.splice(lsIdx, 1);
+    viewer3DState.laserScanLastMessage.delete(topicName);
+
     // Image 구독 정리 (Worker 기반)
     if (viewer3DState.imageSubscriptions.has(topicName)) {
         if (_imgStreamWorker) {
@@ -1619,25 +1704,143 @@ function clearTopicVisualization(topicName) {
         });
         viewer3DState.tfObjects.delete(topicName);
     }
+
+    // ── LaserScan: scene에서 제거 + Map 삭제 → 다음 메시지에 콜백이 재생성 ──
+    const laserScanObj = viewer3DState.laserScanObjects.get(topicName);
+    if (laserScanObj) {
+        const rootObj = laserScanObj.frameGroup || laserScanObj.points;
+        viewer3DState.scene.remove(rootObj);
+        laserScanObj.points.geometry.dispose();
+        laserScanObj.points.material.dispose();
+        viewer3DState.laserScanObjects.delete(topicName);
+    }
 }
 
 // 시각화 데이터 리셋: 구독/선택 상태는 유지하고 씬의 시각화 오브젝트만 초기화
 // → 다음 수신 메시지부터 각 콜백이 오브젝트를 자동 재생성하여 새 데이터부터 표시
 function resetAll3DViewer() {
-    const allTopics = [
+    const allTopics = [...new Set([
         ...viewer3DState.displaySelectedTopics,
+        ...viewer3DState.selectedLivoxTopics,
         ...viewer3DState.selectedPathTopics,
         ...viewer3DState.selectedOdomTopics,
         ...viewer3DState.selectedTFTopics,
-    ];
+        ...viewer3DState.selectedLaserScanTopics,
+    ])];
 
     // 각 토픽의 시각화 오브젝트만 씬에서 제거 (GPU 메모리 해제)
     allTopics.forEach(topicName => clearTopicVisualization(topicName));
 
-    // TF 프레임 트리 초기화 → 다음 TF 메시지 수신 시 처음부터 재구축
-    viewer3DState.tfFrameTree.clear();
+    // tfFrameTree 는 건드리지 않음 — load_data 직후 TF 재구독과 맞물리면 점군 TF 미스로 전부 숨겨질 수 있음
 
     console.log('[resetAll3DViewer] Visualization cleared. Subscriptions maintained. Awaiting fresh data.');
+}
+
+/**
+ * 백/데이터 재생 전환 시 이전 TF·프레임 캐시 제거 (KAIST→KITTI 등)
+ * - tfFrameTree, _allKnownFrames, topicFrameIds, laserScanLastMessage 초기화
+ * - TF 디스플레이는 빈 트리로 재빌드 후 다음 /tf 수신으로 갱신
+ */
+function resetBagFrameAndTFState() {
+    _resetTfCameraAssistState();
+    // tfFrameTree / _allKnownFrames 는 resetViewerTopicSubscriptions 에서만 비운다.
+    // 여기서 다시 비우면 백그라운드 /tf 가 막 채운 직후 PC2 가 와서 transform 미스 → 점군 visible=false 가 된다.
+    viewer3DState.topicFrameIds.clear();
+    viewer3DState.laserScanLastMessage.clear();
+
+    if (!viewer3DState.scene) {
+        console.log('[Viewer] Bag/data switch: topic frame caches cleared (3D scene not initialized)');
+        return;
+    }
+
+    viewer3DState.selectedTFTopics.forEach(function(topicName) {
+        try {
+            rebuildTFScene(topicName);
+        } catch (e) {
+            console.warn('[Viewer] resetBagFrameAndTFState rebuildTFScene:', topicName, e);
+        }
+    });
+
+    reapplyAllFrameTransforms();
+    if (typeof updateFixedFrameOptions === 'function') {
+        updateFixedFrameOptions();
+    }
+    viewer3DState.needsRender = true;
+    console.log('[Viewer] Bag/data switch: topic frame_ids / laserScan cache cleared (TF tree kept in sync with reset pipeline)');
+}
+
+/** 직전 load_data 가 알려 준 File Player PointCloud2 토픽 (구독 동기화용) */
+let _lastPlayerFilePc2Topics = [];
+
+/**
+ * 서버 load_data 응답의 player_pc2_topics 로 PC2 구독·Display 를 맞춘다.
+ * - 배열: 웹 노드가 발행하는 PC2 목록(백엔드와 동일 문자열). 이전 load 추적 토픽 중 여기 없으면 해제 후 목록 반영.
+ * - null/undefined: ROS bag 등 자동 목록 없음 → 추적 중인 file-player PC2 만 해제.
+ */
+function syncPlayerFilePointCloudSubscriptions(playerPc2Topics) {
+    const prev = _lastPlayerFilePc2Topics.slice();
+
+    function removeTopic(t) {
+        const ix = viewer3DState.displaySelectedTopics.indexOf(t);
+        if (ix !== -1) {
+            viewer3DState.displaySelectedTopics.splice(ix, 1);
+        }
+        if (viewer3DState.topicSubscriptions.has(t)) {
+            try {
+                unsubscribeFromTopic(t);
+            } catch (e) {
+                console.warn('[Viewer] sync PC2 off', t, e);
+            }
+        }
+    }
+
+    if (playerPc2Topics === undefined || playerPc2Topics === null) {
+        prev.forEach(removeTopic);
+        _lastPlayerFilePc2Topics = [];
+        if (typeof renderDisplayPanel === 'function') {
+            renderDisplayPanel();
+        }
+        return;
+    }
+    if (!Array.isArray(playerPc2Topics)) {
+        playerPc2Topics = [];
+    }
+    const next = playerPc2Topics.slice();
+    const nextSet = new Set(next);
+
+    prev.forEach(function (t) {
+        if (!nextSet.has(t)) {
+            removeTopic(t);
+        }
+    });
+
+    next.forEach(function (t) {
+        if (viewer3DState.displaySelectedTopics.indexOf(t) === -1) {
+            viewer3DState.displaySelectedTopics.push(t);
+        }
+        subscribeToPointCloud(t);
+    });
+
+    _lastPlayerFilePc2Topics = next;
+    if (typeof renderDisplayPanel === 'function') {
+        renderDisplayPanel();
+    }
+}
+
+/**
+ * File Player load_data 직후: 씬 메시 + TF·프레임 캐시만 초기화 (syncPlayerFilePointCloudSubscriptions 이후 호출).
+ */
+function resetViewerAfterPlayerLoad() {
+    if (!viewer3DState.scene) {
+        viewer3DState.tfFrameTree.clear();
+        _allKnownFrames.clear();
+        viewer3DState.topicFrameIds.clear();
+        viewer3DState.laserScanLastMessage.clear();
+        console.log('[Viewer] Player load: caches cleared (3D scene not initialized)');
+        return;
+    }
+    resetAll3DViewer();
+    resetBagFrameAndTFState();
 }
 
 /**
@@ -2537,6 +2740,58 @@ function updateTopicSetting(topicName, key, value) {
             [key]: value,
         });
     }
+
+    // LaserScan: 색상 모드/단색 변경 시 마지막 메시지로 즉시 재처리 (Solid 지정색 즉시 반영)
+    if (viewer3DState.selectedLaserScanTopics.includes(topicName) &&
+        (key === 'colorMode' || key === 'solidColor' || key === 'colorField')) {
+        reprocessLaserScanFromLastMessage(topicName);
+    }
+}
+
+/**
+ * LaserScan 마지막 수신 메시지를 현재 설정으로 재처리 (색상 모드 변경 시 즉시 반영)
+ * @param {string} topicName - LaserScan 토픽명
+ */
+function reprocessLaserScanFromLastMessage(topicName) {
+    const lastMsg = viewer3DState.laserScanLastMessage.get(topicName);
+    if (!lastMsg || !lastMsg.ranges || lastMsg.ranges.length === 0) return;
+
+    const existingObj = viewer3DState.laserScanObjects.get(topicName);
+    if (!existingObj || existingObj.visible === false) return;
+
+    const settings = viewer3DState.topicSettings.get(topicName) || {};
+    const frameId = (lastMsg.header && lastMsg.header.frame_id) ? lastMsg.header.frame_id : '';
+    const pointSize = settings.pointSize !== undefined ? settings.pointSize : 0.1;
+    const alpha = settings.alpha !== undefined ? settings.alpha : 1.0;
+
+    const { positions, colors, count } = laserScanToPointsAndColors(lastMsg, settings);
+    if (count === 0) return;
+
+    const colorMode = settings.colorMode || 'rainbow';
+    const useVertexColors = colorMode === 'rainbow';
+
+    existingObj.points.geometry.dispose();
+    existingObj.points.geometry = new THREE.BufferGeometry();
+    existingObj.points.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (useVertexColors) {
+        existingObj.points.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    } else {
+        existingObj.points.geometry.deleteAttribute('color');
+    }
+    existingObj.points.geometry.attributes.position.needsUpdate = true;
+    existingObj.points.material.size = pointSize;
+    existingObj.points.material.opacity = alpha;
+    existingObj.points.material.transparent = alpha < 1.0;
+    existingObj.points.material.depthWrite = alpha >= 1.0;
+    existingObj.points.material.vertexColors = useVertexColors;
+    if (useVertexColors) {
+        existingObj.points.material.color.setHex(0xffffff);  // vertex color 그대로 표시 (곱셈 방지)
+    } else {
+        existingObj.points.material.color.setStyle(settings.solidColor || '#ffffff');
+    }
+    existingObj.points.material.needsUpdate = true;
+    applyFrameTransformToObject(existingObj.frameGroup, frameId);
+    viewer3DState.needsRender = true;
 }
 
 /**
@@ -2547,15 +2802,17 @@ function renderDisplayPanel() {
     const container = document.getElementById('viewer-display-panel-content');
     if (!container) return;
 
-    const pcTopics    = viewer3DState.displaySelectedTopics;
-    const pathTopics  = viewer3DState.selectedPathTopics;
-    const odomTopics  = viewer3DState.selectedOdomTopics;
-    const tfTopics    = viewer3DState.selectedTFTopics;
-    const livoxTopics = viewer3DState.selectedLivoxTopics;
-    const imageTopics = viewer3DState.selectedImageTopics;
+    const pcTopics       = viewer3DState.displaySelectedTopics;
+    const pathTopics     = viewer3DState.selectedPathTopics;
+    const odomTopics     = viewer3DState.selectedOdomTopics;
+    const tfTopics       = viewer3DState.selectedTFTopics;
+    const livoxTopics    = viewer3DState.selectedLivoxTopics;
+    const imageTopics    = viewer3DState.selectedImageTopics;
+    const laserScanTopics = viewer3DState.selectedLaserScanTopics;
 
     const hasAny = pcTopics.length > 0 || pathTopics.length > 0 || odomTopics.length > 0 ||
-                   tfTopics.length > 0 || livoxTopics.length > 0 || imageTopics.length > 0;
+                   tfTopics.length > 0 || livoxTopics.length > 0 || imageTopics.length > 0 ||
+                   laserScanTopics.length > 0;
 
     if (!hasAny) {
         container.innerHTML = '<div style="font-size:12px; color: var(--muted); padding: 4px 2px;">구독 중인 토픽 없음</div>';
@@ -3084,6 +3341,202 @@ function renderDisplayPanel() {
             settingsDiv.appendChild(axesLenRow);
             settingsDiv.appendChild(axesRadRow);
             settingsDiv.appendChild(maxPtsRow);
+
+            item.appendChild(header);
+            item.appendChild(settingsDiv);
+            container.appendChild(item);
+        });
+    }
+
+    // ── LaserScan 섹션 (PointCloud2와 동일 레이아웃) ──
+    if (laserScanTopics.length > 0) {
+        const lsLabel = document.createElement('div');
+        lsLabel.className = 'display-panel-section-label';
+        lsLabel.textContent = 'LaserScan';
+        container.appendChild(lsLabel);
+
+        laserScanTopics.forEach(topicName => {
+            const settings = viewer3DState.topicSettings.get(topicName) || {};
+            const lsObj = viewer3DState.laserScanObjects.get(topicName);
+            const visible = lsObj ? lsObj.visible !== false : true;
+            const colorMode = settings.colorMode || 'rainbow';
+            const colorField = settings.colorField || 'intensity';
+            const solidColor = settings.solidColor || '#ffffff';
+            const pointSize = settings.pointSize !== undefined ? settings.pointSize : 0.1;
+            const alpha = settings.alpha !== undefined ? settings.alpha : 1.0;
+
+            const item = document.createElement('div');
+            item.className = 'display-topic-item display-laserscan-item';
+            item.dataset.topicName = topicName;
+
+            const header = document.createElement('div');
+            header.className = 'display-topic-item-header';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = visible;
+            checkbox.title = 'LaserScan 표시/숨기기';
+            checkbox.addEventListener('change', function() {
+                toggleLaserScanVisible(topicName, this.checked);
+            });
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'display-topic-item-name';
+            nameSpan.textContent = topicName;
+            nameSpan.title = topicName;
+
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'display-topic-remove-btn';
+            removeBtn.textContent = '✕';
+            removeBtn.title = '토픽 제거';
+            removeBtn.addEventListener('click', function() {
+                unsubscribeFromTopic(topicName);
+                viewer3DState.selectedLaserScanTopics = viewer3DState.selectedLaserScanTopics.filter(t => t !== topicName);
+                renderDisplayPanel();
+            });
+
+            header.appendChild(checkbox);
+            header.appendChild(nameSpan);
+            header.appendChild(removeBtn);
+
+            const settingsDiv = document.createElement('div');
+            settingsDiv.className = 'display-topic-item-settings';
+
+            // ── 색상 모드 (Rainbow / Solid) ──
+            const colorModeLabel = document.createElement('label');
+            colorModeLabel.textContent = '색상 모드';
+
+            const colorModeSelect = document.createElement('select');
+            colorModeSelect.title = '색상 모드 선택';
+            [
+                { value: 'rainbow', label: 'Rainbow' },
+                { value: 'solid', label: 'Solid' }
+            ].forEach(opt => {
+                const option = document.createElement('option');
+                option.value = opt.value;
+                option.textContent = opt.label;
+                if (opt.value === colorMode) option.selected = true;
+                colorModeSelect.appendChild(option);
+            });
+            colorModeSelect.addEventListener('change', function() {
+                updateTopicSetting(topicName, 'colorMode', this.value);
+                colorFieldRow.style.display = this.value === 'rainbow' ? 'flex' : 'none';
+                solidColorRow.style.display = this.value === 'solid' ? 'flex' : 'none';
+            });
+
+            // 색상 필드 선택 (Rainbow 모드) - intensity, range
+            const colorFieldRow = document.createElement('div');
+            colorFieldRow.style.display = colorMode === 'rainbow' ? 'flex' : 'none';
+            colorFieldRow.style.flexDirection = 'column';
+            colorFieldRow.style.gap = '2px';
+
+            const colorFieldLabel = document.createElement('label');
+            colorFieldLabel.textContent = '색상 필드';
+
+            const colorFieldSelect = document.createElement('select');
+            colorFieldSelect.title = '색상 매핑 필드 선택';
+            ['intensity', 'range'].forEach(fieldName => {
+                const option = document.createElement('option');
+                option.value = fieldName;
+                option.textContent = fieldName;
+                if (fieldName === colorField) option.selected = true;
+                colorFieldSelect.appendChild(option);
+            });
+            colorFieldSelect.addEventListener('change', function() {
+                updateTopicSetting(topicName, 'colorField', this.value);
+            });
+
+            colorFieldRow.appendChild(colorFieldLabel);
+            colorFieldRow.appendChild(colorFieldSelect);
+
+            // 단색 색상 선택 (Solid 모드) - RViz 스타일 팔레트
+            const solidColorRow = document.createElement('div');
+            solidColorRow.style.display = colorMode === 'solid' ? 'flex' : 'none';
+            solidColorRow.style.flexDirection = 'column';
+            solidColorRow.style.gap = '2px';
+
+            const solidColorLabel = document.createElement('label');
+            solidColorLabel.textContent = '색상';
+
+            const solidColorPickerRow = document.createElement('div');
+            solidColorPickerRow.className = 'solid-color-picker-row';
+
+            const colorSwatch = document.createElement('button');
+            colorSwatch.className = 'solid-color-swatch';
+            colorSwatch.title = '색상 선택';
+            colorSwatch.style.backgroundColor = solidColor;
+
+            const colorHexLabel = document.createElement('span');
+            colorHexLabel.className = 'solid-color-hex';
+            colorHexLabel.textContent = solidColor.toUpperCase();
+
+            colorSwatch.addEventListener('click', function(e) {
+                e.stopPropagation();
+                openColorPickerPopup(topicName, solidColor, colorSwatch, colorHexLabel, function(newColor) {
+                    updateLaserScanColor(topicName, newColor);
+                });
+            });
+
+            solidColorPickerRow.appendChild(colorSwatch);
+            solidColorPickerRow.appendChild(colorHexLabel);
+
+            solidColorRow.appendChild(solidColorLabel);
+            solidColorRow.appendChild(solidColorPickerRow);
+
+            settingsDiv.appendChild(colorModeLabel);
+            settingsDiv.appendChild(colorModeSelect);
+            settingsDiv.appendChild(colorFieldRow);
+            settingsDiv.appendChild(solidColorRow);
+
+            // ── Size (PointCloud2와 동일: min=0.01, max=1.0, step=0.01) ──
+            const sizeRow = document.createElement('div');
+            sizeRow.className = 'pc2-setting-row';
+
+            const sizeLabelEl = document.createElement('label');
+            sizeLabelEl.textContent = `Size: ${pointSize.toFixed(2)}`;
+
+            const sizeSlider = document.createElement('input');
+            sizeSlider.type = 'range';
+            sizeSlider.min = '0.01';
+            sizeSlider.max = '1.0';
+            sizeSlider.step = '0.01';
+            sizeSlider.value = pointSize;
+            sizeSlider.className = 'display-item-slider';
+            sizeSlider.title = '포인트 크기 (m)';
+            sizeSlider.addEventListener('input', function() {
+                const v = parseFloat(this.value);
+                sizeLabelEl.textContent = `Size: ${v.toFixed(2)}`;
+                updateLaserScanPointSize(topicName, v);
+            });
+
+            sizeRow.appendChild(sizeLabelEl);
+            sizeRow.appendChild(sizeSlider);
+            settingsDiv.appendChild(sizeRow);
+
+            // ── Alpha (투명도) ──
+            const alphaRow = document.createElement('div');
+            alphaRow.className = 'pc2-setting-row';
+
+            const alphaLabelEl = document.createElement('label');
+            alphaLabelEl.textContent = `Alpha: ${alpha.toFixed(2)}`;
+
+            const alphaSlider = document.createElement('input');
+            alphaSlider.type = 'range';
+            alphaSlider.min = '0.0';
+            alphaSlider.max = '1.0';
+            alphaSlider.step = '0.01';
+            alphaSlider.value = alpha;
+            alphaSlider.className = 'display-item-slider';
+            alphaSlider.title = '투명도 (0=완전투명, 1=불투명)';
+            alphaSlider.addEventListener('input', function() {
+                const v = parseFloat(this.value);
+                alphaLabelEl.textContent = `Alpha: ${v.toFixed(2)}`;
+                updateLaserScanAlpha(topicName, v);
+            });
+
+            alphaRow.appendChild(alphaLabelEl);
+            alphaRow.appendChild(alphaSlider);
+            settingsDiv.appendChild(alphaRow);
 
             item.appendChild(header);
             item.appendChild(settingsDiv);
@@ -3876,7 +4329,207 @@ function subscribeToOdometry(topicName) {
 }
 
 // =============================================
-// 토픽 조회 함수: Path / Odometry
+// LaserScanRenderer: sensor_msgs/LaserScan → THREE.Points (RViz LaserScanDisplay 참조)
+// =============================================
+
+/**
+ * LaserScan 메시지를 3D 포인트+색상으로 변환 (RViz laser_geometry + intensity 기반 rainbow)
+ * angle_min + i*angle_increment → x=range*cos(angle), y=range*sin(angle), z=0
+ * @param {Object} message - rosbridge sensor_msgs/msg/LaserScan 메시지
+ * @param {Object} settings - { colorMode, colorField, solidColor }
+ * @returns {{ positions: Float32Array, colors: Float32Array, count: number }}
+ */
+function laserScanToPointsAndColors(message, settings) {
+    const ranges = message.ranges || [];
+    const intensities = message.intensities || [];
+    const angleMin = message.angle_min ?? 0;
+    const angleIncrement = message.angle_increment ?? 0;
+    const rangeMin = message.range_min ?? 0;
+    const rangeMax = message.range_max ?? Infinity;
+
+    const colorMode = (settings && settings.colorMode) || 'rainbow';
+    const colorField = (settings && settings.colorField) || 'intensity';
+    const solidColor = (settings && settings.solidColor) || '#ffffff';
+
+    let solidR = 1, solidG = 1, solidB = 1;
+    if (colorMode === 'solid') {
+        const hex = solidColor.replace('#', '');
+        solidR = parseInt(hex.substring(0, 2), 16) / 255;
+        solidG = parseInt(hex.substring(2, 4), 16) / 255;
+        solidB = parseInt(hex.substring(4, 6), 16) / 255;
+    }
+
+    const positions = [];
+    const colors = [];
+    let fieldMin = Infinity, fieldMax = -Infinity;
+
+    for (let i = 0; i < ranges.length; i++) {
+        const r = ranges[i];
+        if (typeof r !== 'number' || !Number.isFinite(r) || r < rangeMin || r > rangeMax) continue;
+
+        const angle = angleMin + i * angleIncrement;
+        const x = r * Math.cos(angle);
+        const y = r * Math.sin(angle);
+        positions.push(x, y, 0);
+
+        if (colorMode === 'rainbow') {
+            let fv;
+            if (colorField === 'intensity' && i < intensities.length && typeof intensities[i] === 'number' && Number.isFinite(intensities[i])) {
+                fv = intensities[i];
+            } else if (colorField === 'range') {
+                fv = r;
+            } else {
+                fv = (i < intensities.length && Number.isFinite(intensities[i])) ? intensities[i] : r;
+            }
+            if (!Number.isFinite(fv)) fv = 0;
+            if (fv < fieldMin) fieldMin = fv;
+            if (fv > fieldMax) fieldMax = fv;
+            colors.push(fv);
+        }
+    }
+
+    const count = positions.length / 3;
+    const posArr = new Float32Array(positions);
+    const colArr = new Float32Array(count * 3);
+
+    if (colorMode === 'rainbow' && count > 0) {
+        const rangeSpan = Math.max(1e-6, fieldMax - fieldMin);
+        for (let i = 0; i < count; i++) {
+            const fv = colors[i];
+            const t = Math.min(1.0, Math.max(0.0, (fv - fieldMin) / rangeSpan));
+            const hue = t * 0.75;
+            const h6 = hue * 6.0;
+            const hi = h6 | 0;
+            const f_ = h6 - hi;
+            let cr, cg, cb;
+            switch (hi % 6) {
+                case 0: cr = 1; cg = f_; cb = 0; break;
+                case 1: cr = 1 - f_; cg = 1; cb = 0; break;
+                case 2: cr = 0; cg = 1; cb = f_; break;
+                case 3: cr = 0; cg = 1 - f_; cb = 1; break;
+                case 4: cr = f_; cg = 0; cb = 1; break;
+                default: cr = 1; cg = 0; cb = 1 - f_; break;
+            }
+            colArr[i * 3] = cr;
+            colArr[i * 3 + 1] = cg;
+            colArr[i * 3 + 2] = cb;
+        }
+    } else if (colorMode === 'solid') {
+        for (let i = 0; i < count; i++) {
+            colArr[i * 3] = solidR;
+            colArr[i * 3 + 1] = solidG;
+            colArr[i * 3 + 2] = solidB;
+        }
+    }
+
+    return { positions: posArr, colors: colArr, count };
+}
+
+/**
+ * LaserScan 토픽 구독 및 THREE.Points로 시각화 (RViz LaserScanDisplay 스타일)
+ * @param {string} topicName - sensor_msgs/msg/LaserScan 토픽명
+ * @returns {ROSLIB.Topic} 구독 객체
+ */
+function subscribeToLaserScan(topicName) {
+    if (!viewer3DState.rosConnected) {
+        console.warn('[LaserScan] Not connected to ROS');
+        return;
+    }
+
+    if (viewer3DState.topicSubscriptions.has(topicName)) {
+        return viewer3DState.topicSubscriptions.get(topicName);
+    }
+
+    console.log('[LaserScan] Subscribing to topic:', topicName);
+
+    const topic = new ROSLIB.Topic({
+        ros: viewer3DState.ros,
+        name: topicName,
+        messageType: 'sensor_msgs/msg/LaserScan',
+        throttle_rate: 100,   // 10Hz
+        queue_length: 1
+    });
+
+    viewer3DState.topicSubscriptions.set(topicName, topic);
+
+    topic.subscribe(function(message) {
+        if (!message.ranges || message.ranges.length === 0) return;
+
+        viewer3DState.laserScanLastMessage.set(topicName, message);
+
+        const frameId = (message.header && message.header.frame_id) ? message.header.frame_id : '';
+        viewer3DState.topicFrameIds.set(topicName, frameId);
+        viewer3DState.needsRender = true;
+
+        const existingObj = viewer3DState.laserScanObjects.get(topicName);
+        if (existingObj && existingObj.visible === false) return;
+
+        const settings = viewer3DState.topicSettings.get(topicName) || {};
+        const pointSize = settings.pointSize !== undefined ? settings.pointSize : 0.1;
+        const alpha = settings.alpha !== undefined ? settings.alpha : 1.0;
+
+        const { positions, colors, count } = laserScanToPointsAndColors(message, settings);
+        if (count === 0) return;
+
+        const colorMode = settings.colorMode || 'rainbow';
+        const useVertexColors = colorMode === 'rainbow';
+
+        if (existingObj) {
+            existingObj.points.geometry.dispose();
+            existingObj.points.geometry = new THREE.BufferGeometry();
+            existingObj.points.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            if (useVertexColors) {
+                existingObj.points.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            } else {
+                existingObj.points.geometry.deleteAttribute('color');
+            }
+            existingObj.points.geometry.attributes.position.needsUpdate = true;
+            existingObj.points.material.size = pointSize;
+            existingObj.points.material.opacity = alpha;
+            existingObj.points.material.transparent = alpha < 1.0;
+            existingObj.points.material.depthWrite = alpha >= 1.0;
+            existingObj.points.material.vertexColors = useVertexColors;
+            if (useVertexColors) {
+                existingObj.points.material.color.setHex(0xffffff);  // vertex color 그대로 표시 (곱셈 방지)
+            } else {
+                existingObj.points.material.color.setStyle(settings.solidColor || '#ffffff');
+            }
+            existingObj.points.material.needsUpdate = true;
+            applyFrameTransformToObject(existingObj.frameGroup, frameId);
+        } else {
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            if (useVertexColors) {
+                geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            }
+            const material = new THREE.PointsMaterial({
+                size: pointSize,
+                sizeAttenuation: true,
+                vertexColors: useVertexColors,
+                opacity: alpha,
+                transparent: alpha < 1.0,
+                depthWrite: alpha >= 1.0
+            });
+            if (useVertexColors) {
+                material.color.setHex(0xffffff);  // vertex color 그대로 표시 (곱셈 방지)
+            } else {
+                material.color.setStyle(settings.solidColor || '#ffffff');
+            }
+            const points = new THREE.Points(geometry, material);
+            const frameGroup = new THREE.Group();
+            frameGroup.add(points);
+            viewer3DState.scene.add(frameGroup);
+            applyFrameTransformToObject(frameGroup, frameId);
+            viewer3DState.laserScanObjects.set(topicName, { frameGroup, points, visible: true });
+            console.log('[LaserScan] Points added for topic:', topicName);
+        }
+    });
+
+    return topic;
+}
+
+// =============================================
+// 토픽 조회 함수: Path / Odometry / LaserScan
 // =============================================
 
 /**
@@ -3947,8 +4600,42 @@ async function getAvailableOdometryTopics() {
     });
 }
 
+/**
+ * 사용 가능한 sensor_msgs/LaserScan 토픽 목록 조회
+ * @returns {Promise<string[]>} LaserScan 토픽 이름 배열
+ */
+async function getAvailableLaserScanTopics() {
+    if (!viewer3DState.rosConnected) {
+        console.log('[LaserScan] Waiting for ROS connection...');
+        const connected = await waitForROSConnection(5000);
+        if (!connected) {
+            console.warn('[LaserScan] Not connected to ROS after timeout');
+            return [];
+        }
+    }
+
+    return new Promise((resolve) => {
+        viewer3DState.ros.getTopics(function(topics) {
+            const lsTopics = [];
+            if (topics.topics && topics.types) {
+                topics.topics.forEach((topic, index) => {
+                    const type = topics.types[index];
+                    if (type === 'sensor_msgs/LaserScan' || type === 'sensor_msgs/msg/LaserScan') {
+                        lsTopics.push(topic);
+                    }
+                });
+            }
+            console.log('[LaserScan] Available LaserScan topics:', lsTopics);
+            resolve(lsTopics);
+        }, function(error) {
+            console.error('[LaserScan] Failed to get topics:', error);
+            resolve([]);
+        });
+    });
+}
+
 // =============================================
-// Path / Odometry 가시성 토글 및 색상 업데이트
+// Path / Odometry / LaserScan 가시성 토글 및 색상 업데이트
 // =============================================
 
 /**
@@ -4089,6 +4776,61 @@ function updatePathColor(topicName, colorHex) {
         pathObj.line.material.color.setHex(colorInt);
     }
     updateTopicSetting(topicName, 'pathColor', colorHex);
+}
+
+/**
+ * LaserScan 포인트 표시/숨기기
+ * @param {string} topicName
+ * @param {boolean} visible
+ */
+function toggleLaserScanVisible(topicName, visible) {
+    const lsObj = viewer3DState.laserScanObjects.get(topicName);
+    if (lsObj) {
+        const rootObj = lsObj.frameGroup || lsObj.points;
+        rootObj.visible = visible;
+        lsObj.visible = visible;
+        console.log(`[LaserScan] ${topicName} visibility: ${visible}`);
+    }
+}
+
+/**
+ * LaserScan 포인트 색상 업데이트 (Solid 모드용)
+ * @param {string} topicName
+ * @param {string} colorHex - '#rrggbb' 형태
+ */
+function updateLaserScanColor(topicName, colorHex) {
+    const lsObj = viewer3DState.laserScanObjects.get(topicName);
+    if (lsObj && !lsObj.points.material.vertexColors) {
+        lsObj.points.material.color.setStyle(colorHex);
+    }
+    updateTopicSetting(topicName, 'solidColor', colorHex);
+}
+
+/**
+ * LaserScan 포인트 크기 업데이트 (PointCloud2와 동일: pointSize)
+ * @param {string} topicName
+ * @param {number} size - 포인트 크기(m)
+ */
+function updateLaserScanPointSize(topicName, size) {
+    const lsObj = viewer3DState.laserScanObjects.get(topicName);
+    if (lsObj) {
+        lsObj.points.material.size = size;
+    }
+    updateTopicSetting(topicName, 'pointSize', size);
+}
+
+/**
+ * LaserScan Alpha(투명도) 업데이트
+ * @param {string} topicName
+ * @param {number} alpha - 0.0~1.0
+ */
+function updateLaserScanAlpha(topicName, alpha) {
+    const lsObj = viewer3DState.laserScanObjects.get(topicName);
+    if (lsObj) {
+        lsObj.points.material.opacity = alpha;
+        lsObj.points.material.transparent = alpha < 1.0;
+    }
+    updateTopicSetting(topicName, 'alpha', alpha);
 }
 
 // updateTrajectoryColor 제거: axes 방식에서는 X/Y/Z 고정 색상 사용 (RViz 스타일)
@@ -4467,10 +5209,54 @@ function createTextSprite(text, options = {}) {
 }
 
 /**
- * TF 메시지 파싱: message.transforms 순회하여 viewer3DState.tfFrameTree 업데이트
- * @param {Object} message - tf2_msgs/msg/TFMessage 메시지
+ * RViz/tf2 Buffer 와 유사: 동적 /tf 는 스트림 상대 시각으로 오래된 변환 제거,
+ * ROS 시각이 크게 뒤로 가면(다른 백·재시작) 트리를 비우고 다시 쌓음.
+ * /tf_static 은 만료하지 않음(정적 변환).
  */
-function parseTFMessage(message) {
+const TF_DYNAMIC_TIMEOUT_NS = 10e9;
+const TF_BACK_JUMP_NS = 1e9;
+let _tfLatestRosTimeNs = 0;
+let _lastKnownFramesSig = '';
+
+function _rosStampToNs(stamp) {
+    if (!stamp) return 0;
+    const sec = stamp.sec !== undefined ? stamp.sec : 0;
+    const nsec = stamp.nanosec !== undefined ? stamp.nanosec : (stamp.nsec !== undefined ? stamp.nsec : 0);
+    return sec * 1e9 + nsec;
+}
+
+function _maxStampNsFromTransforms(transforms) {
+    let m = 0;
+    if (!transforms || transforms.length === 0) return 0;
+    transforms.forEach(function(ts) {
+        const ns = _rosStampToNs(ts.header && ts.header.stamp);
+        if (ns > m) m = ns;
+    });
+    return m;
+}
+
+/** rosbridge 토픽명: /tf_static, /ns1/tf_static 등 */
+function _tfSourceTopicIsStatic(topicName) {
+    return typeof topicName === 'string' &&
+        (topicName === '/tf_static' || /(^|\/)tf_static$/.test(topicName));
+}
+
+function _rebuildKnownFramesFromTfTree() {
+    _allKnownFrames.clear();
+    viewer3DState.tfFrameTree.forEach(function(entry, childId) {
+        _allKnownFrames.add(childId);
+        if (entry.parentId && entry.parentId !== '') {
+            _allKnownFrames.add(entry.parentId);
+        }
+    });
+}
+
+/**
+ * TF 메시지 파싱: viewer3DState.tfFrameTree 에 병합
+ * @param {Object} message - tf2_msgs/msg/TFMessage
+ * @param {boolean} isStatic - /tf_static 여부
+ */
+function parseTFMessage(message, isStatic) {
     if (!message.transforms || message.transforms.length === 0) return;
 
     message.transforms.forEach(function(transformStamped) {
@@ -4483,9 +5269,53 @@ function parseTFMessage(message) {
             parentId:    parentId,
             translation: { x: t.x, y: t.y, z: t.z },
             quaternion:  { x: r.x, y: r.y, z: r.z, w: r.w },
-            stamp:       transformStamped.header.stamp
+            stamp:       transformStamped.header.stamp,
+            isStatic:    !!isStatic
         });
     });
+}
+
+/**
+ * @param {Object} message
+ * @param {string} sourceTopicName - 콜백이 붙은 TF 토픽 이름
+ * @returns {{ frameChanged: boolean }}
+ */
+function applyTfMessageWithRvStyleLifecycle(message, sourceTopicName) {
+    if (!message.transforms || message.transforms.length === 0) {
+        return { frameChanged: false };
+    }
+
+    const isStatic = _tfSourceTopicIsStatic(sourceTopicName);
+    const maxNs    = _maxStampNsFromTransforms(message.transforms);
+
+    if (!isStatic && maxNs > 0 && _tfLatestRosTimeNs > 0 && maxNs < _tfLatestRosTimeNs - TF_BACK_JUMP_NS) {
+        viewer3DState.tfFrameTree.clear();
+        _tfLatestRosTimeNs = 0;
+    }
+
+    parseTFMessage(message, isStatic);
+
+    if (!isStatic && maxNs > 0) {
+        if (maxNs > _tfLatestRosTimeNs) {
+            _tfLatestRosTimeNs = maxNs;
+        }
+        const cutoff = _tfLatestRosTimeNs - TF_DYNAMIC_TIMEOUT_NS;
+        Array.from(viewer3DState.tfFrameTree.entries()).forEach(function(pair) {
+            const childId = pair[0];
+            const entry   = pair[1];
+            if (entry.isStatic) return;
+            const en = _rosStampToNs(entry.stamp);
+            if (en < cutoff) {
+                viewer3DState.tfFrameTree.delete(childId);
+            }
+        });
+    }
+
+    _rebuildKnownFramesFromTfTree();
+    const sig = Array.from(_allKnownFrames).sort().join('|');
+    const frameChanged = sig !== _lastKnownFramesSig;
+    _lastKnownFramesSig = sig;
+    return { frameChanged: frameChanged };
 }
 
 /**
@@ -4586,7 +5416,7 @@ function computeWorldTransform(frameId, fixedFrame) {
 
 /**
  * Three.js 오브젝트에 frameId → fixedFrame 좌표 변환을 적용.
- * TF 경로가 없으면 오브젝트를 숨기고 false 반환.
+ * TF 경로가 없으면 원점에 두고 표시 유지(부분 TF·데이터 전환 직후에도 점군 등이 사라지지 않게).
  * @param {THREE.Object3D} object - position/quaternion 변경 대상
  * @param {string} frameId        - 오브젝트가 표현된 ROS frame ID
  * @returns {boolean} 변환 적용(표시) 성공 여부
@@ -4601,18 +5431,10 @@ function applyFrameTransformToObject(object, frameId) {
     }
     const transform = computeWorldTransform(frameId, fixedFrame);
     if (!transform) {
-        // TF 경로 없음: TF 시스템 활성화 여부로 구분
-        const hasTFData = _allKnownFrames.size > 0 || viewer3DState.tfFrameTree.size > 0;
-        if (!hasTFData) {
-            // /tf 토픽 자체가 없는 bag → identity 변환으로 원점 표시
-            object.position.set(0, 0, 0);
-            object.quaternion.set(0, 0, 0, 1);
-            object.visible = true;
-            return false;
-        }
-        // TF 데이터는 있지만 fixedFrame ↔ frameId 경로 없음
-        // (잘못된 Fixed Frame 입력, 또는 TF 트리 단절) → RViz처럼 숨김
-        object.visible = false;
+        // 경로 없을 때는 숨기지 않고 원점에 표시 (부분 TF·전환 직후에도 점군이 사라지지 않게)
+        object.position.set(0, 0, 0);
+        object.quaternion.set(0, 0, 0, 1);
+        object.visible = true;
         return false;
     }
     object.position.copy(transform.position);
@@ -4783,6 +5605,172 @@ function rebuildTFScene(topicName) {
 const _bgFrameSubs = new Map();           // topicName → ROSLIB.Topic
 const _allKnownFrames = new Set();        // 수집된 모든 frame ID
 
+/** Fixed Frame 기본값 — 데이터 로드·전환 시 입력·상태를 이 값으로 맞춤 */
+const DEFAULT_FIXED_FRAME = 'map';
+
+/**
+ * 데이터셋/백 전환 시마다 증가. 구독 콜백이 캡처한 세션과 다르면 TF 파싱 스킵(이전 백 큐 잔여·섞임 방지).
+ */
+let _tfSessionId = 0;
+
+function _bumpTfSessionId() {
+    _tfSessionId++;
+}
+
+/** 백그라운드 TF 콜백에서 공유하는 reapply 스로틀 */
+let _bgTfReapplyTimer = null;
+let _discoverExtraTfTimerId = null;
+
+function _clearBgTfReapplyTimer() {
+    if (_bgTfReapplyTimer !== null) {
+        clearTimeout(_bgTfReapplyTimer);
+        _bgTfReapplyTimer = null;
+    }
+}
+
+/** 모든 백그라운드 TF 구독 해제 (데이터셋·백 전환 시 이전 TF 재유입 방지) */
+function _unsubscribeAllBackgroundTf() {
+    _clearBgTfReapplyTimer();
+    _bgFrameSubs.forEach(function(topic) {
+        if (topic) {
+            try {
+                topic.unsubscribe();
+            } catch (e) { /* ignore */ }
+        }
+    });
+    _bgFrameSubs.clear();
+    if (_discoverExtraTfTimerId !== null) {
+        clearTimeout(_discoverExtraTfTimerId);
+        _discoverExtraTfTimerId = null;
+    }
+}
+
+function _handleBackgroundTfMessage(message, sourceTopicName) {
+    if (!message.transforms) return;
+
+    const { frameChanged } = applyTfMessageWithRvStyleLifecycle(message, sourceTopicName);
+
+    if (_bgTfReapplyTimer === null) {
+        _bgTfReapplyTimer = setTimeout(function() {
+            _bgTfReapplyTimer = null;
+            reapplyAllFrameTransforms();
+        }, 100);
+    }
+
+    if (frameChanged) {
+        const dd = document.getElementById('fixed-frame-dropdown');
+        if (dd && dd.style.display !== 'none') {
+            if (_ffShowAll) {
+                renderFixedFrameDropdown('');
+            } else {
+                const inp = document.getElementById('fixed-frame-input');
+                renderFixedFrameDropdown(inp ? inp.value : '');
+            }
+        }
+        updateViewTargetFrameOptions();
+    }
+}
+
+/**
+ * @param {{ name: string, throttle?: number, qos?: object, queue_length?: number }} config
+ */
+function _subscribeOneBackgroundTfTopic(config) {
+    if (_bgFrameSubs.has(config.name)) return;
+    if (!viewer3DState.ros || !viewer3DState.rosConnected) return;
+    try {
+        const topicOpts = {
+            ros:           viewer3DState.ros,
+            name:          config.name,
+            messageType:   'tf2_msgs/msg/TFMessage',
+            throttle_rate: config.throttle !== undefined ? config.throttle : 100,
+            queue_length:  config.queue_length !== undefined ? config.queue_length : 3
+        };
+        if (config.qos) topicOpts.qos = config.qos;
+        const topic = new ROSLIB.Topic(topicOpts);
+        const tfSession = _tfSessionId;
+        const srcName   = config.name;
+        topic.subscribe(function(message) {
+            if (tfSession !== _tfSessionId) return;
+            _handleBackgroundTfMessage(message, srcName);
+        });
+        _bgFrameSubs.set(config.name, topic);
+        console.log('[BG-TF] Background TF transform collection started for', config.name);
+    } catch (e) {
+        console.warn('[BG-TF] Failed to start background TF collection for', config.name, e);
+    }
+}
+
+const _BG_CORE_TF_TOPICS = [
+    // queue_length 작게: 전환 직후 rosbridge 큐에 쌓인 구 TF 버스트 유입 완화
+    { name: '/tf',        throttle: 100, qos: null, queue_length: 3 },
+    { name: '/tf_static', throttle: 0,   qos: { durability: 'transient_local' }, queue_length: 3 },
+];
+
+function _subscribeCoreBackgroundTfTopics() {
+    _BG_CORE_TF_TOPICS.forEach(_subscribeOneBackgroundTfTopic);
+}
+
+function _discoverExtraTfTopicsImpl() {
+    if (!viewer3DState.rosConnected) return;
+    viewer3DState.ros.getTopics(function(topics) {
+        if (!topics.topics || !topics.types) return;
+        const toSubscribe = [];
+        topics.topics.forEach(function(topicName, idx) {
+            const type = topics.types[idx];
+            if ((type === 'tf2_msgs/TFMessage' || type === 'tf2_msgs/msg/TFMessage') &&
+                !_bgFrameSubs.has(topicName)) {
+                toSubscribe.push(topicName);
+            }
+        });
+        toSubscribe.forEach(function(name) {
+            if (_bgFrameSubs.has(name)) return;
+            try {
+                const topic = new ROSLIB.Topic({
+                    ros: viewer3DState.ros,
+                    name: name,
+                    messageType: 'tf2_msgs/msg/TFMessage',
+                    throttle_rate: 100,
+                    queue_length: 3
+                });
+                const tfSession = _tfSessionId;
+                topic.subscribe(function(message) {
+                    if (tfSession !== _tfSessionId) return;
+                    _handleBackgroundTfMessage(message, name);
+                });
+                _bgFrameSubs.set(name, topic);
+                console.log('[BG-TF] Discovered and subscribed to TF topic:', name);
+            } catch (e) {
+                console.warn('[BG-TF] Failed to subscribe to', name, e);
+            }
+        });
+    }, function() {});
+}
+
+function _scheduleDiscoverExtraTfTopics(delayMs) {
+    if (_discoverExtraTfTimerId !== null) {
+        clearTimeout(_discoverExtraTfTimerId);
+        _discoverExtraTfTimerId = null;
+    }
+    const d = delayMs !== undefined ? delayMs : 2000;
+    _discoverExtraTfTimerId = setTimeout(function() {
+        _discoverExtraTfTimerId = null;
+        _discoverExtraTfTopicsImpl();
+    }, d);
+}
+
+/**
+ * /tf·/tf_static 재구독 + 네임스페이스 TF 지연 탐색
+ * @param {{ skipUnsubscribe?: boolean }} [opts] true면 기존 구독 해제 생략(이미 _unsubscribeAllBackgroundTf 직후일 때)
+ */
+function restartBackgroundTfPipeline(opts) {
+    if (!viewer3DState.ros || !viewer3DState.rosConnected) return;
+    if (!opts || !opts.skipUnsubscribe) {
+        _unsubscribeAllBackgroundTf();
+    }
+    _subscribeCoreBackgroundTfTopics();
+    _scheduleDiscoverExtraTfTopics(2000);
+}
+
 // ── TopDown 뷰 Yaw 회전 상태 ──
 let _topdownYaw = 0;                       // 현재 yaw 각도 (라디안, 0 = Y축이 화면 위 = 북쪽)
 let _topdownYawDragActive = false;
@@ -4847,85 +5835,11 @@ function _detachTopdownYawHandlers(domEl) {
 }
 
 /**
- * ROS 연결 시 /tf, /tf_static 을 1Hz로 백그라운드 구독하여
- * frame ID 만 수집한다 (씬 렌더링 없음).
+ * ROS 연결 직후: 백그라운드 /tf·/tf_static + 네임스페이스 TF 탐색
  */
 function startBackgroundFrameCollection() {
-    // /tf (동적 변환): 10Hz — 실시간 좌표 변환에 충분한 빈도
-    // /tf_static (정적 변환): throttle 없음 + TRANSIENT_LOCAL QoS
-    //   - bag play 전에 이미 publish된 latched 메시지를 구독 즉시 받기 위해
-    //     durability: 'transient_local' QoS 설정이 필수.
-    //   - throttle_rate: 0 → 필터링 없음 (메시지가 극히 드물므로 부하 없음)
-    const BG_TOPICS = [
-        { name: '/tf',        throttle: 100, qos: null },
-        { name: '/tf_static', throttle: 0,   qos: { durability: 'transient_local' } },
-    ];
-
-    // reapplyAllFrameTransforms throttle 핸들 (두 토픽 콜백이 공유)
-    let _reapplyTimer = null;
-
-    BG_TOPICS.forEach(function(config) {
-        if (_bgFrameSubs.has(config.name)) return;
-        try {
-            const topicOpts = {
-                ros:           viewer3DState.ros,
-                name:          config.name,
-                messageType:   'tf2_msgs/msg/TFMessage',
-                throttle_rate: config.throttle,
-                queue_length:  1
-            };
-            if (config.qos) topicOpts.qos = config.qos;
-            const topic = new ROSLIB.Topic(topicOpts);
-
-            topic.subscribe(function(message) {
-                if (!message.transforms) return;
-
-                // ① frame ID 수집 (_allKnownFrames → 드롭다운 표시용)
-                let frameChanged = false;
-                message.transforms.forEach(function(tf) {
-                    const parentId = tf.header && tf.header.frame_id;
-                    const childId  = tf.child_frame_id;
-                    if (parentId && !_allKnownFrames.has(parentId)) {
-                        _allKnownFrames.add(parentId); frameChanged = true;
-                    }
-                    if (childId  && !_allKnownFrames.has(childId)) {
-                        _allKnownFrames.add(childId);  frameChanged = true;
-                    }
-                });
-
-                // ② tfFrameTree 업데이트 (PointCloud2/Path/Odometry 좌표 변환에 사용)
-                parseTFMessage(message);
-
-                // ③ 구독 중인 시각화 오브젝트에 변환 재적용 (100ms throttle)
-                if (_reapplyTimer === null) {
-                    _reapplyTimer = setTimeout(function() {
-                        _reapplyTimer = null;
-                        reapplyAllFrameTransforms();
-                    }, 100);
-                }
-
-                // ④ 새 프레임이 추가됐고 드롭다운이 열려 있으면 갱신
-                if (frameChanged) {
-                    const dd = document.getElementById('fixed-frame-dropdown');
-                    if (dd && dd.style.display !== 'none') {
-                        if (_ffShowAll) {
-                            renderFixedFrameDropdown('');
-                        } else {
-                            const inp = document.getElementById('fixed-frame-input');
-                            renderFixedFrameDropdown(inp ? inp.value : '');
-                        }
-                    }
-                    // Views 패널 Target Frame 드롭다운도 함께 갱신
-                    updateViewTargetFrameOptions();
-                }
-            });
-
-            _bgFrameSubs.set(config.name, topic);
-            console.log('[BG-TF] Background TF transform collection started for', config.name);
-        } catch(e) {
-            console.warn('[BG-TF] Failed to start background TF collection for', config.name, e);
-        }
-    });
+    if (!viewer3DState.rosConnected) return;
+    restartBackgroundTfPipeline();
 }
 
 /**
@@ -5164,7 +6078,7 @@ function updateFixedFrameOptions() {
 
 /**
  * TF 토픽 구독 (tf2_msgs/msg/TFMessage)
- * 메시지 수신마다 parseTFMessage() → throttle 100ms → rebuildTFScene()
+ * 메시지 수신마다 applyTfMessageWithRvStyleLifecycle() → throttle 100ms → rebuildTFScene()
  * @param {string} topicName - TF 토픽명 ('/tf' 또는 '/tf_static')
  * @returns {ROSLIB.Topic} 구독 객체
  */
@@ -5193,23 +6107,55 @@ function subscribeToTF(topicName) {
 
     // throttle 변수: 100ms 이내 중복 rebuildTFScene 방지
     let _tfThrottleTimer = null;
+    const tfSession = _tfSessionId;
 
     topic.subscribe(function(message) {
+        if (tfSession !== _tfSessionId) return;
         // 숨겨진 경우 파싱 스킵 (CPU 절약)
         const tfObj = viewer3DState.tfObjects.get(topicName);
         if (tfObj && tfObj.visible === false) return;
 
         viewer3DState.needsRender = true;
-        parseTFMessage(message);
+        applyTfMessageWithRvStyleLifecycle(message, topicName);
 
         if (_tfThrottleTimer) return;
         _tfThrottleTimer = setTimeout(function() {
             _tfThrottleTimer = null;
+            if (tfSession !== _tfSessionId) return;
             rebuildTFScene(topicName);
         }, 100);
     });
 
     return topic;
+}
+
+/**
+ * 데이터 로드·백 전환 후 Fixed Frame 입력·상태를 기본값으로, Target Frame은 &lt;Fixed Frame&gt;으로.
+ * (사용자가 이전에 고른 프레임이 남아 다른 데이터 TF와 섞여 보이는 것 방지)
+ */
+function resetFixedFrameAndViewTargetsToDefault() {
+    viewer3DState.fixedFrame = DEFAULT_FIXED_FRAME;
+    const fixedFrameInput = document.getElementById('fixed-frame-input');
+    if (fixedFrameInput) {
+        fixedFrameInput.value = DEFAULT_FIXED_FRAME;
+    }
+    closeFixedFrameDropdown();
+
+    viewer3DState.cameraTargetFrame = '<Fixed Frame>';
+    const viewTargetSel = document.getElementById('view-target-frame');
+    if (viewTargetSel) {
+        viewTargetSel.value = '<Fixed Frame>';
+    }
+
+    viewer3DState.selectedTFTopics.forEach(function(topicName) {
+        try {
+            rebuildTFScene(topicName);
+        } catch (e) {
+            console.warn('[Viewer] resetFixedFrame rebuildTFScene:', topicName, e);
+        }
+    });
+    reapplyAllFrameTransforms();
+    console.log('[Viewer] Fixed frame →', DEFAULT_FIXED_FRAME, '| Target frame → <Fixed Frame>');
 }
 
 /**
@@ -5463,11 +6409,20 @@ const ADD_DISPLAY_CATEGORIES = [
         stateKey: 'selectedImageTopics',
         fetchTopics: null,
         subscribeFn: null
+    },
+    {
+        type: 'LaserScan',
+        msgType: 'sensor_msgs/msg/LaserScan',
+        description: 'Displays 2D laser scan data as points in 3D space (RViz LaserScanDisplay style).',
+        color: '#00e676',
+        stateKey: 'selectedLaserScanTopics',
+        fetchTopics: null,
+        subscribeFn: null
     }
 ];
 
 // 카테고리별 현재 로드된 토픽 목록 (모달 내부 상태)
-let _addDisplayTopics = [[], [], [], [], [], []];
+let _addDisplayTopics = [[], [], [], [], [], [], []];
 
 /**
  * Add Display 통합 다이얼로그 열기 (RViz 스타일)
@@ -5491,6 +6446,8 @@ async function openAddDisplayModal() {
     ADD_DISPLAY_CATEGORIES[4].subscribeFn = subscribeToLivox;
     ADD_DISPLAY_CATEGORIES[5].fetchTopics = getAvailableImageTopics;
     ADD_DISPLAY_CATEGORIES[5].subscribeFn = subscribeToImage;
+    ADD_DISPLAY_CATEGORIES[6].fetchTopics = getAvailableLaserScanTopics;
+    ADD_DISPLAY_CATEGORIES[6].subscribeFn = subscribeToLaserScan;
 
     const modal = document.getElementById('add-display-modal');
     const tree  = document.getElementById('add-display-tree');
@@ -5511,7 +6468,7 @@ async function openAddDisplayModal() {
         _addDisplayTopics = results;
     } catch (err) {
         console.error('[AddDisplay] Failed to load topics:', err);
-        _addDisplayTopics = [[], [], [], [], [], []];
+        _addDisplayTopics = [[], [], [], [], [], [], []];
     } finally {
         if (btn) { btn.textContent = '+ Add'; btn.disabled = false; }
     }
@@ -5659,13 +6616,18 @@ function confirmAddDisplaySelection() {
         path: viewer3DState.selectedPathTopics,
         odometry: viewer3DState.selectedOdomTopics,
         tf: viewer3DState.selectedTFTopics,
-        image: viewer3DState.selectedImageTopics
+        image: viewer3DState.selectedImageTopics,
+        laserScan: viewer3DState.selectedLaserScanTopics
     });
 }
 
 // Expose functions to global scope for onclick handlers
 window.initThreeJSDisplay = initThreeJSDisplay;
 window.resetViewerTopicSubscriptions = resetViewerTopicSubscriptions;
+window.resetBagFrameAndTFState = resetBagFrameAndTFState;
+window.resetViewerAfterPlayerLoad = resetViewerAfterPlayerLoad;
+window.resetAll3DViewer = resetAll3DViewer;
+window.syncPlayerFilePointCloudSubscriptions = syncPlayerFilePointCloudSubscriptions;
 window.initialize3DViewer = initialize3DViewer;
 // 통합 Add Display 다이얼로그
 window.openAddDisplayModal = openAddDisplayModal;
@@ -5701,6 +6663,7 @@ window.confirmOdometryTopicSelection = confirmOdometryTopicSelection;
 // TF 관련 함수
 window.subscribeToTF = subscribeToTF;
 window.setFixedFrame = setFixedFrame;
+window.resetFixedFrameAndViewTargetsToDefault = resetFixedFrameAndViewTargetsToDefault;
 window.toggleTFVisible = toggleTFVisible;
 window.selectTFTopics = selectTFTopics;
 window.closeTFTopicSelection = closeTFTopicSelection;

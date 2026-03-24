@@ -268,6 +268,7 @@
                                         style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
                                     <option value="conpr">ConPR</option>
                                     <option value="kitti">KITTI Raw</option>
+                                    <option value="kaist">KAIST Complex Urban</option>
                                 </select>
                             </div>
                         </div>
@@ -322,6 +323,35 @@
                                         <option value="ros1">ROS1</option>
                                     </select>
                                     <button id="kitti-convert-btn" onclick="convertKitti()">Save Bag</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- KAIST 전용 UI (dataset=kaist 선택 시 표시) -->
+                        <div id="kaist-ui" style="display:none;">
+                            <div class="player-row">
+                                <div class="player-info">
+                                    <span class="player-info-key">Sequence</span>
+                                    <select id="kaist-sequence-select"
+                                            onchange="onKaistSequenceChange(this.value)"
+                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="">— Select a sequence —</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="player-row">
+                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
+                                    <div id="kaist-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                                        <div id="kaist-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
+                                        <span id="kaist-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
+                                    </div>
+                                    <span id="kaist-progress-msg" style="font-size:12px; color:var(--muted);"></span>
+                                    <select id="kaist-bag-format-select"
+                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="ros2">ROS2</option>
+                                        <option value="ros1">ROS1</option>
+                                    </select>
+                                    <button id="kaist-convert-btn" onclick="convertKaist()">Save Bag</button>
                                 </div>
                             </div>
                         </div>

@@ -5,15 +5,16 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2, PointField
+from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, TransformStamped
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from cv_bridge import CvBridge
 import cv2
 import struct
 import glob
+import queue
 import threading
 import asyncio
 import json
@@ -77,6 +78,112 @@ except ImportError:
 # Global variables for signal handling
 _web_server = None
 _ros_node = None
+
+# File Player PointCloud2 토픽 (create_publisher 이름과 반드시 동일 — API·UI 동기화의 단일 출처)
+KITTI_FILE_PLAYER_PC2_TOPIC = '/kitti/velo/pointcloud'
+KAIST_FILE_PLAYER_PC2_TOPICS = ['/ns2/velodyne_points', '/ns1/velodyne_points']
+
+
+def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
+    """rosbags-convert 가 ROS1 latching=0 인 /tf_static 에 빈 QoS를 쓰는 경우 보정.
+
+    ROS 2 /tf_static 은 TRANSIENT_LOCAL 이어야 tf2·RViz·웹 뷰어가 latched 변환을 받는다.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    try:
+        from rosbags.convert.converter import LATCH
+        from rosbags.rosbag2.metadata import dump_qos_v8, dump_qos_v9
+    except ImportError:
+        logger.warning('[convert_ros1] rosbags import failed; skip tf_static QoS patch')
+        return
+
+    out = Path(output_dir)
+    db_paths = list(out.glob('*.db3'))
+    if not db_paths:
+        db_paths = list(out.rglob('*.db3'))
+    if not db_paths:
+        logger.info(f'[convert_ros1] No .db3 in {output_dir}; skip tf_static QoS patch')
+        return
+
+    meta_path = out / 'metadata.yaml'
+    version = 9
+    if meta_path.is_file():
+        try:
+            with open(meta_path, encoding='utf-8') as f:
+                meta = yaml.safe_load(f)
+            ver = meta.get('rosbag2_bagfile_information', {}).get('version')
+            if ver is not None:
+                version = int(ver)
+        except Exception as exc:
+            logger.warning(f'[convert_ros1] metadata version read failed ({exc}); assume v9')
+
+    # rosbag2 v9+: metadata.yaml 의 offered_qos_profiles 는 YAML 시퀀스(맵 리스트)여야 함.
+    # 문자열로 넣으면 yaml-cpp 가 vector<QoS> 변환 시 bad conversion (bag info 실패).
+    if version >= 9:
+        qos_meta = dump_qos_v9(LATCH)
+        if not qos_meta:
+            logger.warning('[convert_ros1] Empty dump_qos_v9(LATCH); skip tf_static patch')
+            return
+        qos_sqlite = yaml.dump(
+            qos_meta,
+            default_flow_style=False,
+            allow_unicode=True,
+        ).strip()
+    else:
+        qos_sqlite = dump_qos_v8(LATCH)
+        qos_meta = qos_sqlite
+        if not qos_sqlite:
+            logger.warning('[convert_ros1] Empty QoS string for LATCH; skip tf_static patch')
+            return
+
+    for db_path in db_paths:
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM topics WHERE name = '/tf_static' OR name LIKE '%/tf_static'"
+                )
+                if cur.fetchone()[0] == 0:
+                    continue
+                conn.execute(
+                    'UPDATE topics SET offered_qos_profiles = ? WHERE name = ? OR name LIKE ?',
+                    (qos_sqlite, '/tf_static', '%/tf_static'),
+                )
+                conn.commit()
+                logger.info(f'[convert_ros1] tf_static QoS patched in {db_path.name}')
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'[convert_ros1] tf_static QoS sqlite patch failed ({db_path}): {exc}')
+
+    if meta_path.is_file():
+        try:
+            with open(meta_path, encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            info = data.get('rosbag2_bagfile_information')
+            if isinstance(info, dict):
+                for row in info.get('topics_with_message_count') or []:
+                    if not isinstance(row, dict):
+                        continue
+                    tm = row.get('topic_metadata')
+                    if not isinstance(tm, dict):
+                        continue
+                    name = tm.get('name', '')
+                    if name == '/tf_static' or name.endswith('/tf_static'):
+                        tm['offered_qos_profiles'] = qos_meta
+                with open(meta_path, 'w', encoding='utf-8') as f:
+                    yaml.safe_dump(
+                        data,
+                        f,
+                        default_flow_style=False,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                logger.info('[convert_ros1] metadata.yaml tf_static offered_qos_profiles updated')
+        except Exception as exc:
+            logger.warning(f'[convert_ros1] metadata.yaml tf_static patch skipped: {exc}')
 
 
 class Ros1BagPlayerThread(threading.Thread):
@@ -182,6 +289,8 @@ class Ros1BagPlayerThread(threading.Thread):
         - ROS2 포맷: 'sensor_msgs/msg/Image'   (parts 3개)
         두 포맷을 모두 처리합니다.
 
+        ROS1 tf 패키지의 tf/tfMessage는 ROS2에 없으므로 tf2_msgs/msg/TFMessage로 매핑.
+
         Args:
             ros1_type_str (str): 예) 'sensor_msgs/msg/Image' 또는 'sensor_msgs/Image'
 
@@ -189,6 +298,9 @@ class Ros1BagPlayerThread(threading.Thread):
             type | None: 성공 시 메시지 클래스, 실패 시 None
         """
         import importlib
+        # ROS1 tf/tfMessage → ROS2 tf2_msgs/msg/TFMessage (tf 패키지는 ROS2에 없음)
+        if ros1_type_str in ('tf/tfMessage', 'tf/msg/tfMessage'):
+            return TFMessage
         try:
             parts = ros1_type_str.split('/')
             if len(parts) == 2:
@@ -205,8 +317,35 @@ class Ros1BagPlayerThread(threading.Thread):
         except Exception:
             return None
 
+    def _publisher_qos(self, topic_name: str, msg_cls):
+        """대용량 백 재생 시 구독자·브리지 적체 완화: 센서류는 최신 1개만 유지."""
+        if topic_name == '/tf_static':
+            return QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        cls_name = getattr(msg_cls, '__name__', '')
+        # PointCloud2 / Image / LaserScan 등: 큐 쌓임 방지(느린 웹/시각화와 조합 시 전체 지연 완화)
+        if cls_name in ('PointCloud2', 'Image', 'LaserScan', 'CompressedImage'):
+            # depth=1 로 구독자 측 적체 완화; RELIABLE 유지(rosbridge 등 기본 구독과 QoS 호환)
+            return QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        if topic_name == '/tf':
+            return QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=30,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE)
+
     def _get_or_create_publisher(self, topic_name, ros1_type_str, msg_cls):
         """토픽별 ROS2 publisher를 캐시해서 반환 (없으면 생성).
+
+        /tf_static은 TRANSIENT_LOCAL QoS 사용 (tf2 구독자와 호환).
 
         Args:
             topic_name (str): publish할 토픽 이름
@@ -220,7 +359,8 @@ class Ros1BagPlayerThread(threading.Thread):
             return self._publishers[topic_name]
 
         try:
-            pub = self._ros_node.create_publisher(msg_cls, topic_name, 10)
+            qos = self._publisher_qos(topic_name, msg_cls)
+            pub = self._ros_node.create_publisher(msg_cls, topic_name, qos)
             self._publishers[topic_name] = pub
             self._ros_node.get_logger().info(
                 f'[Ros1BagPlayer] Created publisher: {topic_name} ({ros1_type_str})'
@@ -269,6 +409,21 @@ class Ros1BagPlayerThread(threading.Thread):
         try:
             # typestore는 Reader 밖에서 한 번만 생성
             typestore = get_typestore(Stores.ROS1_NOETIC)
+            src_typestore = get_typestore(Stores.ROS2_JAZZY)
+
+            def _ensure_typestore_has(ros2_type: str) -> bool:
+                """ROS1 typestore에 타입이 없으면 ROS2에서 등록 (tf2_msgs 등 ROS1_NOETIC에 없는 타입)."""
+                if ros2_type in typestore.fielddefs:
+                    return True
+                try:
+                    from rosbags.typesys import get_types_from_msg
+                    msgdef = src_typestore.generate_msgdef(ros2_type, ros_version=1)[0]
+                    typs = get_types_from_msg(msgdef, ros2_type)
+                    typs.pop('std_msgs/msg/Header', None)
+                    typestore.register(typs)
+                    return True
+                except Exception:
+                    return False
 
             with Reader(self._bag_path) as reader:
                 # 전체 재생 시간 계산 (nanoseconds → seconds)
@@ -284,14 +439,20 @@ class Ros1BagPlayerThread(threading.Thread):
                         continue
                     topic_type_map[topic_name] = topic_info.msgtype
 
-                # publisher 사전 생성 (publishable한 토픽만)
+                # ROS1 typestore에 tf2_msgs 등 누락 타입 등록 (역직렬화 가능하도록)
+                for _t in topic_type_map.values():
+                    _ensure_typestore_has(_t)
+
+                # publisher 사전 생성 + msg_cls 캐시 (매 메시지마다 resolve 제거)
                 publishable_topics = set()
+                msg_cls_cache = {}  # topic_name -> msg_cls
                 for topic_name, ros1_type_str in topic_type_map.items():
                     msg_cls = self._resolve_ros2_type(ros1_type_str)
                     if msg_cls is not None:
                         pub = self._get_or_create_publisher(topic_name, ros1_type_str, msg_cls)
                         if pub is not None:
                             publishable_topics.add(topic_name)
+                            msg_cls_cache[topic_name] = msg_cls
                     else:
                         self._ros_node.get_logger().warn(
                             f'[Ros1BagPlayer] Skipping {topic_name} ({ros1_type_str}): '
@@ -308,6 +469,11 @@ class Ros1BagPlayerThread(threading.Thread):
 
                 # 루프 재생 지원: _loop 플래그가 True이면 완료 후 처음부터 재시작
                 # seek 지원: messages(start=...)로 특정 시점부터 재생
+                # Producer-Consumer: Reader 스레드가 디스크 I/O로 prefetch, 메인 스레드는 변환+publish (I/O 오버랩)
+                PREFETCH_QUEUE_SIZE = 5
+                SENTINEL_SEEK = ('__SEEK__', None, None)
+                SENTINEL_END = ('__END__', None, None)
+
                 start_param = None  # None = 처음부터, int(ns) = 해당 시점부터
                 while True:
                     prev_ros_time = None
@@ -319,22 +485,54 @@ class Ros1BagPlayerThread(threading.Thread):
                         else:
                             self._elapsed_sec = 0.0
 
-                    # 메시지 순차 순회 (seek 시에만 start 파라미터 사용, 기본은 원본과 동일)
-                    seek_break = False
-                    msg_iter = (reader.messages(connections=(), start=start_param, stop=None)
-                                if start_param is not None else reader.messages())
-                    for conn, timestamp, rawdata in msg_iter:
-                        if self._stop_flag:
-                            break
+                    prefetch_queue = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
 
-                        # seek 요청 처리: 현재 for 루프 탈출 후 start_param으로 재시작
-                        if self._seek_requested:
+                    def _reader_task():
+                        try:
+                            msg_iter = (reader.messages(connections=(), start=start_param, stop=None)
+                                        if start_param is not None else reader.messages())
+                            for conn, timestamp, rawdata in msg_iter:
+                                if self._stop_flag:
+                                    prefetch_queue.put(SENTINEL_END)
+                                    return
+                                if self._seek_requested:
+                                    prefetch_queue.put(SENTINEL_SEEK)
+                                    return
+                                prefetch_queue.put((conn, timestamp, rawdata))
+                        except Exception:
+                            pass
+                        finally:
+                            try:
+                                prefetch_queue.put(SENTINEL_END)
+                            except Exception:
+                                pass
+
+                    reader_thread = threading.Thread(target=_reader_task, daemon=True)
+                    reader_thread.start()
+
+                    seek_break = False
+                    while True:
+                        try:
+                            item = prefetch_queue.get(timeout=0.5)
+                        except queue.Empty:
+                            if self._stop_flag:
+                                seek_break = False
+                                break
+                            continue
+
+                        if item == SENTINEL_END:
+                            break
+                        if item == SENTINEL_SEEK:
                             start_param = int(start_ns + self._seek_to_sec * 1e9)
                             start_param = max(reader.start_time, min(start_param, reader.end_time))
                             with self._lock:
                                 self._elapsed_sec = self._seek_to_sec
                             self._seek_requested = False
                             seek_break = True
+                            break
+
+                        conn, timestamp, rawdata = item
+                        if self._stop_flag:
                             break
 
                         # 일시정지 대기 (blocking)
@@ -363,9 +561,9 @@ class Ros1BagPlayerThread(threading.Thread):
                                 time.sleep(min(sleep_sec, 2.0))
                         prev_ros_time = timestamp
 
-                        # 역직렬화 + publish
+                        # 역직렬화 + publish (msg_cls 캐시 사용)
                         try:
-                            msg_cls = self._resolve_ros2_type(ros1_type_str)
+                            msg_cls = msg_cls_cache.get(topic_name)
                             if msg_cls is None:
                                 continue
 
@@ -384,6 +582,8 @@ class Ros1BagPlayerThread(threading.Thread):
                             self._ros_node.get_logger().debug(
                                 f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
                             )
+
+                    reader_thread.join(timeout=2.0)
 
                     # seek로 탈출한 경우: start_param으로 for 루프 재시작
                     if seek_break:
@@ -428,6 +628,68 @@ class Ros1BagPlayerThread(threading.Thread):
                 pass
         return None
 
+    def _convert_pointcloud2_fast(self, ros1_msg) -> PointCloud2 | None:
+        """PointCloud2 전용 고속 변환 (재귀 루프 생략)."""
+        try:
+            from std_msgs.msg import Header
+            from builtin_interfaces.msg import Time as BuiltinTime
+            msg = PointCloud2()
+            h = ros1_msg.header
+            s = h.stamp
+            msg.header = Header(
+                stamp=BuiltinTime(sec=getattr(s, 'sec', 0), nanosec=getattr(s, 'nanosec', getattr(s, 'nsec', 0))),
+                frame_id=str(h.frame_id)
+            )
+            msg.height = int(ros1_msg.height)
+            msg.width = int(ros1_msg.width)
+            msg.is_dense = bool(ros1_msg.is_dense)
+            msg.is_bigendian = bool(ros1_msg.is_bigendian)
+            msg.point_step = int(ros1_msg.point_step)
+            msg.row_step = int(ros1_msg.row_step)
+            if hasattr(ros1_msg.data, 'tobytes'):
+                msg.data = ros1_msg.data.tobytes()
+            elif isinstance(ros1_msg.data, (bytes, bytearray)):
+                msg.data = bytes(ros1_msg.data)
+            else:
+                msg.data = bytes(ros1_msg.data)
+            for f in ros1_msg.fields:
+                pf = PointField()
+                pf.name = str(f.name)
+                pf.offset = int(f.offset)
+                pf.datatype = int(f.datatype)
+                pf.count = int(f.count)
+                msg.fields.append(pf)
+            return msg
+        except Exception:
+            return None
+
+    def _convert_image_fast(self, ros1_msg) -> Image | None:
+        """Image 전용 고속 변환 (재귀 루프 생략)."""
+        try:
+            from std_msgs.msg import Header
+            from builtin_interfaces.msg import Time as BuiltinTime
+            msg = Image()
+            h = ros1_msg.header
+            s = h.stamp
+            msg.header = Header(
+                stamp=BuiltinTime(sec=getattr(s, 'sec', 0), nanosec=getattr(s, 'nanosec', getattr(s, 'nsec', 0))),
+                frame_id=str(h.frame_id)
+            )
+            msg.height = int(ros1_msg.height)
+            msg.width = int(ros1_msg.width)
+            msg.encoding = str(ros1_msg.encoding)
+            msg.is_bigendian = bool(ros1_msg.is_bigendian)
+            msg.step = int(ros1_msg.step)
+            if hasattr(ros1_msg.data, 'tobytes'):
+                msg.data = ros1_msg.data.tobytes()
+            elif isinstance(ros1_msg.data, (bytes, bytearray)):
+                msg.data = bytes(ros1_msg.data)
+            else:
+                msg.data = bytes(ros1_msg.data)
+            return msg
+        except Exception:
+            return None
+
     def _convert_ros1_to_ros2(self, ros1_msg, ros2_cls):
         """rosbags 메시지 객체(dataclass 기반)를 ROS2 Python 메시지로 재귀 변환.
 
@@ -448,6 +710,12 @@ class Ros1BagPlayerThread(threading.Thread):
         """
         import dataclasses
         import numpy as np
+
+        # 대용량 메시지 고속 경로 (PointCloud2, Image)
+        if ros2_cls is PointCloud2:
+            return self._convert_pointcloud2_fast(ros1_msg)
+        if ros2_cls is Image:
+            return self._convert_image_fast(ros1_msg)
 
         try:
             ros2_msg = ros2_cls()
@@ -1651,6 +1919,18 @@ class WebGUINode(Node):
         # 초기화 플래그 (각 데이터셋 전용 publishers 이중 생성 방지)
         self._conpr_pubs_initialized = False
         self._kitti_pubs_initialized = False
+        # KAIST 전용 publishers (lazy init)
+        self.kaist_imu_pub = None
+        self.kaist_gps_pub = None
+        self.kaist_vrs_pub = None
+        self.kaist_vlp_left_pub = None
+        self.kaist_vlp_right_pub = None
+        self.kaist_sick_back_pub = None
+        self.kaist_sick_mid_pub = None
+        self.kaist_stereo_left_pub = None
+        self.kaist_stereo_right_pub = None
+        self.kaist_tf_static_pub = None
+        self.kaist_tf_pub = None
 
         # CV Bridge for image conversion
         self.cv_bridge = CvBridge()
@@ -1682,6 +1962,10 @@ class WebGUINode(Node):
         # Setup reusable environment for subprocess calls
         self._setup_ros_environment()
 
+        # ros2 topic list -t 결과 캐시 (서브프로세스 비용·메인 스레드 지연 완화)
+        self._ros_topics_list_cache = None  # (monotonic_time, list[dict])
+        self._ros_topics_list_cache_ttl_sec = 2.0
+
         # ── PC2 Binary WebSocket 서버 (포트 8081) ─────────────────────────────
         # rosbridge를 우회해 PointCloud2를 Python에서 직접 처리 후 binary 전송
         self.pc2_ws_server = PC2WebSocketServer(self, port=8081)
@@ -1698,6 +1982,19 @@ class WebGUINode(Node):
         # ── KITTI direct play 모드 ──────────────────────────────────────────
         self.player_is_kitti = False           # True 이면 KITTI 파일 직접 재생
         self.kitti_drive_path = None           # 로드된 KITTI drive 디렉토리 경로
+        self._kitti_conv = None                # KittiConverter 캐시 (프레임당 인스턴스 생성 방지)
+
+        # ── KAIST direct play 모드 ──────────────────────────────────────────
+        self.player_is_kaist = False           # True 이면 KAIST 파일 직접 재생
+        self.kaist_dataset_path = None          # 로드된 KAIST 시퀀스 디렉토리 경로
+        self.kaist_global_poses = []            # [(stamp_ns, R, T), ...]
+        self.kaist_imu_data = ([], [])          # (stamps, rows) for bisect O(log n) lookup
+        self.kaist_gps_data = ([], [])
+        self.kaist_vrs_data = ([], [])
+        self._kaist_pubs_initialized = False    # KAIST publisher 초기화 여부
+        self._kaist_conv = None                 # KaistConverter 캐시 (프레임당 인스턴스 생성 방지)
+        self.kaist_converter_running = False   # KAIST 변환 진행 중 여부
+        self.kaist_convert_thread = None       # KAIST 변환 백그라운드 스레드
 
         self.get_logger().info('Web GUI Node initialized with full ROS2 integration')
 
@@ -1865,7 +2162,7 @@ class WebGUINode(Node):
             return
 
         self.kitti_velo_pub = self.create_publisher(
-            PointCloud2, '/kitti/velo/pointcloud', 1000)
+            PointCloud2, KITTI_FILE_PLAYER_PC2_TOPIC, 1000)
         self.kitti_cam_pub  = self.create_publisher(
             Image, '/kitti/camera_color_left/image_raw', 1000)
 
@@ -1880,6 +2177,44 @@ class WebGUINode(Node):
 
         self._kitti_pubs_initialized = True
         self.get_logger().info('KITTI File Player publishers initialized')
+
+    def _init_kaist_ros_interfaces(self):
+        """KAIST 전용 publisher 초기화 (lazy).
+
+        KAIST 데이터를 처음 로드할 때만 호출.
+        11개 토픽: Imu, NavSatFix×2, PointCloud2×2, LaserScan×2, Image×2, TF×2
+        """
+        self._init_common_ros_interfaces()
+        if self._kaist_pubs_initialized:
+            return
+
+        self.kaist_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 1000)
+        self.kaist_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 1000)
+        self.kaist_vrs_pub = self.create_publisher(NavSatFix, '/vrs_gps/fix', 1000)
+        self.kaist_vlp_left_pub = self.create_publisher(
+            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[0], 1000)
+        self.kaist_vlp_right_pub = self.create_publisher(
+            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[1], 1000)
+        self.kaist_sick_back_pub = self.create_publisher(
+            LaserScan, '/lms511_back/scan', 1000)
+        self.kaist_sick_mid_pub = self.create_publisher(
+            LaserScan, '/lms511_middle/scan', 1000)
+        self.kaist_stereo_left_pub = self.create_publisher(
+            Image, '/stereo/left/image_raw', 1000)
+        self.kaist_stereo_right_pub = self.create_publisher(
+            Image, '/stereo/right/image_raw', 1000)
+
+        tf_static_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.kaist_tf_static_pub = self.create_publisher(
+            TFMessage, '/tf_static', tf_static_qos)
+        self.kaist_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
+        self._kaist_pubs_initialized = True
+        self.get_logger().info('KAIST File Player publishers initialized')
 
     def _find_kitti_calib_dir(self, drive_path):
         """드라이브 경로에서 calib 디렉토리를 탐색하여 반환한다.
@@ -1904,17 +2239,19 @@ class WebGUINode(Node):
         drive_path = os.path.realpath(drive_path)
         candidates = []
 
-        # 탐색 범위: 부모 → 조부모 순서로 '*_calib' 항목 수집
-        for search_dir in [os.path.dirname(drive_path),
-                           os.path.dirname(os.path.dirname(drive_path))]:
-            if not os.path.isdir(search_dir):
-                continue
-            try:
-                for entry in sorted(os.listdir(search_dir)):
-                    if entry.endswith('_calib') and os.path.isdir(os.path.join(search_dir, entry)):
-                        candidates.append(os.path.join(search_dir, entry))
-            except OSError:
-                pass
+        # 탐색 범위: 부모 → 조부모 → 증조부모 (date 폴더에 calib 형제로 있을 수 있음)
+        d = drive_path
+        for _ in range(4):
+            d = os.path.dirname(d)
+            if not d or d == drive_path:
+                break
+            if os.path.isdir(d):
+                try:
+                    for entry in sorted(os.listdir(d)):
+                        if entry.endswith('_calib') and os.path.isdir(os.path.join(d, entry)):
+                            candidates.append(os.path.join(d, entry))
+                except OSError:
+                    pass
 
         # 후보 calib 디렉토리에서 실제 calib .txt 파일 유무로 유효성 검사
         for calib_base in candidates:
@@ -2382,46 +2719,58 @@ class WebGUINode(Node):
         self.get_logger().info(f'Recorder bag name set to: {bag_name}')
         return True
 
+    def invalidate_ros_topics_list_cache(self):
+        """토픽 목록 API 캐시 무효화 (load_data·bag 로드 직후 목록이 바뀔 때)."""
+        self._ros_topics_list_cache = None
+
     def get_recorder_topics(self):
         """Get list of current ROS2 topics with type information.
+
+        같은 프로세스의 rclpy 그래프를 조회한다 (ros2 topic list 서브프로세스 없음 → 지연·블로킹 감소).
 
         Returns:
             list[dict]: [{'name': '/topic', 'type': 'pkg/msg/Type'}, ...]
         """
         try:
-            # ros2 topic list -t: 타입 정보 포함 출력 (예: /topic [sensor_msgs/msg/PointCloud2])
-            cmd = ['bash', '-c', 'source /opt/ros/jazzy/setup.bash && ros2 topic list -t']
-            result = subprocess.run(
-                cmd,
-                env=self._ros_env,
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            now = time.monotonic()
+            cache = getattr(self, '_ros_topics_list_cache', None)
+            ttl = getattr(self, '_ros_topics_list_cache_ttl_sec', 0.75)
+            if cache is not None:
+                ts, topics = cache
+                if (now - ts) < ttl and topics is not None:
+                    return topics
 
-            if result.returncode == 0:
-                topics = []
-                for line in result.stdout.strip().split('\n'):
-                    line = line.strip()
-                    if not line:
+            raw = self.get_topic_names_and_types()
+            topics = []
+            seen = set()
+            for name, type_list in raw:
+                for tp in type_list:
+                    key = (name, tp)
+                    if key in seen:
                         continue
-                    # ros2 topic list -t 출력 형식: /topic_name [pkg/msg/Type]
-                    if ' [' in line and line.endswith(']'):
-                        name, rest = line.split(' [', 1)
-                        topic_type = rest[:-1].strip()  # trailing ']' 제거
-                        topics.append({'name': name.strip(), 'type': topic_type})
-                    else:
-                        # 타입 정보 없는 경우 fallback
-                        topics.append({'name': line, 'type': ''})
-                self.get_logger().info(f'Found {len(topics)} ROS2 topics')
-                return topics
-            else:
-                self.get_logger().error(f'Failed to get ROS2 topics. Return code: {result.returncode}')
-                self.get_logger().error(f'stderr: {result.stderr}')
-                return []
+                    seen.add(key)
+                    topics.append({'name': name, 'type': tp})
+            self._ros_topics_list_cache = (now, topics)
+            self.get_logger().debug(f'get_recorder_topics: {len(topics)} (rclpy graph)')
+            return topics
         except Exception as e:
-            self.get_logger().error(f'Error getting topics: {str(e)}')
+            self.get_logger().error(f'Error getting topics (rclpy): {str(e)}')
             return []
+
+    def _player_load_result(
+            self, success, message, dataset=None, player_pc2_topics=None):
+        """load_data HTTP 응답용.
+
+        player_pc2_topics:
+          - list: 이 모드에서 웹 노드가 발행하는 PointCloud2 (UI가 구독 동기화)
+          - None: bag 등 자동 동기화 불가 → 클라이언트는 추적 중인 file-player PC2만 해제
+        """
+        return {
+            'success': success,
+            'message': message,
+            'dataset': dataset,
+            'player_pc2_topics': player_pc2_topics,
+        }
 
     def record_bag(self, topics, save_as_ros1=False):
         """Start or stop bag recording.
@@ -2549,7 +2898,21 @@ class WebGUINode(Node):
         ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
         return os.path.isfile(ts_file)
 
-    def _load_kitti_direct(self, path: str) -> bool:
+    def _is_kaist_dataset_path(self, path: str) -> bool:
+        """경로가 KAIST Complex Urban 시퀀스 디렉토리인지 확인한다.
+
+        sensor_data/VLP_left_stamp.csv 또는 sensor_data/data_stamp.csv 존재 여부로 판별.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        sensor_dir = os.path.join(path, 'sensor_data')
+        if not os.path.isdir(sensor_dir):
+            return False
+        vlp_stamp = os.path.join(sensor_dir, 'VLP_left_stamp.csv')
+        data_stamp = os.path.join(sensor_dir, 'data_stamp.csv')
+        return os.path.isfile(vlp_stamp) or os.path.isfile(data_stamp)
+
+    def _load_kitti_direct(self, path: str) -> dict:
         """KITTI drive 디렉토리를 직접 File Player로 로드한다.
 
         velodyne_points/timestamps.txt 에서 타임스탬프를 읽어
@@ -2574,11 +2937,13 @@ class WebGUINode(Node):
             timestamps_ns = conv._load_timestamps(ts_file)
         except Exception as e:
             self.get_logger().error(f'Failed to read KITTI timestamps: {e}')
-            return False
+            return self._player_load_result(
+                False, str(e), 'kitti', None)
 
         if not timestamps_ns:
             self.get_logger().error(f'No valid timestamps in {ts_file}')
-            return False
+            return self._player_load_result(
+                False, f'No valid timestamps in {ts_file}', 'kitti', None)
 
         # data_stamp: {timestamp_ns: frame_index_str}
         self.data_stamp = {}
@@ -2588,7 +2953,8 @@ class WebGUINode(Node):
 
         if not self.data_stamp:
             self.get_logger().error('data_stamp is empty after parsing KITTI timestamps')
-            return False
+            return self._player_load_result(
+                False, 'data_stamp empty', 'kitti', None)
 
         sorted_stamps = sorted(self.data_stamp.keys())
         self.player_initial_stamp   = sorted_stamps[0]
@@ -2603,6 +2969,7 @@ class WebGUINode(Node):
         self.player_is_kitti    = True
         self.player_is_ros2_bag = False
         self.kitti_drive_path   = path
+        self.kitti_static_tf_msg = None  # 재생 중 /tf_static 주기 재발행용
 
         self.livox_cache = {}
         self.cam_cache   = {}
@@ -2626,15 +2993,42 @@ class WebGUINode(Node):
                     os.path.join(calib_dir, 'calib_imu_to_velo.txt'))
                 calib_velo_to_cam = conv._parse_calib_file(
                     os.path.join(calib_dir, 'calib_velo_to_cam.txt'))
-                static_tf_msg = conv._build_static_tf(calib_imu_to_velo, calib_velo_to_cam)
+                calib_cam_to_cam = conv._parse_calib_file(
+                    os.path.join(calib_dir, 'calib_cam_to_cam.txt'))
+                # stamp: ROS2 tf_static 구독자 호환을 위해 현재 시각 사용
+                now = self.get_clock().now()
+                from builtin_interfaces.msg import Time as TimeMsg
+                stamp = TimeMsg()
+                stamp.sec = now.nanoseconds // 1_000_000_000
+                stamp.nanosec = int(now.nanoseconds % 1_000_000_000)
+                static_tf_msg = conv._build_static_tf(
+                    calib_imu_to_velo, calib_velo_to_cam,
+                    calib_cam_to_cam=calib_cam_to_cam,
+                    stamp=stamp,
+                )
                 # transient_local QoS 덕분에 늦게 subscribe해도 수신됨
                 if self.kitti_tf_static_pub and static_tf_msg:
+                    self.kitti_static_tf_msg = static_tf_msg
                     self.kitti_tf_static_pub.publish(static_tf_msg)
-                    self.get_logger().info(f'KITTI static TF published from: {calib_dir}')
+                    n_tf = len(static_tf_msg.transforms) if static_tf_msg.transforms else 0
+                    dbg = ''
+                    if n_tf >= 2:
+                        t = static_tf_msg.transforms[1].transform.translation
+                        dbg = f' imu→velo=({t.x:.2f},{t.y:.2f},{t.z:.2f})'
+                    self.get_logger().info(
+                        f'KITTI static TF from {calib_dir}: {n_tf} transforms{dbg}')
             except Exception as e:
                 self.get_logger().warn(f'KITTI static TF publish failed: {e}')
         else:
             self.get_logger().warn(f'KITTI calib directory not found near: {path}')
+            # calib 없어도 velo_link 연결을 위해 identity chain 생성
+            try:
+                static_tf_msg = conv._build_static_tf({}, {}, stamp=None)
+                if static_tf_msg and static_tf_msg.transforms:
+                    self.kitti_static_tf_msg = static_tf_msg
+                    self.get_logger().info('KITTI fallback identity TF chain created')
+            except Exception:
+                pass
 
         # ── oxts 파일 목록 + 타임스탬프 파싱 + Mercator 원점 계산 ─────────────
         oxts_dir = os.path.join(path, 'oxts')
@@ -2669,17 +3063,21 @@ class WebGUINode(Node):
             f'({len(self.data_stamp)} frames, '
             f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
         )
-        return True
+        return self._player_load_result(
+            True, 'KITTI loaded', 'kitti', [KITTI_FILE_PLAYER_PC2_TOPIC])
 
     def _publish_kitti_frame(self, frame_idx: int, stamp_ns: int):
         """KITTI 프레임(velodyne + camera)을 ROS2 토픽으로 publish한다."""
-        from ros2_autonav_webui.kitti_converter import KittiConverter
-        from rclpy.time import Time as RclpyTime
         from builtin_interfaces.msg import Time as TimeMsg
 
         drive_path = self.kitti_drive_path
         if not drive_path:
             return
+
+        if self._kitti_conv is None:
+            from ros2_autonav_webui.kitti_converter import KittiConverter
+            self._kitti_conv = KittiConverter()
+        conv = self._kitti_conv
 
         stamp_msg = TimeMsg()
         stamp_msg.sec      = int(stamp_ns // 1_000_000_000)
@@ -2690,7 +3088,6 @@ class WebGUINode(Node):
             drive_path, 'velodyne_points', 'data', f'{frame_idx:010d}.bin')
         if os.path.isfile(bin_path):
             try:
-                conv = KittiConverter()
                 pc2_msg = conv._make_pointcloud2_msg(bin_path, stamp_msg)
                 if pc2_msg and self.kitti_velo_pub:
                     self.kitti_velo_pub.publish(pc2_msg)
@@ -2703,7 +3100,6 @@ class WebGUINode(Node):
                 drive_path, cam_dir, 'data', f'{frame_idx:010d}.png')
             if os.path.isfile(img_path):
                 try:
-                    conv = KittiConverter()
                     img_msg = conv._make_image_msg(img_path, encoding, stamp_msg)
                     if img_msg and self.kitti_cam_pub:
                         self.kitti_cam_pub.publish(img_msg)
@@ -2711,22 +3107,319 @@ class WebGUINode(Node):
                     self.get_logger().warn(f'KITTI image publish failed (frame {frame_idx}): {e}')
                 break
 
-        # ── Dynamic TF: world → base_link (oxts GPS/IMU 기반) ────────────────
-        if (self.kitti_tf_pub and self.kitti_oxts_files
-                and self.kitti_origin_oxts and self.kitti_mercator_scale):
-            if frame_idx < len(self.kitti_oxts_files):
+        # ── TF: /tf에 dynamic + static 통합 발행 (rosbridge는 /tf_static QoS 호환 안 됨) ─
+        if self.kitti_tf_pub:
+            all_transforms = []
+            # 1) Dynamic: world → base_link
+            if (self.kitti_oxts_files and self.kitti_origin_oxts and self.kitti_mercator_scale
+                    and frame_idx < len(self.kitti_oxts_files)):
                 try:
-                    conv = KittiConverter()
                     oxts = conv._load_oxts_file(self.kitti_oxts_files[frame_idx])
                     if oxts:
-                        tf_msg = conv._make_dynamic_tf(
+                        dyn_msg = conv._make_dynamic_tf(
                             oxts, self.kitti_origin_oxts,
                             self.kitti_mercator_scale, stamp_msg
                         )
-                        self.kitti_tf_pub.publish(tf_msg)
+                        all_transforms.extend(dyn_msg.transforms)
                 except Exception as e:
                     self.get_logger().debug(
-                        f'KITTI TF publish failed (frame {frame_idx}): {e}')
+                        f'KITTI dynamic TF failed (frame {frame_idx}): {e}')
+            # 2) Static: base_link → imu → velo → camera (매 프레임 /tf에 포함)
+            if self.kitti_static_tf_msg and self.kitti_static_tf_msg.transforms:
+                for t in self.kitti_static_tf_msg.transforms:
+                    t_copy = TransformStamped()
+                    t_copy.header.stamp = stamp_msg
+                    t_copy.header.frame_id = t.header.frame_id
+                    t_copy.child_frame_id = t.child_frame_id
+                    t_copy.transform = t.transform
+                    all_transforms.append(t_copy)
+            if all_transforms:
+                from tf2_msgs.msg import TFMessage
+                tf_msg = TFMessage()
+                tf_msg.transforms = all_transforms
+                self.kitti_tf_pub.publish(tf_msg)
+
+    def _load_kaist_direct(self, path: str) -> dict:
+        """KAIST 시퀀스 디렉토리를 직접 File Player로 로드한다.
+
+        VLP_left_stamp.csv 또는 data_stamp.csv에서 타임스탬프를 읽어
+        data_stamp 구조(stamp_ns → frame_idx_str)를 구축한다.
+        global_pose.csv, xsens_imu.csv, gps.csv, vrs_gps.csv 사전 로드.
+        /tf_static 1회 publish.
+        """
+        from ros2_autonav_webui.kaist_converter import KaistConverter
+
+        # 기존 재생 정지
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        sensor_dir = os.path.join(path, 'sensor_data')
+        calib_dir = os.path.join(path, 'calibration')
+        pose_csv = os.path.join(path, 'global_pose.csv')
+
+        try:
+            conv = KaistConverter()
+        except Exception as e:
+            self.get_logger().error(f'Failed to import KaistConverter: {e}')
+            return self._player_load_result(
+                False, str(e), 'kaist', None)
+
+        # 마스터 타임라인: 모든 센서의 stamp 병합 (VLP Left/Right, IMU, GPS, SICK, global_pose 등)
+        all_stamps = set()
+        vlp_left_stamps = conv._load_stamp_csv(
+            os.path.join(sensor_dir, 'VLP_left_stamp.csv'))
+        if not vlp_left_stamps:
+            vlp_left_stamps = conv._load_stamp_csv(
+                os.path.join(sensor_dir, 'data_stamp.csv'))
+        for ts in vlp_left_stamps:
+            if ts > 0:
+                all_stamps.add(ts)
+
+        vlp_right_dir = os.path.join(sensor_dir, 'VLP_right')
+        vlp_right_stamps = conv._load_stamp_csv(
+            os.path.join(sensor_dir, 'VLP_right_stamp.csv'))
+        if not vlp_right_stamps and os.path.isdir(vlp_right_dir):
+            from pathlib import Path
+            for f in sorted(Path(vlp_right_dir).glob('*.bin')):
+                try:
+                    all_stamps.add(int(f.stem))
+                except ValueError:
+                    pass
+        else:
+            for ts in vlp_right_stamps:
+                if ts > 0:
+                    all_stamps.add(ts)
+
+        for sick_sub in ('SICK_back', 'lms511_back'):
+            sick_back_dir = os.path.join(sensor_dir, sick_sub)
+            stamp_file = os.path.join(sensor_dir, f'{sick_sub.replace("lms511", "SICK")}_stamp.csv')
+            sick_back_stamps = conv._load_stamp_csv(stamp_file)
+            if not sick_back_stamps and os.path.isdir(sick_back_dir):
+                from pathlib import Path
+                for f in sorted(Path(sick_back_dir).glob('*.bin')):
+                    try:
+                        all_stamps.add(int(f.stem))
+                    except ValueError:
+                        pass
+                break
+            for ts in sick_back_stamps:
+                if ts > 0:
+                    all_stamps.add(ts)
+            if sick_back_stamps:
+                break
+
+        for sick_sub in ('SICK_middle', 'lms511_middle'):
+            sick_mid_dir = os.path.join(sensor_dir, sick_sub)
+            stamp_file = os.path.join(sensor_dir, f'{sick_sub.replace("lms511", "SICK")}_stamp.csv')
+            sick_mid_stamps = conv._load_stamp_csv(stamp_file)
+            if not sick_mid_stamps and os.path.isdir(sick_mid_dir):
+                from pathlib import Path
+                for f in sorted(Path(sick_mid_dir).glob('*.bin')):
+                    try:
+                        all_stamps.add(int(f.stem))
+                    except ValueError:
+                        pass
+                break
+            for ts in sick_mid_stamps:
+                if ts > 0:
+                    all_stamps.add(ts)
+            if sick_mid_stamps:
+                break
+
+        self.kaist_global_poses = conv._parse_global_pose(pose_csv)
+        for p in self.kaist_global_poses:
+            if p[0] > 0:
+                all_stamps.add(p[0])
+
+        imu_file = os.path.join(sensor_dir, 'xsens_imu.csv')
+        if not os.path.exists(imu_file):
+            imu_file = os.path.join(sensor_dir, 'imu.csv')
+        imu_rows = conv._load_kaist_imu_csv(imu_file)
+        imu_rows.sort(key=lambda r: r.get('stamp', 0))
+        self.kaist_imu_data = ([r['stamp'] for r in imu_rows], imu_rows)
+        for s in self.kaist_imu_data[0]:
+            all_stamps.add(s)
+
+        gps_rows = conv._load_kaist_gps_csv(os.path.join(sensor_dir, 'gps.csv'))
+        gps_rows.sort(key=lambda r: r.get('stamp', 0))
+        self.kaist_gps_data = ([r['stamp'] for r in gps_rows], gps_rows)
+        for s in self.kaist_gps_data[0]:
+            all_stamps.add(s)
+
+        vrs_file = os.path.join(sensor_dir, 'vrs_gps.csv')
+        vrs_rows = conv._load_kaist_gps_csv(vrs_file) if os.path.exists(vrs_file) else []
+        vrs_rows.sort(key=lambda r: r.get('stamp', 0))
+        self.kaist_vrs_data = ([r['stamp'] for r in vrs_rows], vrs_rows)
+        for s in self.kaist_vrs_data[0]:
+            all_stamps.add(s)
+
+        # stereo_stamp.csv 사용 (디렉토리 glob보다 훨씬 빠름)
+        stereo_stamps = conv._load_stamp_csv(os.path.join(sensor_dir, 'stereo_stamp.csv'))
+        for ts in stereo_stamps:
+            if ts > 0:
+                all_stamps.add(ts)
+
+        if not all_stamps:
+            self.get_logger().error('KAIST: No valid timestamps from any sensor')
+            return self._player_load_result(
+                False, 'No valid timestamps', 'kaist', None)
+
+        # data_stamp: {timestamp_ns: str(timestamp_ns)} — KAIST bin 파일명이 stamp.bin
+        self.data_stamp = {ts_ns: str(ts_ns) for ts_ns in all_stamps if ts_ns > 0}
+
+        if not self.data_stamp:
+            self.get_logger().error('data_stamp is empty after parsing KAIST timestamps')
+            return self._player_load_result(
+                False, 'data_stamp empty', 'kaist', None)
+
+        sorted_stamps = sorted(self.data_stamp.keys())
+        self.player_initial_stamp = sorted_stamps[0]
+        self.player_last_stamp = sorted_stamps[-1]
+        self.player_timestamp = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos = 0
+        self.player_seek_requested = False
+        self.player_seek_to_stamp = self.player_initial_stamp
+
+        self.player_path = path
+        self.player_is_kitti = False   # KAIST 모드 진입 시 KITTI 해제
+        self.player_is_kaist = True
+        self.player_is_ros2_bag = False
+        self.kaist_dataset_path = path
+
+        self.livox_cache = {}
+        self.cam_cache = {}
+
+        self._init_kaist_ros_interfaces()
+
+        # global_pose, imu, gps, vrs는 위 마스터 타임라인 구축 시 이미 로드됨
+
+        # Static TF 1회 publish
+        if os.path.isdir(calib_dir):
+            try:
+                stamp_time = conv._ns_to_time_msg(sorted_stamps[0])
+                static_tf_msg = conv._build_static_tf(calib_dir, stamp_time)
+                if static_tf_msg and self.kaist_tf_static_pub:
+                    self.kaist_tf_static_pub.publish(static_tf_msg)
+                    self.get_logger().info(f'KAIST static TF published from: {calib_dir}')
+            except Exception as e:
+                self.get_logger().warn(f'KAIST static TF publish failed: {e}')
+        else:
+            self.get_logger().warn(f'KAIST calibration directory not found: {calib_dir}')
+
+        self.player_data_loaded = True
+
+        self.get_logger().info(
+            f'KAIST sequence loaded: {path} '
+            f'({len(self.data_stamp)} frames, '
+            f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
+        )
+        return self._player_load_result(
+            True, 'KAIST loaded', 'kaist', list(KAIST_FILE_PLAYER_PC2_TOPICS))
+
+    def _publish_kaist_frame(self, stamp_ns: int):
+        """KAIST 프레임(VLP, SICK, Stereo, IMU, GPS, VRS, Dynamic TF)을 ROS2 토픽으로 publish한다."""
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        path = self.kaist_dataset_path
+        if not path:
+            return
+
+        if self._kaist_conv is None:
+            from ros2_autonav_webui.kaist_converter import KaistConverter
+            self._kaist_conv = KaistConverter()
+        conv = self._kaist_conv
+        sensor_dir = os.path.join(path, 'sensor_data')
+        stamp_time = conv._ns_to_time_msg(stamp_ns)
+
+        # Dynamic TF (world → base_link)
+        pose = conv._find_nearest_pose(self.kaist_global_poses, stamp_ns)
+        if pose and self.kaist_tf_pub:
+            _, R, T = pose
+            tf_msg = conv._make_dynamic_tf(R, T, stamp_time)
+            if tf_msg:
+                self.kaist_tf_pub.publish(tf_msg)
+
+        # IMU
+        if self.kaist_imu_data and self.kaist_imu_pub:
+            imu_row = conv._find_nearest_by_stamp(self.kaist_imu_data, stamp_ns)
+            if imu_row:
+                imu_msg = conv._make_imu_msg(imu_row, stamp_time)
+                self.kaist_imu_pub.publish(imu_msg)
+
+        # GPS
+        if self.kaist_gps_data and self.kaist_gps_pub:
+            gps_row = conv._find_nearest_by_stamp(self.kaist_gps_data, stamp_ns)
+            if gps_row:
+                gps_msg = conv._make_navsatfix_msg(gps_row, stamp_time)
+                self.kaist_gps_pub.publish(gps_msg)
+
+        # VRS GPS
+        if self.kaist_vrs_data and self.kaist_vrs_pub:
+            vrs_row = conv._find_nearest_by_stamp(self.kaist_vrs_data, stamp_ns)
+            if vrs_row:
+                vrs_msg = conv._make_navsatfix_msg(vrs_row, stamp_time)
+                self.kaist_vrs_pub.publish(vrs_msg)
+
+        # VLP Left
+        vlp_left_dir = os.path.join(sensor_dir, 'VLP_left')
+        bin_path = os.path.join(vlp_left_dir, f'{stamp_ns}.bin')
+        if os.path.isfile(bin_path) and self.kaist_vlp_left_pub:
+            vlp_msg = conv._make_vlp_msg(bin_path, 'left_velodyne', stamp_time)
+            if vlp_msg:
+                self.kaist_vlp_left_pub.publish(vlp_msg)
+
+        # VLP Right (VLP_right 또는 vlp_right 디렉토리)
+        for vlp_right_sub in ('VLP_right', 'vlp_right'):
+            vlp_right_dir = os.path.join(sensor_dir, vlp_right_sub)
+            bin_path = os.path.join(vlp_right_dir, f'{stamp_ns}.bin')
+            if os.path.isfile(bin_path) and self.kaist_vlp_right_pub:
+                vlp_msg = conv._make_vlp_msg(bin_path, 'right_velodyne', stamp_time)
+                if vlp_msg:
+                    self.kaist_vlp_right_pub.publish(vlp_msg)
+                break
+
+        # SICK Back (SICK_back 또는 lms511_back 디렉토리)
+        for subdir in ('SICK_back', 'lms511_back'):
+            sick_back_dir = os.path.join(sensor_dir, subdir)
+            bin_path = os.path.join(sick_back_dir, f'{stamp_ns}.bin')
+            if os.path.isfile(bin_path) and self.kaist_sick_back_pub:
+                scan_msg = conv._make_laserscan_msg(bin_path, 'back_sick', stamp_time)
+                if scan_msg:
+                    self.kaist_sick_back_pub.publish(scan_msg)
+                break
+
+        # SICK Middle (SICK_middle 또는 lms511_middle 디렉토리)
+        for subdir in ('SICK_middle', 'lms511_middle'):
+            sick_mid_dir = os.path.join(sensor_dir, subdir)
+            bin_path = os.path.join(sick_mid_dir, f'{stamp_ns}.bin')
+            if os.path.isfile(bin_path) and self.kaist_sick_mid_pub:
+                scan_msg = conv._make_laserscan_msg(bin_path, 'middle_sick', stamp_time)
+                if scan_msg:
+                    self.kaist_sick_mid_pub.publish(scan_msg)
+                break
+
+        # Stereo Left (데이터 없으면 스킵 — urban27-dongtan 등)
+        stereo_left_dir = os.path.join(sensor_dir, 'image', 'stereo_left')
+        img_path = os.path.join(stereo_left_dir, f'{stamp_ns}.png')
+        if os.path.isfile(img_path) and self.kaist_stereo_left_pub:
+            img_msg = conv._make_stereo_msg(img_path, stamp_time, 'stereo_left')
+            if img_msg:
+                self.kaist_stereo_left_pub.publish(img_msg)
+
+        # Stereo Right
+        stereo_right_dir = os.path.join(sensor_dir, 'image', 'stereo_right')
+        img_path = os.path.join(stereo_right_dir, f'{stamp_ns}.png')
+        if os.path.isfile(img_path) and self.kaist_stereo_right_pub:
+            img_msg = conv._make_stereo_msg(img_path, stamp_time, 'stereo_right')
+            if img_msg:
+                self.kaist_stereo_right_pub.publish(img_msg)
 
     def _is_ros2_bag_path(self, path: str) -> bool:
         """경로가 ROS2 bag (.db3 파일 또는 bag 디렉토리)인지 확인한다."""
@@ -2744,7 +3437,7 @@ class WebGUINode(Node):
                 return True
         return False
 
-    def _load_ros2_bag_player(self, path: str) -> bool:
+    def _load_ros2_bag_player(self, path: str) -> dict:
         """ROS2 bag 경로를 기존 bag_play_toggle 인프라로 로드한다.
 
         .db3 파일이 지정된 경우 부모 디렉토리를 bag_path로 사용한다.
@@ -2787,15 +3480,18 @@ class WebGUINode(Node):
         self.player_path = bag_dir
         self.player_data_loaded = True   # play 버튼 활성화
         self.player_is_ros2_bag = True   # player_play_toggle 에서 분기 용도
+        self.player_is_kitti = False
+        self.player_is_kaist = False
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.livox_cache = {}
         self.cam_cache = {}
 
         self.get_logger().info(f'Loaded ROS2 bag for player: {bag_dir}')
-        return True
+        return self._player_load_result(
+            True, 'ROS2 bag path set', 'ros2_bag', None)
 
-    def _load_ros1_bag_player(self, path: str) -> bool:
+    def _load_ros1_bag_player(self, path: str) -> dict:
         """ROS1 .bag 파일 경로를 File Player 인프라로 로드한다.
 
         변환 완료 후 _onKittiConvertDone 또는 수동 load 시 호출된다.
@@ -2823,20 +3519,29 @@ class WebGUINode(Node):
         self.player_is_ros2_bag = False
         self.player_is_ros1_bag = True
         self.player_is_kitti = False
+        self.player_is_kaist = False
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.livox_cache = {}
         self.cam_cache = {}
 
         self.get_logger().info(f'Loaded ROS1 bag for player: {path}')
-        return True
+        return self._player_load_result(
+            True, 'ROS1 bag path set', 'ros1_bag', None)
 
     def load_player_data(self, path):
         """Load file player data from the specified path"""
+        self.invalidate_ros_topics_list_cache()
+
         # KITTI drive 디렉토리인 경우 직접 플레이어로 로드
         if self._is_kitti_drive_path(path):
             self.get_logger().info(f'Detected KITTI drive path: {path}')
             return self._load_kitti_direct(path)
+
+        # KAIST 시퀀스 디렉토리인 경우 직접 플레이어로 로드
+        if self._is_kaist_dataset_path(path):
+            self.get_logger().info(f'Detected KAIST sequence path: {path}')
+            return self._load_kaist_direct(path)
 
         # ROS1 .bag 파일인 경우 ROS1 bag player 인프라로 위임
         if path.endswith('.bag') and os.path.isfile(path):
@@ -2861,6 +3566,7 @@ class WebGUINode(Node):
         self.player_is_ros2_bag = False   # ConPR 모드로 복귀
         self.player_is_ros1_bag = False   # ROS1 모드 해제
         self.player_is_kitti = False      # KITTI 모드 해제
+        self.player_is_kaist = False      # KAIST 모드 해제
 
         # ROS1 bag 재생 중이면 중지 (PointCloud2 publisher 정리 → ConPR CustomMsg 생성 가능)
         self.stop_ros1_playback()
@@ -2884,7 +3590,8 @@ class WebGUINode(Node):
             stamp_file = os.path.join(path, 'data_stamp.csv')
             if not os.path.exists(stamp_file):
                 self.get_logger().error(f'data_stamp.csv not found in {path}')
-                return False
+                return self._player_load_result(
+                    False, f'data_stamp.csv not found in {path}', 'conpr', [])
 
             # Load data stamps
             self.data_stamp = {}
@@ -2902,7 +3609,8 @@ class WebGUINode(Node):
 
             if not self.data_stamp:
                 self.get_logger().error('No valid data found in data_stamp.csv')
-                return False
+                return self._player_load_result(
+                    False, 'No valid data in data_stamp.csv', 'conpr', [])
 
             timestamps = sorted(self.data_stamp.keys())
             self.player_initial_stamp = timestamps[0]
@@ -2972,13 +3680,14 @@ class WebGUINode(Node):
             self.player_data_loaded = True
             # Lazy-initialize File Player ROS2 publishers/subscribers on first load
             self._init_file_player_ros_interfaces()
-            return True
+            return self._player_load_result(
+                True, 'ConPR data loaded', 'conpr', [])
 
         except Exception as e:
             self.get_logger().error(f'Failed to load player data: {str(e)}')
             import traceback
             traceback.print_exc()
-            return False
+            return self._player_load_result(False, str(e), 'conpr', [])
 
     # ── KITTI 변환 함수 ────────────────────────────────────────────────────────
 
@@ -3087,6 +3796,113 @@ class WebGUINode(Node):
             target=_run, daemon=True, name='kitti-convert')
         self.kitti_convert_thread.start()
         return {'success': True, 'message': 'Conversion started', 'output_bag_path': final_output_path}
+
+    # ── KAIST 변환 함수 ────────────────────────────────────────────────────────
+
+    def scan_kaist_directory(self, path: str) -> dict:
+        """KAIST Complex Urban 데이터셋 디렉토리를 탐색하여 시퀀스 목록을 반환한다.
+
+        Args:
+            path: 사용자가 선택한 디렉토리 (예: /path/to/complex_urban)
+
+        Returns:
+            {'success': True, 'sequences': [{name, path}, ...]} or {'success': False, 'error': '...'}
+        """
+        try:
+            from ros2_autonav_webui.kaist_converter import KaistConverter
+            converter = KaistConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'KAIST scan complete: {len(result["sequences"])} sequence(s) found')
+            return result
+        except Exception as e:
+            self.get_logger().error(f'KAIST scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_kaist_conversion(
+        self,
+        sequence_dir: str,
+        output_path: str,
+        sensors: list | None = None,
+        bag_format: str = 'ros2',
+    ) -> dict:
+        """KAIST 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
+
+        변환 진행률은 WebSocket(포트 8081)을 통해 전체 클라이언트에 push된다.
+
+        Args:
+            sequence_dir: KAIST 시퀀스 디렉토리 (calibration/, sensor_data/, global_pose.csv 포함)
+            output_path: 출력 경로 (ROS2: 디렉토리, ROS1: 무시하고 sequence_name.bag 사용)
+            sensors: 포함할 센서 목록 (None이면 전체)
+            bag_format: 'ros2' (기본) 또는 'ros1'
+
+        Returns:
+            {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
+        """
+        if self.kaist_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        if bag_format == 'ros1':
+            seq_name = os.path.basename(sequence_dir.rstrip(os.sep))
+            output_bag_path = os.path.join(
+                os.path.dirname(sequence_dir), seq_name + '.bag'
+            )
+        else:
+            output_bag_path = output_path
+
+        def _run():
+            self.kaist_converter_running = True
+            try:
+                from ros2_autonav_webui.kaist_converter import KaistConverter
+                converter = KaistConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'kaist_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'KAIST conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    converter.convert_to_ros1bag(
+                        sequence_dir=sequence_dir,
+                        output_bag_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    converter.convert_to_ros2bag(
+                        sequence_dir=sequence_dir,
+                        output_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'KAIST conversion complete: {output_bag_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kaist_convert_done',
+                    'bag_path': output_bag_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'KAIST conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kaist_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.kaist_converter_running = False
+
+        self.kaist_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='kaist-convert')
+        self.kaist_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
 
     def load_livox_data(self, stamp):
         """Load LiDAR data from .bin file for given timestamp"""
@@ -3405,6 +4221,7 @@ class WebGUINode(Node):
             - ROS1 포맷: 'sensor_msgs/Image'       (parts 2개)
             - ROS2 포맷: 'sensor_msgs/msg/Image'   (parts 3개)
             두 포맷을 모두 처리합니다.
+            - ROS1 tf/tfMessage → ROS2 tf2_msgs/msg/TFMessage 매핑
 
             Args:
                 ros1_type_str (str): 예) 'sensor_msgs/msg/Image' 또는 'sensor_msgs/Image'
@@ -3412,6 +4229,8 @@ class WebGUINode(Node):
             Returns:
                 bool: True if importable and class exists
             """
+            if ros1_type_str in ('tf/tfMessage', 'tf/msg/tfMessage'):
+                return True
             try:
                 parts = ros1_type_str.split('/')
                 if len(parts) == 2:
@@ -3595,7 +4414,15 @@ class WebGUINode(Node):
                 self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
                 return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
 
-            cmd = [convert_cmd, '--src', self.bag_path, '--dst', output_dir]
+            cmd = [
+                convert_cmd,
+                '--src',
+                self.bag_path,
+                '--dst',
+                output_dir,
+                '--src-typestore',
+                'ros1_noetic',
+            ]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -3607,6 +4434,8 @@ class WebGUINode(Node):
                 error_msg = result.stderr.strip() or result.stdout.strip()
                 self.get_logger().error(f'rosbags-convert failed: {error_msg}')
                 return {'success': False, 'error': error_msg}
+
+            _patch_rosbag2_tf_static_qos(output_dir, self.get_logger())
 
             self.get_logger().info(f'ROS1 bag converted successfully: {output_dir}')
             return {'success': True, 'output_path': output_dir}
@@ -3743,11 +4572,19 @@ class WebGUINode(Node):
                     self.get_logger().info('Loop playback enabled')
 
                 # Add topic filter if topics are selected
+                # ROS1 bag player 참조: /tf, /tf_static는 3D Viewer 좌표 변환에 필수.
+                # 토픽 선택 시 항상 /tf, /tf_static 포함 (나올때가 있고 안나올때가 있는 문제 해결)
+                # ros2 bag play는 bag에 없는 토픽은 무시하므로 항상 추가해도 무방
                 if selected_topics and len(selected_topics) > 0:
-                    self.bag_selected_topics = selected_topics
+                    topics_to_play = list(selected_topics)
+                    for tf_topic in ('/tf', '/tf_static'):
+                        if tf_topic not in topics_to_play:
+                            topics_to_play.append(tf_topic)
+                            self.get_logger().info(f'[bag play] Including {tf_topic} for 3D Viewer TF')
+                    self.bag_selected_topics = topics_to_play
                     cmd.append('--topics')
-                    cmd.extend(selected_topics)
-                    self.get_logger().info(f'Playing selected topics: {selected_topics}')
+                    cmd.extend(topics_to_play)
+                    self.get_logger().info(f'Playing selected topics: {topics_to_play}')
                 else:
                     self.get_logger().info('Playing all topics')
 
@@ -3961,7 +4798,6 @@ class WebGUINode(Node):
         current_idx = 0      # 다음 처리할 timestamps 인덱스
         was_playing = False  # 이전 루프의 재생 상태 (재시작 감지용)
         was_paused = False   # pause 상태 추적 (resume 시 기준 시간 재조정)
-        _dbg_iter = 0        # 진단용 카운터
 
         # wall-clock 기준 타이밍 (timer_callback 불필요)
         _wall_start = 0.0    # play/resume 시점 wall time
@@ -3977,7 +4813,7 @@ class WebGUINode(Node):
                     timestamps = []
                 was_playing = False
                 was_paused = False
-                time.sleep(0.01)
+                time.sleep(0.05)  # 재생 중지 시 CPU 절약
                 continue
 
             # ── wall-clock 기반 player_processed_stamp 갱신 ──────────────
@@ -4016,17 +4852,8 @@ class WebGUINode(Node):
                 _proc_start = self.player_processed_stamp
                 was_paused = self.player_paused
                 self.get_logger().info(
-                    f'[KITTI DBG] Playback started: {len(timestamps)} stamps, '
-                    f'idx={current_idx}, speed={self.player_speed}, '
-                    f'is_kitti={getattr(self, "player_is_kitti", False)}, '
-                    f'initial={self.player_initial_stamp}, last={self.player_last_stamp}, '
-                    f'player_ts={self.player_timestamp}, proc={self.player_processed_stamp}'
+                    f'Playback started: {len(timestamps)} stamps, speed={self.player_speed}'
                 )
-                if len(timestamps) > 1:
-                    self.get_logger().info(
-                        f'[KITTI DBG] ts[0]={timestamps[0]}, ts[1]={timestamps[1]}, '
-                        f'gap={timestamps[1]-timestamps[0]}ns'
-                    )
             elif self.player_seek_requested:
                 # 재생 중 seek ─────────────────────────────────────────────
                 # player_seek_to_stamp 에서 목표 위치를 읽는다.
@@ -4045,27 +4872,26 @@ class WebGUINode(Node):
                     f'Seek done: stamp={seek_stamp}, idx={current_idx}'
                 )
             was_playing = True
-            _dbg_iter += 1
 
             # 현재 목표 스탬프 계산
             target_stamp = self.player_initial_stamp + self.player_processed_stamp
 
-            # 진단 로그 (100ms마다 한 번)
-            if _dbg_iter % 100 == 1:
-                next_ts = timestamps[current_idx] if current_idx < len(timestamps) else -1
-                self.get_logger().info(
-                    f'[KITTI DBG] iter={_dbg_iter} proc={self.player_processed_stamp} '
-                    f'target={target_stamp} next_ts={next_ts} '
-                    f'diff={next_ts - target_stamp if next_ts > 0 else "N/A"} '
-                    f'n_ts={len(timestamps)} idx={current_idx}'
-                )
+            # Stop/Pause 시 즉시 중단 (inner loop 내부에서도 체크 — 배치 처리 중 반응)
+            # 배치당 최대 프레임 수 제한으로 latency 스파이크 방지
+            _batch_limit = 20
+            _batch_count = 0
 
             # 인덱스를 앞으로 전진하면서 target_stamp 이하의 스탬프만 발행 (O(k))
             while current_idx < len(timestamps):
+                if not self.player_playing or self.player_paused:
+                    break
+                if _batch_count >= _batch_limit:
+                    break
                 stamp = timestamps[current_idx]
                 if stamp > target_stamp:
                     break
                 current_idx += 1
+                _batch_count += 1
 
                 if stamp <= self.player_timestamp:
                     # 이미 발행한 스탬프 (seek 복귀 시 skip)
@@ -4086,6 +4912,19 @@ class WebGUINode(Node):
                     except Exception as e:
                         self.get_logger().warn(f'KITTI frame publish error: {e}')
                     # player_timestamp는 예외 여부와 무관하게 항상 갱신
+                    self.player_timestamp = stamp
+                    continue  # ConPR 분기 스킵
+
+                # ── KAIST direct play ──────────────────────────────────────
+                if getattr(self, 'player_is_kaist', False):
+                    try:
+                        self._publish_kaist_frame(stamp)
+                        if self.clock_pub:
+                            clock_msg = Clock()
+                            clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                            self.clock_pub.publish(clock_msg)
+                    except Exception as e:
+                        self.get_logger().warn(f'KAIST frame publish error: {e}')
                     self.player_timestamp = stamp
                     continue  # ConPR 분기 스킵
 
@@ -4709,10 +5548,12 @@ def browse_directory(start_path="/home"):
                 'is_file': False
             })
 
-        # List directories and files
+        # List directories and files (hide dotfiles / dot-directories)
         if path.exists() and path.is_dir():
-            # First add directories
-            for entry in sorted(path.iterdir()):
+            visible = sorted(
+                e for e in path.iterdir() if not e.name.startswith('.')
+            )
+            for entry in visible:
                 if entry.is_dir():
                     entries.append({
                         'name': entry.name,
@@ -4720,9 +5561,7 @@ def browse_directory(start_path="/home"):
                         'is_dir': True,
                         'is_file': False
                     })
-
-            # Then add files
-            for entry in sorted(path.iterdir()):
+            for entry in visible:
                 if entry.is_file():
                     entries.append({
                         'name': entry.name,
@@ -4890,6 +5729,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                     if old_thread and old_thread.is_alive():
                         old_thread.join(timeout=1.0)
                 self.node.stop_ros1_playback()
+            self.node.invalidate_ros_topics_list_cache()
             self.node.bag_path = path
             # Automatically get bag info when loading
             info = self.node.get_bag_info()
@@ -5183,10 +6023,54 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                     base_dir, calib_dir, data_path, drive_name, bag_format
                 )
 
+        elif parsed_path.path == '/api/player/scan_kaist':
+            # KAIST 디렉토리 탐색
+            # body: { "path": "/path/to/complex_urban" }
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_kaist_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_kaist':
+            # KAIST → ROS1/ROS2 bag 변환
+            # body: { "sequence_dir": "...", "output_path": "...", "sensors": [...], "bag_format": "ros2"|"ros1" }
+            sequence_dir = data.get('sequence_dir', '')
+            output_path = data.get('output_path', '')
+            sensors = data.get('sensors')
+            bag_format = data.get('bag_format', 'ros2')
+            if not sequence_dir:
+                response = {'success': False, 'error': 'Missing sequence_dir'}
+            elif not output_path:
+                response = {'success': False, 'error': 'Missing output_path'}
+            else:
+                response = self.node.start_kaist_conversion(
+                    sequence_dir=sequence_dir,
+                    output_path=output_path,
+                    sensors=sensors,
+                    bag_format=bag_format,
+                )
+
         elif parsed_path.path == '/api/player/load_data':
             path = data.get('path', '')
-            success = self.node.load_player_data(path)
-            response = {'success': success, 'message': 'Data loaded' if success else 'Failed to load data'}
+            load_out = self.node.load_player_data(path)
+            if isinstance(load_out, dict):
+                response = {
+                    'success': load_out.get('success', False),
+                    'message': load_out.get('message', ''),
+                    'dataset': load_out.get('dataset'),
+                    'player_pc2_topics': load_out.get('player_pc2_topics'),
+                }
+            else:
+                ok = bool(load_out)
+                response = {
+                    'success': ok,
+                    'message': 'Data loaded' if ok else 'Failed to load data',
+                    'dataset': None,
+                    'player_pc2_topics': None,
+                }
         elif parsed_path.path == '/api/player/play':
             success = self.node.player_play_toggle()
             response = {'success': success, 'playing': self.node.player_playing}

@@ -25,6 +25,13 @@ const kittiState = {
     // 진행률/완료/오류는 8081 WebSocket kitti_convert_* 메시지로 수신
 };
 
+const kaistState = {
+    baseDir: null,   // 사용자가 선택한 KAIST 최상위 디렉토리
+    sequences: [],  // 시퀀스 목록 [{name, path}]
+    converting: false, // 변환 중 여부
+    // 진행률/완료/오류는 8081 WebSocket kaist_convert_* 메시지로 수신
+};
+
 // Cached DOM elements
 const domCache = {
     elements: {},
@@ -372,6 +379,9 @@ async function loadBagFile() {
             // ConPR → ROS1/ROS2 bag 전환 시 3D Viewer 토픽 구독 리셋 (CustomMsg↔PointCloud2 충돌 방지)
             if (typeof resetViewerTopicSubscriptions === 'function') {
                 resetViewerTopicSubscriptions();
+            }
+            if (typeof resetBagFrameAndTFState === 'function') {
+                resetBagFrameAndTFState();
             }
             // Get topics, duration and bag_type from result
             // topics는 string[] (ROS2) 또는 {name, type, publishable}[] (ROS1) 형태일 수 있음
@@ -843,6 +853,12 @@ async function convertToRos2() {
 
                 updateBagTimeLabel(0, bagPlayerState.bagDuration);
                 updateSelectedTopicsDisplay();
+                if (typeof resetViewerTopicSubscriptions === 'function') {
+                    resetViewerTopicSubscriptions();
+                }
+                if (typeof resetBagFrameAndTFState === 'function') {
+                    resetBagFrameAndTFState();
+                }
                 console.log('Converted ROS2 bag loaded:', outputPath);
             }
         } else {
@@ -889,26 +905,36 @@ async function convertToRos1() {
 // File Player Functions
 
 /**
- * 데이터셋 형식 변경 핸들러 (ConPR / KITTI Raw)
- * @param {string} format - 선택된 형식 ('conpr' or 'kitti')
+ * 데이터셋 형식 변경 핸들러 (ConPR / KITTI Raw / KAIST Complex Urban)
+ * @param {string} format - 선택된 형식 ('conpr', 'kitti', 'kaist')
  */
 function onDatasetFormatChange(format) {
     const kittiUi = domCache.get('kitti-ui');
+    const kaistUi = domCache.get('kaist-ui');
     const conprSaveRow = domCache.get('conpr-save-row');
 
     if (format === 'kitti') {
         kittiUi.style.display = 'block';
-        // KITTI 모드에서는 ConPR 전체 row (bag-format-select, save-bag-btn) 숨김
+        if (kaistUi) { kaistUi.style.display = 'none'; }
         if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
-        // 이전 KITTI 상태 초기화
         kittiState.baseDir = null;
         kittiState.calibDir = null;
         kittiState.drives = [];
         domCache.get('player-path-label').textContent = '—';
         _resetKittiDriveSelect();
         _resetKittiProgressBar();
+    } else if (format === 'kaist') {
+        if (kittiUi) { kittiUi.style.display = 'none'; }
+        if (kaistUi) { kaistUi.style.display = 'block'; }
+        if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
+        kaistState.baseDir = null;
+        kaistState.sequences = [];
+        domCache.get('player-path-label').textContent = '—';
+        _resetKaistSequenceSelect();
+        _resetKaistProgressBar();
     } else {
-        kittiUi.style.display = 'none';
+        if (kittiUi) { kittiUi.style.display = 'none'; }
+        if (kaistUi) { kaistUi.style.display = 'none'; }
         if (conprSaveRow) { conprSaveRow.style.display = ''; }
     }
 }
@@ -929,6 +955,28 @@ function _resetKittiProgressBar() {
     const fill = domCache.get('kitti-progress-fill');
     const text = domCache.get('kitti-progress-text');
     const msg = domCache.get('kitti-progress-msg');
+    if (bar) { bar.style.display = 'none'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msg) { msg.textContent = ''; }
+}
+
+/**
+ * KAIST 시퀀스 선택 셀렉트를 초기 상태로 리셋
+ */
+function _resetKaistSequenceSelect() {
+    const sel = domCache.get('kaist-sequence-select');
+    if (sel) { sel.innerHTML = '<option value="">— Select a sequence —</option>'; }
+}
+
+/**
+ * KAIST 변환 진행바 리셋
+ */
+function _resetKaistProgressBar() {
+    const bar = domCache.get('kaist-progress-bar');
+    const fill = domCache.get('kaist-progress-fill');
+    const text = domCache.get('kaist-progress-text');
+    const msg = domCache.get('kaist-progress-msg');
     if (bar) { bar.style.display = 'none'; }
     if (fill) { fill.style.width = '0%'; }
     if (text) { text.textContent = '0%'; }
@@ -978,6 +1026,23 @@ async function loadKittiDirectory() {
     }, '/home');
 }
 
+/** File Player load_data 성공 시 이전 백/뷰어 상태 전부 비우고 서버 PC2 목록만 다시 연결 */
+function applyPlayerLoadDataViewerSync(result) {
+    if (!result || !result.success) return;
+    if (typeof resetViewerTopicSubscriptions === 'function') {
+        resetViewerTopicSubscriptions();
+    }
+    if (typeof syncPlayerFilePointCloudSubscriptions === 'function') {
+        syncPlayerFilePointCloudSubscriptions(result.player_pc2_topics);
+    }
+    if (typeof resetBagFrameAndTFState === 'function') {
+        resetBagFrameAndTFState();
+    }
+    if (typeof resetAll3DViewer === 'function') {
+        resetAll3DViewer();
+    }
+}
+
 /**
  * Drive 드롭다운 선택 변경 시 자동 호출.
  * 선택된 drive를 load_data API로 바로 로드 → data_stamp 구축 → Play 버튼 활성.
@@ -992,9 +1057,7 @@ async function onKittiDriveChange(driveIdx) {
     if (result && result.success) {
         domCache.get('player-path-label').textContent = drive.data_path;
         console.log('[KITTI] Drive auto-loaded:', drive.data_path);
-        if (typeof resetViewerTopicSubscriptions === 'function') {
-            resetViewerTopicSubscriptions();
-        }
+        applyPlayerLoadDataViewerSync(result);
 
         // Auto-start: 체크박스가 켜져 있으면 로드 직후 자동 재생
         const autoStartCheck = domCache.get('player-auto-start');
@@ -1043,9 +1106,7 @@ async function loadKittiDrive() {
     btn.textContent = 'Load';
 
     if (result && result.success) {
-        if (typeof resetViewerTopicSubscriptions === 'function') {
-            resetViewerTopicSubscriptions();
-        }
+        applyPlayerLoadDataViewerSync(result);
         domCache.get('player-path-label').textContent = drive.data_path;
         console.log('[KITTI] Drive loaded:', drive.data_path);
     } else {
@@ -1136,6 +1197,161 @@ async function convertKitti() {
     // 진행률·완료·오류는 _handleBackendWsMessage의 WebSocket 핸들러에서 처리
 }
 
+/**
+ * KAIST 디렉토리 탐색: scan_kaist API 호출 후 시퀀스 목록 업데이트
+ * 파일 브라우저에서 KAIST base 디렉토리 선택 후 호출됨
+ */
+async function loadKaistDirectory() {
+    openFileBrowser(async (path) => {
+        domCache.get('player-path-label').textContent = 'Scanning...';
+        _resetKaistSequenceSelect();
+        _resetKaistProgressBar();
+
+        const result = await apiCall('/api/player/scan_kaist', { path });
+        if (!result.success) {
+            domCache.get('player-path-label').textContent = 'Scan failed';
+            alert('KAIST scan failed: ' + (result.error || result.message || 'Unknown error'));
+            return;
+        }
+
+        const sequences = result.sequences || [];
+        kaistState.baseDir = path;
+        kaistState.sequences = sequences;
+
+        domCache.get('player-path-label').textContent = path;
+
+        const sel = domCache.get('kaist-sequence-select');
+        if (sel) {
+            sel.innerHTML = '<option value="">— Select a sequence —</option>';
+            sequences.forEach((seq, idx) => {
+                const opt = document.createElement('option');
+                opt.value = idx;
+                opt.textContent = seq.name || seq.path || `Sequence ${idx}`;
+                sel.appendChild(opt);
+            });
+        }
+
+        if (sequences.length === 0) {
+            alert('No sequences found in the selected KAIST directory.');
+        } else {
+            console.log(`[KAIST] Found ${sequences.length} sequence(s) in ${path}`);
+        }
+    }, '/home');
+}
+
+/**
+ * KAIST 시퀀스 드롭다운 선택 변경 시 자동 호출.
+ * 선택된 시퀀스를 load_data API로 바로 로드 → Direct Play 활성화.
+ */
+async function onKaistSequenceChange(seqIdx) {
+    if (seqIdx === '' || seqIdx === null || !kaistState.baseDir) return;
+    const seq = kaistState.sequences[parseInt(seqIdx)];
+    if (!seq) return;
+
+    domCache.get('player-path-label').textContent = 'Loading...';
+    const sequencePath = seq.path || seq;
+    const result = await apiCall('/api/player/load_data', { path: sequencePath });
+    if (result && result.success) {
+        domCache.get('player-path-label').textContent = sequencePath;
+        console.log('[KAIST] Sequence auto-loaded:', sequencePath);
+        applyPlayerLoadDataViewerSync(result);
+
+        const autoStartCheck = domCache.get('player-auto-start');
+        if (autoStartCheck && autoStartCheck.checked) {
+            console.log('[KAIST] Auto start enabled — starting playback');
+            await playPlayer();
+        }
+    } else {
+        const errMsg = result ? (result.message || result.error || 'Unknown') : 'No response';
+        domCache.get('player-path-label').textContent = 'Load failed';
+        console.error('[KAIST] Sequence auto-load failed:', errMsg);
+    }
+}
+
+/**
+ * KAIST 시퀀스를 ROS2 bag으로 변환 (Save Bag).
+ * 현재 선택된 시퀀스를 /api/player/convert_kaist로 전송.
+ * 진행률은 WebSocket(8081)을 통해 수신.
+ */
+async function convertKaist() {
+    const sel = domCache.get('kaist-sequence-select');
+    const seqIdx = sel ? sel.value : '';
+    if (seqIdx === '' || seqIdx === null) {
+        alert('먼저 시퀀스를 선택하세요.');
+        return;
+    }
+    if (!kaistState.baseDir) {
+        alert('KAIST 디렉토리를 먼저 로드하세요.');
+        return;
+    }
+
+    const seq = kaistState.sequences[parseInt(seqIdx)];
+    if (!seq) {
+        alert('유효하지 않은 시퀀스 선택입니다.');
+        return;
+    }
+
+    const sequenceDir = seq.path || seq;
+    if (kaistState.converting) {
+        alert('이미 변환 중입니다.');
+        return;
+    }
+
+    const bagFormatSel = domCache.get('kaist-bag-format-select');
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+
+    const btn   = domCache.get('kaist-convert-btn');
+    const bar   = domCache.get('kaist-progress-bar');
+    const fill  = domCache.get('kaist-progress-fill');
+    const text  = domCache.get('kaist-progress-text');
+    const msgEl = domCache.get('kaist-progress-msg');
+
+    kaistState.converting = true;
+    if (btn) { btn.disabled = true; btn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…'; }
+    if (bar) { bar.style.display = 'block'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msgEl) { msgEl.textContent = 'Starting conversion...'; }
+
+    // output_path: 시퀀스 디렉토리와 같은 위치에 _converted 추가 (백엔드가 확장자 처리)
+    const outputPath = sequenceDir + '_converted';
+
+    const result = await apiCall('/api/player/convert_kaist', {
+        sequence_dir: sequenceDir,
+        output_path: outputPath,
+        bag_format: bagFormat
+    });
+
+    if (!result || !result.success) {
+        kaistState.converting = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+        if (bar) { bar.style.display = 'none'; }
+        const errMsg = result ? (result.error || result.message || 'Unknown') : 'No response';
+        alert('변환 시작 실패: ' + errMsg);
+    }
+    // 진행률·완료·오류는 _handleBackendWsMessage의 WebSocket 핸들러에서 처리
+}
+
+async function _onKaistConvertDone(bagPath, btn, bar, fill, text, msg) {
+    if (fill) { fill.style.width = '100%'; }
+    if (text) { text.textContent = '100%'; }
+    if (msg) { msg.textContent = 'Conversion complete! Loading bag...'; }
+
+    const loadResult = await apiCall('/api/player/load_data', { path: bagPath });
+    if (loadResult && loadResult.success) {
+        domCache.get('player-path-label').textContent = bagPath;
+        if (msg) { msg.textContent = 'Ready to play'; }
+        console.log('[KAIST] Bag loaded:', bagPath);
+        applyPlayerLoadDataViewerSync(loadResult);
+    } else {
+        if (msg) { msg.textContent = 'Load failed'; }
+        alert('Failed to load converted bag: ' + (loadResult ? (loadResult.message || loadResult.error || 'Unknown error') : 'No response'));
+    }
+
+    kaistState.converting = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+}
+
 async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
     // 진행바 100% 완료 표시
     fill.style.width = '100%';
@@ -1148,9 +1364,7 @@ async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
         domCache.get('player-path-label').textContent = bagPath;
         msg.textContent = 'Ready to play';
         console.log('[KITTI] Bag loaded:', bagPath);
-        if (typeof resetViewerTopicSubscriptions === 'function') {
-            resetViewerTopicSubscriptions();
-        }
+        applyPlayerLoadDataViewerSync(loadResult);
     } else {
         msg.textContent = 'Load failed';
         alert('Failed to load converted bag: ' + (loadResult ? (loadResult.message || loadResult.error || 'Unknown error') : 'No response'));
@@ -1163,7 +1377,7 @@ async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
 
 /**
  * 데이터셋 형식에 따라 파일/디렉토리 로드
- * ConPR 형식이면 기존 로직, KITTI 형식이면 loadKittiDirectory() 호출
+ * ConPR 형식이면 기존 로직, KITTI/KAIST 형식이면 각각 loadKittiDirectory/loadKaistDirectory() 호출
  */
 async function loadPlayerPath() {
     const formatSel = domCache.get('dataset-format-select');
@@ -1171,6 +1385,10 @@ async function loadPlayerPath() {
 
     if (format === 'kitti') {
         await loadKittiDirectory();
+        return;
+    }
+    if (format === 'kaist') {
+        await loadKaistDirectory();
         return;
     }
 
@@ -1181,9 +1399,7 @@ async function loadPlayerPath() {
         if (result.success) {
             domCache.get('player-path-label').textContent = path;
             console.log('Player data loaded successfully');
-            if (typeof resetViewerTopicSubscriptions === 'function') {
-                resetViewerTopicSubscriptions();
-            }
+            applyPlayerLoadDataViewerSync(result);
 
             // Auto start: 체크박스가 켜져 있으면 로드 직후 자동 재생
             const autoStartCheck = domCache.get('player-auto-start');
@@ -2059,30 +2275,41 @@ function showYamlErrorModal() {
 // ==============================================================
 // Latency Measurement
 // ==============================================================
+const _LATENCY_PING_SAMPLES = 5;
+
 async function measureLatency() {
     const latencyElement = document.getElementById('latency-indicator');
     if (!latencyElement) return;
 
     try {
-        const startTime = performance.now();
-        const response = await fetch('/api/ping');
-        const endTime = performance.now();
+        const samples = await Promise.all(
+            Array.from({ length: _LATENCY_PING_SAMPLES }, async () => {
+                const t0 = performance.now();
+                const response = await fetch('/api/ping', { cache: 'no-store' });
+                const dt = performance.now() - t0;
+                return response.ok ? dt : null;
+            })
+        );
+        const ok = samples.filter((s) => s !== null).sort((a, b) => a - b);
+        if (ok.length === 0) {
+            latencyElement.textContent = 'latency: N/A';
+            latencyElement.style.color = '#888';
+            return;
+        }
+        const mid = Math.floor(ok.length / 2);
+        const latency = Math.round(
+            ok.length % 2 === 1 ? ok[mid] : (ok[mid - 1] + ok[mid]) / 2
+        );
+        latencyElement.textContent = `latency: ${latency}ms`;
 
-        if (response.ok) {
-            const latency = Math.round(endTime - startTime);
-            latencyElement.textContent = `latency: ${latency}ms`;
-
-            // Color coding based on latency
-            if (latency < 50) {
-                latencyElement.style.color = '#4CAF50'; // Green
-            } else if (latency < 150) {
-                latencyElement.style.color = '#FFC107'; // Yellow
-            } else {
-                latencyElement.style.color = '#F44336'; // Red
-            }
+        if (latency < 50) {
+            latencyElement.style.color = '#4CAF50';
+        } else if (latency < 150) {
+            latencyElement.style.color = '#FFC107';
+        } else {
+            latencyElement.style.color = '#F44336';
         }
     } catch (error) {
-        // Connection error
         latencyElement.textContent = 'latency: N/A';
         latencyElement.style.color = '#888';
     }
@@ -2118,9 +2345,9 @@ window.addEventListener('load', () => {
     loadDefaultSlamConfig();
     loadDefaultLocalizationConfig();
 
-    // Start latency measurement
+    // Start latency measurement (병렬 ping N회 → 중앙값, 단일 RTT 스파이크 완화)
     measureLatency();
-    setInterval(measureLatency, 2000); // Update every 2 seconds
+    setInterval(measureLatency, 2000);
 
     // Periodic state updates (every 500ms for smoother updates)
     setInterval(() => {
@@ -2288,6 +2515,34 @@ function _handleBackendWsMessage(rawData) {
         btn.disabled = false;
         btn.textContent = 'Save Bag';
         if (bar) bar.style.display = 'none';
+        if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
+        alert('Conversion error: ' + (msg.error || 'Unknown'));
+
+    // ── KAIST 변환 진행률 / 완료 / 오류 ──────────────────────────────────────
+    } else if (msg.type === 'kaist_convert_progress') {
+        const fill = domCache.get('kaist-progress-fill');
+        const text = domCache.get('kaist-progress-text');
+        const msgEl = domCache.get('kaist-progress-msg');
+        const pct = parseInt(msg.progress || 0);
+        if (fill && !isNaN(pct)) { fill.style.width = pct + '%'; }
+        if (text && !isNaN(pct)) { text.textContent = pct + '%'; }
+        if (msgEl && msg.message) { msgEl.textContent = msg.message; }
+
+    } else if (msg.type === 'kaist_convert_done') {
+        const btn  = domCache.get('kaist-convert-btn');
+        const bar  = domCache.get('kaist-progress-bar');
+        const fill = domCache.get('kaist-progress-fill');
+        const text = domCache.get('kaist-progress-text');
+        const msgEl = domCache.get('kaist-progress-msg');
+        _onKaistConvertDone(msg.bag_path, btn, bar, fill, text, msgEl).catch(console.error);
+
+    } else if (msg.type === 'kaist_convert_error') {
+        const btn  = domCache.get('kaist-convert-btn');
+        const bar  = domCache.get('kaist-progress-bar');
+        const msgEl = domCache.get('kaist-progress-msg');
+        kaistState.converting = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+        if (bar) { bar.style.display = 'none'; }
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
         alert('Conversion error: ' + (msg.error || 'Unknown'));
     }
