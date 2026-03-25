@@ -29,6 +29,7 @@
  *   { cmd: 'connect',        url: string }
  *   { cmd: 'subscribe',      topicName, colorMode, colorField, solidColor }
  *   { cmd: 'unsubscribe',    topicName }
+ *   { cmd: 'unsubscribeAll' }   — 서버·Worker 구독 맵 전부 해제 (데이터셋 전환 시)
  *   { cmd: 'updateSettings', topicName, colorMode?, colorField?, solidColor? }
  *
  * Messages to main thread:
@@ -93,6 +94,17 @@ self.onmessage = function (e) {
         subscriptions.delete(topicName);
         if (wsReady) {
             ws.send(JSON.stringify({ cmd: 'unsubscribe', topic: topicName }));
+        }
+
+    } else if (cmd === 'unsubscribeAll') {
+        const topics = Array.from(subscriptions.keys());
+        subscriptions.clear();
+        if (wsReady) {
+            for (let i = 0; i < topics.length; i++) {
+                try {
+                    ws.send(JSON.stringify({ cmd: 'unsubscribe', topic: topics[i] }));
+                } catch (err) { /* ignore */ }
+            }
         }
 
     } else if (cmd === 'updateSettings') {

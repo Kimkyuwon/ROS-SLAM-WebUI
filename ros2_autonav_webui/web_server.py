@@ -5,13 +5,17 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image, Imu, CameraInfo, PointCloud2
-from geometry_msgs.msg import PointStamped
+from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
+from geometry_msgs.msg import PointStamped, TransformStamped
+from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
+from tf2_msgs.msg import TFMessage
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from cv_bridge import CvBridge
 import cv2
 import struct
 import glob
+import queue
 import threading
 import asyncio
 import json
@@ -27,6 +31,7 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
 from urllib.parse import parse_qs, urlparse
 import subprocess
 import signal
+import math
 import yaml
 from pathlib import Path as PathLib
 import rosbag2_py
@@ -75,6 +80,115 @@ except ImportError:
 _web_server = None
 _ros_node = None
 
+# File Player PointCloud2 토픽 (create_publisher 이름과 반드시 동일 — API·UI 동기화의 단일 출처)
+KITTI_FILE_PLAYER_PC2_TOPIC = '/kitti/velo/pointcloud'
+KAIST_FILE_PLAYER_PC2_TOPICS = ['/ns2/velodyne_points', '/ns1/velodyne_points']
+MULRAN_FILE_PLAYER_PC2_TOPIC = '/os1_points'
+# MulRan /clock: ROSThread 기준 10ms 이상 간격 — direct play에서 과도한 publish 방지
+_MULRAN_CLOCK_MIN_INTERVAL_NS = 10_000_000
+
+
+def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
+    """rosbags-convert 가 ROS1 latching=0 인 /tf_static 에 빈 QoS를 쓰는 경우 보정.
+
+    ROS 2 /tf_static 은 TRANSIENT_LOCAL 이어야 tf2·RViz·웹 뷰어가 latched 변환을 받는다.
+    """
+    import sqlite3
+    from pathlib import Path
+
+    try:
+        from rosbags.convert.converter import LATCH
+        from rosbags.rosbag2.metadata import dump_qos_v8, dump_qos_v9
+    except ImportError:
+        logger.warning('[convert_ros1] rosbags import failed; skip tf_static QoS patch')
+        return
+
+    out = Path(output_dir)
+    db_paths = list(out.glob('*.db3'))
+    if not db_paths:
+        db_paths = list(out.rglob('*.db3'))
+    if not db_paths:
+        logger.info(f'[convert_ros1] No .db3 in {output_dir}; skip tf_static QoS patch')
+        return
+
+    meta_path = out / 'metadata.yaml'
+    version = 9
+    if meta_path.is_file():
+        try:
+            with open(meta_path, encoding='utf-8') as f:
+                meta = yaml.safe_load(f)
+            ver = meta.get('rosbag2_bagfile_information', {}).get('version')
+            if ver is not None:
+                version = int(ver)
+        except Exception as exc:
+            logger.warning(f'[convert_ros1] metadata version read failed ({exc}); assume v9')
+
+    # rosbag2 v9+: metadata.yaml 의 offered_qos_profiles 는 YAML 시퀀스(맵 리스트)여야 함.
+    # 문자열로 넣으면 yaml-cpp 가 vector<QoS> 변환 시 bad conversion (bag info 실패).
+    if version >= 9:
+        qos_meta = dump_qos_v9(LATCH)
+        if not qos_meta:
+            logger.warning('[convert_ros1] Empty dump_qos_v9(LATCH); skip tf_static patch')
+            return
+        qos_sqlite = yaml.dump(
+            qos_meta,
+            default_flow_style=False,
+            allow_unicode=True,
+        ).strip()
+    else:
+        qos_sqlite = dump_qos_v8(LATCH)
+        qos_meta = qos_sqlite
+        if not qos_sqlite:
+            logger.warning('[convert_ros1] Empty QoS string for LATCH; skip tf_static patch')
+            return
+
+    for db_path in db_paths:
+        try:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM topics WHERE name = '/tf_static' OR name LIKE '%/tf_static'"
+                )
+                if cur.fetchone()[0] == 0:
+                    continue
+                conn.execute(
+                    'UPDATE topics SET offered_qos_profiles = ? WHERE name = ? OR name LIKE ?',
+                    (qos_sqlite, '/tf_static', '%/tf_static'),
+                )
+                conn.commit()
+                logger.info(f'[convert_ros1] tf_static QoS patched in {db_path.name}')
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.error(f'[convert_ros1] tf_static QoS sqlite patch failed ({db_path}): {exc}')
+
+    if meta_path.is_file():
+        try:
+            with open(meta_path, encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            info = data.get('rosbag2_bagfile_information')
+            if isinstance(info, dict):
+                for row in info.get('topics_with_message_count') or []:
+                    if not isinstance(row, dict):
+                        continue
+                    tm = row.get('topic_metadata')
+                    if not isinstance(tm, dict):
+                        continue
+                    name = tm.get('name', '')
+                    if name == '/tf_static' or name.endswith('/tf_static'):
+                        tm['offered_qos_profiles'] = qos_meta
+                with open(meta_path, 'w', encoding='utf-8') as f:
+                    yaml.safe_dump(
+                        data,
+                        f,
+                        default_flow_style=False,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+                logger.info('[convert_ros1] metadata.yaml tf_static offered_qos_profiles updated')
+        except Exception as exc:
+            logger.warning(f'[convert_ros1] metadata.yaml tf_static patch skipped: {exc}')
+
 
 class Ros1BagPlayerThread(threading.Thread):
     """ROS1 .bag 파일을 rosbags로 읽어 rclpy Publisher로 실시간 ROS2 publish하는 스레드.
@@ -95,6 +209,9 @@ class Ros1BagPlayerThread(threading.Thread):
 
         # 제어 플래그
         self._stop_flag = False
+        self._loop = False
+        self._seek_requested = False
+        self._seek_to_sec = 0.0
         self._play_event = threading.Event()
         self._play_event.set()  # 기본적으로 재생 상태
 
@@ -138,6 +255,24 @@ class Ros1BagPlayerThread(threading.Thread):
         with self._lock:
             self._playback_rate = max(new_rate, 0.01)
 
+    def set_loop(self, loop: bool):
+        """루프 재생 여부 설정.
+
+        Args:
+            loop (bool): True이면 재생 완료 후 처음부터 반복.
+        """
+        self._loop = loop
+
+    def set_seek(self, time_sec: float):
+        """재생 위치 이동 (seek). 재생 중/일시정지 중 호출 가능.
+
+        Args:
+            time_sec (float): 이동할 시간(초). 0 이상 total_sec 이하.
+        """
+        self._seek_to_sec = max(0.0, float(time_sec))
+        self._seek_requested = True
+        self._play_event.set()  # 일시정지 중이면 block 해제
+
     def get_status(self):
         """현재 상태 딕셔너리 반환"""
         with self._lock:
@@ -158,6 +293,8 @@ class Ros1BagPlayerThread(threading.Thread):
         - ROS2 포맷: 'sensor_msgs/msg/Image'   (parts 3개)
         두 포맷을 모두 처리합니다.
 
+        ROS1 tf 패키지의 tf/tfMessage는 ROS2에 없으므로 tf2_msgs/msg/TFMessage로 매핑.
+
         Args:
             ros1_type_str (str): 예) 'sensor_msgs/msg/Image' 또는 'sensor_msgs/Image'
 
@@ -165,6 +302,9 @@ class Ros1BagPlayerThread(threading.Thread):
             type | None: 성공 시 메시지 클래스, 실패 시 None
         """
         import importlib
+        # ROS1 tf/tfMessage → ROS2 tf2_msgs/msg/TFMessage (tf 패키지는 ROS2에 없음)
+        if ros1_type_str in ('tf/tfMessage', 'tf/msg/tfMessage'):
+            return TFMessage
         try:
             parts = ros1_type_str.split('/')
             if len(parts) == 2:
@@ -181,8 +321,35 @@ class Ros1BagPlayerThread(threading.Thread):
         except Exception:
             return None
 
+    def _publisher_qos(self, topic_name: str, msg_cls):
+        """대용량 백 재생 시 구독자·브리지 적체 완화: 센서류는 최신 1개만 유지."""
+        if topic_name == '/tf_static':
+            return QoSProfile(
+                depth=1,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        cls_name = getattr(msg_cls, '__name__', '')
+        # PointCloud2 / Image / LaserScan 등: 큐 쌓임 방지(느린 웹/시각화와 조합 시 전체 지연 완화)
+        if cls_name in ('PointCloud2', 'Image', 'LaserScan', 'CompressedImage'):
+            # depth=1 로 구독자 측 적체 완화; RELIABLE 유지(rosbridge 등 기본 구독과 QoS 호환)
+            return QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        if topic_name == '/tf':
+            return QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=30,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE)
+
     def _get_or_create_publisher(self, topic_name, ros1_type_str, msg_cls):
         """토픽별 ROS2 publisher를 캐시해서 반환 (없으면 생성).
+
+        /tf_static은 TRANSIENT_LOCAL QoS 사용 (tf2 구독자와 호환).
 
         Args:
             topic_name (str): publish할 토픽 이름
@@ -196,7 +363,8 @@ class Ros1BagPlayerThread(threading.Thread):
             return self._publishers[topic_name]
 
         try:
-            pub = self._ros_node.create_publisher(msg_cls, topic_name, 10)
+            qos = self._publisher_qos(topic_name, msg_cls)
+            pub = self._ros_node.create_publisher(msg_cls, topic_name, qos)
             self._publishers[topic_name] = pub
             self._ros_node.get_logger().info(
                 f'[Ros1BagPlayer] Created publisher: {topic_name} ({ros1_type_str})'
@@ -245,6 +413,21 @@ class Ros1BagPlayerThread(threading.Thread):
         try:
             # typestore는 Reader 밖에서 한 번만 생성
             typestore = get_typestore(Stores.ROS1_NOETIC)
+            src_typestore = get_typestore(Stores.ROS2_JAZZY)
+
+            def _ensure_typestore_has(ros2_type: str) -> bool:
+                """ROS1 typestore에 타입이 없으면 ROS2에서 등록 (tf2_msgs 등 ROS1_NOETIC에 없는 타입)."""
+                if ros2_type in typestore.fielddefs:
+                    return True
+                try:
+                    from rosbags.typesys import get_types_from_msg
+                    msgdef = src_typestore.generate_msgdef(ros2_type, ros_version=1)[0]
+                    typs = get_types_from_msg(msgdef, ros2_type)
+                    typs.pop('std_msgs/msg/Header', None)
+                    typestore.register(typs)
+                    return True
+                except Exception:
+                    return False
 
             with Reader(self._bag_path) as reader:
                 # 전체 재생 시간 계산 (nanoseconds → seconds)
@@ -260,14 +443,20 @@ class Ros1BagPlayerThread(threading.Thread):
                         continue
                     topic_type_map[topic_name] = topic_info.msgtype
 
-                # publisher 사전 생성 (publishable한 토픽만)
+                # ROS1 typestore에 tf2_msgs 등 누락 타입 등록 (역직렬화 가능하도록)
+                for _t in topic_type_map.values():
+                    _ensure_typestore_has(_t)
+
+                # publisher 사전 생성 + msg_cls 캐시 (매 메시지마다 resolve 제거)
                 publishable_topics = set()
+                msg_cls_cache = {}  # topic_name -> msg_cls
                 for topic_name, ros1_type_str in topic_type_map.items():
                     msg_cls = self._resolve_ros2_type(ros1_type_str)
                     if msg_cls is not None:
                         pub = self._get_or_create_publisher(topic_name, ros1_type_str, msg_cls)
                         if pub is not None:
                             publishable_topics.add(topic_name)
+                            msg_cls_cache[topic_name] = msg_cls
                     else:
                         self._ros_node.get_logger().warn(
                             f'[Ros1BagPlayer] Skipping {topic_name} ({ros1_type_str}): '
@@ -282,61 +471,135 @@ class Ros1BagPlayerThread(threading.Thread):
                         self._status = 'stopped'
                     return
 
-                prev_ros_time = None   # 직전 메시지의 ROS timestamp (nanoseconds)
-                start_ns = reader.start_time
+                # 루프 재생 지원: _loop 플래그가 True이면 완료 후 처음부터 재시작
+                # seek 지원: messages(start=...)로 특정 시점부터 재생
+                # Producer-Consumer: Reader 스레드가 디스크 I/O로 prefetch, 메인 스레드는 변환+publish (I/O 오버랩)
+                PREFETCH_QUEUE_SIZE = 5
+                SENTINEL_SEEK = ('__SEEK__', None, None)
+                SENTINEL_END = ('__END__', None, None)
 
-                # 메시지 순차 순회
-                for conn, timestamp, rawdata in reader.messages():
-                    if self._stop_flag:
-                        break
+                start_param = None  # None = 처음부터, int(ns) = 해당 시점부터
+                while True:
+                    prev_ros_time = None
+                    start_ns = reader.start_time
 
-                    # 일시정지 대기 (blocking)
-                    self._play_event.wait()
-                    if self._stop_flag:
-                        break
-
-                    topic_name = conn.topic
-                    ros1_type_str = conn.msgtype
-
-                    # 선택되지 않은 토픽 스킵
-                    if topic_name not in publishable_topics:
-                        continue
-
-                    # elapsed 업데이트
-                    elapsed_ns = timestamp - start_ns
                     with self._lock:
-                        self._elapsed_sec = elapsed_ns / 1e9
+                        if start_param is not None:
+                            self._elapsed_sec = (start_param - start_ns) / 1e9
+                        else:
+                            self._elapsed_sec = 0.0
 
-                    # 메시지 간 시간차 기반 sleep (속도 제어)
-                    if prev_ros_time is not None:
-                        dt_ns = timestamp - prev_ros_time
-                        if dt_ns > 0:
-                            sleep_sec = (dt_ns / 1e9) / self._playback_rate
-                            # 최대 2초 sleep 제한 (긴 공백 방지)
-                            time.sleep(min(sleep_sec, 2.0))
-                    prev_ros_time = timestamp
+                    prefetch_queue = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
 
-                    # 역직렬화 + publish
-                    try:
-                        msg_cls = self._resolve_ros2_type(ros1_type_str)
-                        if msg_cls is None:
+                    def _reader_task():
+                        try:
+                            msg_iter = (reader.messages(connections=(), start=start_param, stop=None)
+                                        if start_param is not None else reader.messages())
+                            for conn, timestamp, rawdata in msg_iter:
+                                if self._stop_flag:
+                                    prefetch_queue.put(SENTINEL_END)
+                                    return
+                                if self._seek_requested:
+                                    prefetch_queue.put(SENTINEL_SEEK)
+                                    return
+                                prefetch_queue.put((conn, timestamp, rawdata))
+                        except Exception:
+                            pass
+                        finally:
+                            try:
+                                prefetch_queue.put(SENTINEL_END)
+                            except Exception:
+                                pass
+
+                    reader_thread = threading.Thread(target=_reader_task, daemon=True)
+                    reader_thread.start()
+
+                    seek_break = False
+                    while True:
+                        try:
+                            item = prefetch_queue.get(timeout=0.5)
+                        except queue.Empty:
+                            if self._stop_flag:
+                                seek_break = False
+                                break
                             continue
 
-                        # rosbags 최신 API: typestore.deserialize_ros1()
-                        ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
-                        # ROS2 메시지로 변환
-                        ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
-                        if ros2_msg is None:
+                        if item == SENTINEL_END:
+                            break
+                        if item == SENTINEL_SEEK:
+                            start_param = int(start_ns + self._seek_to_sec * 1e9)
+                            start_param = max(reader.start_time, min(start_param, reader.end_time))
+                            with self._lock:
+                                self._elapsed_sec = self._seek_to_sec
+                            self._seek_requested = False
+                            seek_break = True
+                            break
+
+                        conn, timestamp, rawdata = item
+                        if self._stop_flag:
+                            break
+
+                        # 일시정지 대기 (blocking)
+                        self._play_event.wait()
+                        if self._stop_flag:
+                            break
+
+                        topic_name = conn.topic
+                        ros1_type_str = conn.msgtype
+
+                        # 선택되지 않은 토픽 스킵
+                        if topic_name not in publishable_topics:
                             continue
 
-                        pub = self._publishers.get(topic_name)
-                        if pub is not None:
-                            pub.publish(ros2_msg)
+                        # elapsed 업데이트
+                        elapsed_ns = timestamp - start_ns
+                        with self._lock:
+                            self._elapsed_sec = elapsed_ns / 1e9
 
-                    except Exception as e:
-                        self._ros_node.get_logger().debug(
-                            f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
-                        )
+                        # 메시지 간 시간차 기반 sleep (속도 제어)
+                        if prev_ros_time is not None:
+                            dt_ns = timestamp - prev_ros_time
+                            if dt_ns > 0:
+                                sleep_sec = (dt_ns / 1e9) / self._playback_rate
+                                # 최대 2초 sleep 제한 (긴 공백 방지)
+                                time.sleep(min(sleep_sec, 2.0))
+                        prev_ros_time = timestamp
+
+                        # 역직렬화 + publish (msg_cls 캐시 사용)
+                        try:
+                            msg_cls = msg_cls_cache.get(topic_name)
+                            if msg_cls is None:
+                                continue
+
+                            # rosbags 최신 API: typestore.deserialize_ros1()
+                            ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
+                            # ROS2 메시지로 변환
+                            ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
+                            if ros2_msg is None:
+                                continue
+
+                            pub = self._publishers.get(topic_name)
+                            if pub is not None:
+                                pub.publish(ros2_msg)
+
+                        except Exception as e:
+                            self._ros_node.get_logger().debug(
+                                f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
+                            )
+
+                    reader_thread.join(timeout=2.0)
+
+                    # seek로 탈출한 경우: start_param으로 for 루프 재시작
+                    if seek_break:
+                        continue
+                    # for 루프 완료 (정상 종료 또는 stop_flag)
+                    if self._stop_flag or not self._loop:
+                        break
+                    # 루프 재생: 타임라인 즉시 0으로 리셋 후 재시작
+                    start_param = None
+                    with self._lock:
+                        self._elapsed_sec = 0.0
+                    self._ros_node.get_logger().info('[Ros1BagPlayer] Looping playback.')
 
         except Exception as e:
             self._ros_node.get_logger().error(
@@ -369,6 +632,68 @@ class Ros1BagPlayerThread(threading.Thread):
                 pass
         return None
 
+    def _convert_pointcloud2_fast(self, ros1_msg) -> PointCloud2 | None:
+        """PointCloud2 전용 고속 변환 (재귀 루프 생략)."""
+        try:
+            from std_msgs.msg import Header
+            from builtin_interfaces.msg import Time as BuiltinTime
+            msg = PointCloud2()
+            h = ros1_msg.header
+            s = h.stamp
+            msg.header = Header(
+                stamp=BuiltinTime(sec=getattr(s, 'sec', 0), nanosec=getattr(s, 'nanosec', getattr(s, 'nsec', 0))),
+                frame_id=str(h.frame_id)
+            )
+            msg.height = int(ros1_msg.height)
+            msg.width = int(ros1_msg.width)
+            msg.is_dense = bool(ros1_msg.is_dense)
+            msg.is_bigendian = bool(ros1_msg.is_bigendian)
+            msg.point_step = int(ros1_msg.point_step)
+            msg.row_step = int(ros1_msg.row_step)
+            if hasattr(ros1_msg.data, 'tobytes'):
+                msg.data = ros1_msg.data.tobytes()
+            elif isinstance(ros1_msg.data, (bytes, bytearray)):
+                msg.data = bytes(ros1_msg.data)
+            else:
+                msg.data = bytes(ros1_msg.data)
+            for f in ros1_msg.fields:
+                pf = PointField()
+                pf.name = str(f.name)
+                pf.offset = int(f.offset)
+                pf.datatype = int(f.datatype)
+                pf.count = int(f.count)
+                msg.fields.append(pf)
+            return msg
+        except Exception:
+            return None
+
+    def _convert_image_fast(self, ros1_msg) -> Image | None:
+        """Image 전용 고속 변환 (재귀 루프 생략)."""
+        try:
+            from std_msgs.msg import Header
+            from builtin_interfaces.msg import Time as BuiltinTime
+            msg = Image()
+            h = ros1_msg.header
+            s = h.stamp
+            msg.header = Header(
+                stamp=BuiltinTime(sec=getattr(s, 'sec', 0), nanosec=getattr(s, 'nanosec', getattr(s, 'nsec', 0))),
+                frame_id=str(h.frame_id)
+            )
+            msg.height = int(ros1_msg.height)
+            msg.width = int(ros1_msg.width)
+            msg.encoding = str(ros1_msg.encoding)
+            msg.is_bigendian = bool(ros1_msg.is_bigendian)
+            msg.step = int(ros1_msg.step)
+            if hasattr(ros1_msg.data, 'tobytes'):
+                msg.data = ros1_msg.data.tobytes()
+            elif isinstance(ros1_msg.data, (bytes, bytearray)):
+                msg.data = bytes(ros1_msg.data)
+            else:
+                msg.data = bytes(ros1_msg.data)
+            return msg
+        except Exception:
+            return None
+
     def _convert_ros1_to_ros2(self, ros1_msg, ros2_cls):
         """rosbags 메시지 객체(dataclass 기반)를 ROS2 Python 메시지로 재귀 변환.
 
@@ -389,6 +714,12 @@ class Ros1BagPlayerThread(threading.Thread):
         """
         import dataclasses
         import numpy as np
+
+        # 대용량 메시지 고속 경로 (PointCloud2, Image)
+        if ros2_cls is PointCloud2:
+            return self._convert_pointcloud2_fast(ros1_msg)
+        if ros2_cls is Image:
+            return self._convert_image_fast(ros1_msg)
 
         try:
             ros2_msg = ros2_cls()
@@ -787,6 +1118,10 @@ class PC2WebSocketServer:
         7: np.float32, 8: np.float64,
     } if NUMPY_AVAILABLE else {}
 
+    # Image WebSocket 스트리밍 설정
+    IMG_THROTTLE_SEC = 0.033   # ~30Hz
+    IMG_JPEG_QUALITY = 80      # JPEG 품질 (0~100)
+
     def __init__(self, ros_node, port: int = 8081):
         self._node = ros_node
         self._port = port
@@ -799,11 +1134,26 @@ class PC2WebSocketServer:
         self._subs: dict = {}
         # topic_name → 마지막 전송 단조시각 (throttle)
         self._last_sent: dict = {}
+        # ── Livox CustomMsg (PC2와 동일한 binary 포맷으로 스트리밍) ─────────────
+        self._livox_clients: dict = {}
+        self._livox_subs: dict = {}
+        self._livox_last_sent: dict = {}
         # ── 범용 Plot 토픽 (throttle 없이 원래 주기로 전송) ────────────────────
         # topic_name → { ws: set[field_path, ...] }
         self._plot_clients: dict = {}
         # topic_name → rclpy Subscription
         self._plot_subs: dict = {}
+        # ── 전체 연결 클라이언트 (broadcast용) ─────────────────────────────────
+        self._all_clients: set = set()
+        # ── Image 전용 (JPEG 바이너리 스트리밍) ────────────────────────────────
+        # topic_name → set[websocket]
+        self._img_clients: dict = {}
+        # topic_name → rclpy Subscription
+        self._img_subs: dict = {}
+        # topic_name → 마지막 전송 단조시각 (throttle)
+        self._img_last_sent: dict = {}
+        # CvBridge 인스턴스 (Image → OpenCV 변환)
+        self._cv_bridge = CvBridge()
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -838,9 +1188,13 @@ class PC2WebSocketServer:
             self._node.get_logger().error(f'[PC2WS] server error: {e}')
 
     async def _handler(self, websocket):
-        """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot 명령 수신."""
-        my_pc2_topics: set  = set()   # PointCloud2 binary 구독
-        my_plot_topics: set = set()   # 범용 plot JSON 구독
+        """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot/subscribe_image 명령 수신."""
+        my_pc2_topics: set   = set()   # PointCloud2 binary 구독
+        my_plot_topics: set  = set()   # 범용 plot JSON 구독
+        my_img_topics: set   = set()   # Image JPEG binary 구독
+        # 전체 클라이언트 집합에 등록 (broadcast용)
+        with self._lock:
+            self._all_clients.add(websocket)
         try:
             async for raw in websocket:
                 try:
@@ -872,32 +1226,82 @@ class PC2WebSocketServer:
                         remaining = self._plot_clients.get(topic, {}).get(websocket)
                     if not remaining:
                         my_plot_topics.discard(topic)
+                elif cmd == 'subscribe_image':
+                    # sensor_msgs/Image → JPEG 바이너리 스트리밍
+                    self._add_image_client(topic, websocket)
+                    my_img_topics.add(topic)
+                elif cmd == 'unsubscribe_image':
+                    self._remove_image_client(topic, websocket)
+                    my_img_topics.discard(topic)
         except Exception:
             pass
         finally:
+            with self._lock:
+                self._all_clients.discard(websocket)
             for t in list(my_pc2_topics):
                 self._remove_client(t, websocket)
             for t in list(my_plot_topics):
                 self._remove_plot_client(t, websocket, None)
+            for t in list(my_img_topics):
+                self._remove_image_client(t, websocket)
 
     # ── 클라이언트 / 구독 관리 ────────────────────────────────────────────────
 
+    def _get_topic_type(self, topic: str) -> str | None:
+        """토픽 타입 조회 (PointCloud2 또는 CustomMsg 등)."""
+        try:
+            for name, types in self._node.get_topic_names_and_types():
+                if name == topic and types:
+                    return types[0]
+        except Exception:
+            pass
+        return None
+
     def _add_client(self, topic: str, ws):
         with self._lock:
-            if topic not in self._clients:
-                self._clients[topic] = set()
-            self._clients[topic].add(ws)
-            if topic not in self._subs:
-                sub = self._node.create_subscription(
-                    PointCloud2, topic,
-                    lambda m, t=topic: self._on_pc2(m, t),
-                    10)
-                self._subs[topic]      = sub
-                self._last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
+            topic_type = self._get_topic_type(topic)
+            is_livox = (topic_type == 'livox_ros_driver2/msg/CustomMsg' and LIVOX_AVAILABLE)
+
+            if is_livox:
+                if topic not in self._livox_clients:
+                    self._livox_clients[topic] = set()
+                self._livox_clients[topic].add(ws)
+                if topic not in self._livox_subs:
+                    sub = self._node.create_subscription(
+                        CustomMsg, topic,
+                        lambda m, t=topic: self._on_livox(m, t),
+                        10)
+                    self._livox_subs[topic] = sub
+                    self._livox_last_sent[topic] = 0.0
+                    self._node.get_logger().info(f'[PC2WS] subscribed (Livox) → {topic}')
+            else:
+                if topic not in self._clients:
+                    self._clients[topic] = set()
+                self._clients[topic].add(ws)
+                if topic not in self._subs:
+                    sub = self._node.create_subscription(
+                        PointCloud2, topic,
+                        lambda m, t=topic: self._on_pc2(m, t),
+                        10)
+                    self._subs[topic] = sub
+                    self._last_sent[topic] = 0.0
+                    self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
 
     def _remove_client(self, topic: str, ws):
         with self._lock:
+            # Livox 클라이언트 확인
+            s_livox = self._livox_clients.get(topic)
+            if s_livox:
+                s_livox.discard(ws)
+                if not s_livox:
+                    sub = self._livox_subs.pop(topic, None)
+                    if sub:
+                        self._node.destroy_subscription(sub)
+                    self._livox_clients.pop(topic, None)
+                    self._livox_last_sent.pop(topic, None)
+                    self._node.get_logger().info(f'[PC2WS] unsubscribed (Livox) ← {topic}')
+                return
+            # PointCloud2 클라이언트
             s = self._clients.get(topic)
             if not s:
                 return
@@ -909,6 +1313,96 @@ class PC2WebSocketServer:
                 self._clients.pop(topic, None)
                 self._last_sent.pop(topic, None)
                 self._node.get_logger().info(f'[PC2WS] unsubscribed ← {topic}')
+
+    # ── Image 클라이언트 / 구독 관리 ─────────────────────────────────────────
+
+    def _add_image_client(self, topic: str, ws):
+        """sensor_msgs/Image 토픽을 JPEG 바이너리로 브라우저에 스트리밍하기 위한 클라이언트 등록."""
+        with self._lock:
+            if topic not in self._img_clients:
+                self._img_clients[topic] = set()
+            self._img_clients[topic].add(ws)
+            if topic not in self._img_subs:
+                sub = self._node.create_subscription(
+                    Image, topic,
+                    lambda m, t=topic: self._on_image(m, t),
+                    10)
+                self._img_subs[topic]      = sub
+                self._img_last_sent[topic] = 0.0
+                self._node.get_logger().info(f'[ImgWS] subscribed → {topic}')
+
+    def _remove_image_client(self, topic: str, ws):
+        with self._lock:
+            s = self._img_clients.get(topic)
+            if not s:
+                return
+            s.discard(ws)
+            if not s:
+                sub = self._img_subs.pop(topic, None)
+                if sub:
+                    self._node.destroy_subscription(sub)
+                self._img_clients.pop(topic, None)
+                self._img_last_sent.pop(topic, None)
+                self._node.get_logger().info(f'[ImgWS] unsubscribed ← {topic}')
+
+    # ── rclpy 콜백 (Image) ────────────────────────────────────────────────────
+
+    def _on_image(self, msg: Image, topic_name: str):
+        """Image 메시지 수신 → JPEG 압축 → binary 패킷 → asyncio 브로드캐스트.
+
+        Binary 패킷 포맷 (little-endian):
+          [3B]  magic = b'IMG'
+          [1B]  version = 1
+          [4B]  uint32  topic_name 바이트 길이
+          [4B]  uint32  jpeg_data 바이트 길이
+          [N B] topic_name (UTF-8)
+          [L B] JPEG data
+        """
+        now = time.monotonic()
+        with self._lock:
+            if now - self._img_last_sent.get(topic_name, 0.0) < self.IMG_THROTTLE_SEC:
+                return
+            clients = self._img_clients.get(topic_name, set()).copy()
+        if not clients:
+            return
+
+        try:
+            # sensor_msgs/Image → OpenCV BGR 이미지 → JPEG 압축
+            encoding = msg.encoding.lower()
+            if encoding in ('rgb8', 'bgr8', 'mono8', 'rgba8', 'bgra8',
+                            '8uc1', '8uc3', '8uc4'):
+                cv_img = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            else:
+                # 지원되지 않는 encoding은 bgr8로 강제 변환 시도
+                try:
+                    cv_img = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                except Exception:
+                    return
+
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.IMG_JPEG_QUALITY]
+            ret, jpeg_buf = cv2.imencode('.jpg', cv_img, encode_param)
+            if not ret:
+                return
+            jpeg_bytes = jpeg_buf.tobytes()
+        except Exception as e:
+            self._node.get_logger().warn(f'[ImgWS] encode error ({topic_name}): {e}')
+            return
+
+        with self._lock:
+            self._img_last_sent[topic_name] = now
+
+        # 바이너리 패킷 조립: [IMG][version][topic_len][jpeg_len][topic_name][jpeg_data]
+        topic_bytes = topic_name.encode('utf-8')
+        header = struct.pack('<3sBII',
+                             b'IMG', 1,
+                             len(topic_bytes),
+                             len(jpeg_bytes))
+        payload = header + topic_bytes + jpeg_bytes
+
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast(clients, payload), loop)
 
     # ── rclpy 콜백 ───────────────────────────────────────────────────────────
 
@@ -979,6 +1473,27 @@ class PC2WebSocketServer:
                 await ws.send(data)
             except Exception:
                 pass
+
+    async def _broadcast_json_all_async(self, data: dict):
+        """연결된 모든 클라이언트에 JSON 메시지를 전송한다 (asyncio coroutine)."""
+        with self._lock:
+            clients = list(self._all_clients)
+        payload = json.dumps(data)
+        for ws in clients:
+            try:
+                await ws.send(payload)
+            except Exception:
+                pass
+
+    def broadcast_json_all(self, data: dict):
+        """연결된 모든 WebSocket 클라이언트에 JSON 메시지를 broadcast한다.
+
+        스레드 안전: asyncio 이벤트 루프에 코루틴을 스케줄링하여 전송.
+        """
+        if self._loop is None or not self._all_clients:
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._broadcast_json_all_async(data), self._loop)
 
     # ── 범용 토픽 Plot 구독 (throttle 없이 원래 주기) ─────────────────────────
 
@@ -1244,6 +1759,83 @@ class PC2WebSocketServer:
             self._node.get_logger().error(f'[PC2WS] _build_payload error: {e}')
             return None
 
+    # ── Livox CustomMsg → PC2 호환 binary ──────────────────────────────────────
+
+    def _build_livox_payload(self, msg, topic_name: str):
+        """Livox CustomMsg를 PC2와 동일한 binary 포맷으로 변환."""
+        if not LIVOX_AVAILABLE:
+            return None
+        try:
+            frame_id = msg.header.frame_id if msg.header else 'livox'
+            points = msg.points or []
+            n_total = min(len(points), self.MAX_POINTS)
+            if n_total == 0:
+                return None
+
+            x = np.array([p.x for p in points[:n_total]], dtype=np.float32)
+            y = np.array([p.y for p in points[:n_total]], dtype=np.float32)
+            z = np.array([p.z for p in points[:n_total]], dtype=np.float32)
+            reflectivity = np.array(
+                [getattr(p, 'reflectivity', 0.0) for p in points[:n_total]],
+                dtype=np.float32)
+
+            valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+            x, y, z = x[valid], y[valid], z[valid]
+            reflectivity = reflectivity[valid]
+            n_out = len(x)
+            if n_out == 0:
+                return None
+
+            xyz = np.column_stack([x, y, z]).astype(np.float32)
+            flags = 0x01  # has_intensity (reflectivity)
+            topic_b = topic_name.encode('utf-8')
+            frame_b = frame_id.encode('utf-8')
+            header = struct.pack(
+                '<3sBBIII',
+                b'PC2', 1, flags,
+                len(topic_b), len(frame_b), n_out)
+            return b''.join([
+                header, topic_b, frame_b,
+                xyz.tobytes(), reflectivity.astype(np.float32).tobytes()])
+        except Exception as e:
+            self._node.get_logger().error(f'[PC2WS] _build_livox_payload error: {e}')
+            return None
+
+    def _on_livox(self, msg, topic_name: str):
+        """Livox CustomMsg 수신 → PC2 호환 binary + JSON 메타데이터 → 브로드캐스트."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._livox_last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+                return
+            clients = self._livox_clients.get(topic_name, set()).copy()
+        if not clients:
+            return
+
+        stamp = msg.header.stamp if msg.header else None
+        frame_id = msg.header.frame_id if msg.header else ''
+        point_count = len(msg.points) if msg.points else 0
+
+        meta_json = json.dumps({
+            'type': 'pc2meta',
+            'topic': topic_name,
+            'stamp_sec': stamp.sec if stamp else 0,
+            'stamp_nanosec': stamp.nanosec if stamp else 0,
+            'frame_id': frame_id,
+            'point_count': point_count,
+        }, separators=(',', ':'))
+
+        payload = self._build_livox_payload(msg, topic_name)
+        if payload is None:
+            return
+
+        with self._lock:
+            self._livox_last_sent[topic_name] = now
+
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_both(clients, meta_json, payload), loop)
+
 
 class WebGUINode(Node):
     def __init__(self):
@@ -1265,6 +1857,7 @@ class WebGUINode(Node):
         self.bag_paused = False
         self.bag_process = None
         self.bag_playback_rate = 1.0  # 현재 설정된 재생 속도 배율
+        self.bag_player_loop = False  # 루프 재생 여부
 
         # Bag Recorder state
         self.recorder_bag_name = ""
@@ -1296,6 +1889,7 @@ class WebGUINode(Node):
         self.player_processed_stamp = 0
         self.player_prev_time = 0
         self.save_bag_progress = None   # None: idle, "0%"~"100%": saving in progress
+        self.save_bag_message = None    # KITTI처럼 단계별 메시지 (예: "Converting pose messages...")
         self.save_bag_saving = False    # True while background save thread is running
         self.save_bag_success = False   # Result of last save operation
 
@@ -1305,14 +1899,42 @@ class WebGUINode(Node):
 
         # File Player ROS2 Publishers/Subscribers — lazy initialized on load_player_data()
         # (not created at startup to avoid polluting the topic list before file player is used)
+        # ConPR 전용 publishers
         self.pose_pub = None
         self.imu_pub = None
-        self.clock_pub = None
-        self.livox_pub = None
         self.cam_pub = None
         self.cam_info_pub = None
+        self.livox_pub = None
+        # 공통 (ConPR + KITTI 모두 사용)
+        self.clock_pub = None
         self.start_sub = None
         self.stop_sub = None
+        # KITTI 전용 publishers
+        self.kitti_velo_pub = None
+        self.kitti_cam_pub = None
+        self.kitti_tf_static_pub = None    # /tf_static publisher
+        self.kitti_tf_pub = None           # /tf publisher
+        # KITTI calib / oxts / TF 관련 상태
+        self.kitti_calib_dir = None        # calib 파일 디렉토리 경로
+        self.kitti_oxts_files = []         # oxts 파일 경로 목록 (sorted)
+        self.kitti_oxts_timestamps = []    # oxts 타임스탬프 (ns) 목록
+        self.kitti_origin_oxts = None      # Mercator 원점 OXTS 데이터
+        self.kitti_mercator_scale = None   # Mercator 투영 스케일
+        # 초기화 플래그 (각 데이터셋 전용 publishers 이중 생성 방지)
+        self._conpr_pubs_initialized = False
+        self._kitti_pubs_initialized = False
+        # KAIST 전용 publishers (lazy init)
+        self.kaist_imu_pub = None
+        self.kaist_gps_pub = None
+        self.kaist_vrs_pub = None
+        self.kaist_vlp_left_pub = None
+        self.kaist_vlp_right_pub = None
+        self.kaist_sick_back_pub = None
+        self.kaist_sick_mid_pub = None
+        self.kaist_stereo_left_pub = None
+        self.kaist_stereo_right_pub = None
+        self.kaist_tf_static_pub = None
+        self.kaist_tf_pub = None
 
         # CV Bridge for image conversion
         self.cv_bridge = CvBridge()
@@ -1333,6 +1955,7 @@ class WebGUINode(Node):
         self.playback_thread = None
         self.playback_active = False
         self.player_seek_requested = False  # seek 후 worker 인덱스 재설정 신호
+        self.player_seek_to_stamp  = 0      # seek 목표 타임스탬프 (HTTP 스레드→worker 전달용)
 
         # Timer for playback (matching C++ implementation)
         self.create_timer(0.0001, self.timer_callback)  # 100us = 0.0001s
@@ -1343,10 +1966,50 @@ class WebGUINode(Node):
         # Setup reusable environment for subprocess calls
         self._setup_ros_environment()
 
+        # ros2 topic list -t 결과 캐시 (서브프로세스 비용·메인 스레드 지연 완화)
+        self._ros_topics_list_cache = None  # (monotonic_time, list[dict])
+        self._ros_topics_list_cache_ttl_sec = 2.0
+
         # ── PC2 Binary WebSocket 서버 (포트 8081) ─────────────────────────────
         # rosbridge를 우회해 PointCloud2를 Python에서 직접 처리 후 binary 전송
         self.pc2_ws_server = PC2WebSocketServer(self, port=8081)
         self.pc2_ws_server.start()
+
+        # ── KITTI 변환기 상태 ──────────────────────────────────────────────────
+        self.kitti_converter_running = False   # 변환 진행 중 여부
+        self.kitti_convert_thread = None       # 변환 백그라운드 스레드
+
+        # ── ROS2 bag 모드 플래그 (player_play_toggle → bag_play_toggle 위임) ─
+        self.player_is_ros2_bag = False        # True 이면 File Player가 ROS2 bag 모드
+        self.player_is_ros1_bag = False        # True 이면 File Player가 ROS1 .bag 모드
+
+        # ── KITTI direct play 모드 ──────────────────────────────────────────
+        self.player_is_kitti = False           # True 이면 KITTI 파일 직접 재생
+        self.kitti_drive_path = None           # 로드된 KITTI drive 디렉토리 경로
+        self._kitti_conv = None                # KittiConverter 캐시 (프레임당 인스턴스 생성 방지)
+
+        # ── KAIST direct play 모드 ──────────────────────────────────────────
+        self.player_is_kaist = False           # True 이면 KAIST 파일 직접 재생
+        self.kaist_dataset_path = None          # 로드된 KAIST 시퀀스 디렉토리 경로
+        self.kaist_global_poses = []            # [(stamp_ns, R, T), ...]
+        self.kaist_imu_data = ([], [])          # (stamps, rows) for bisect O(log n) lookup
+        self.kaist_gps_data = ([], [])
+        self.kaist_vrs_data = ([], [])
+        self._kaist_pubs_initialized = False    # KAIST publisher 초기화 여부
+        self._kaist_conv = None                 # KaistConverter 캐시 (프레임당 인스턴스 생성 방지)
+        self.kaist_converter_running = False   # KAIST 변환 진행 중 여부
+        self.kaist_convert_thread = None       # KAIST 변환 백그라운드 스레드
+
+        # ── MulRan direct play 모드 ─────────────────────────────────────────
+        self.player_is_mulran = False
+        self.mulran_dataset_path = None
+        self.mulran_ctx = None                 # MulRanConverter._load_sequence_context 결과
+        self.mulran_events_by_stamp = {}       # stamp_ns → [sensor_name, ...] (data_stamp.csv 순서 유지)
+        self._mulran_conv = None
+        self._mulran_pubs_initialized = False
+        self._mulran_last_clock_pub_ns = None
+        self.mulran_converter_running = False
+        self.mulran_convert_thread = None
 
         self.get_logger().info('Web GUI Node initialized with full ROS2 integration')
 
@@ -1441,31 +2104,217 @@ class WebGUINode(Node):
                     self._ros_env['XAUTHORITY'] = os.path.expanduser('~/.Xauthority')
                     self.get_logger().warn('XAUTHORITY not found, using ~/.Xauthority (may not exist)')
 
-    def _init_file_player_ros_interfaces(self):
-        """Lazy initialization of File Player ROS2 publishers and subscribers.
-
-        Called once when file player data is first loaded via load_player_data().
-        This prevents File Player topics from appearing in the topic list at startup.
+    def _init_common_ros_interfaces(self):
+        """공통 인터페이스 초기화: /clock publisher + file_player 구독.
+        ConPR/KITTI 어느 쪽이든 처음 로드 시 한 번만 호출.
         """
-        if self.imu_pub is not None:
-            return  # Already initialized
+        if self.clock_pub is None:
+            self.clock_pub = self.create_publisher(Clock, '/clock', 1)
+        if self.start_sub is None:
+            self.start_sub = self.create_subscription(
+                Bool, '/file_player_start', self.file_player_start_callback, 1)
+        if self.stop_sub is None:
+            self.stop_sub = self.create_subscription(
+                Bool, '/file_player_stop', self.file_player_stop_callback, 1)
 
-        self.pose_pub = self.create_publisher(PointStamped, '/pose/position', 1000)
-        self.imu_pub = self.create_publisher(Imu, '/imu', 1000)
-        self.clock_pub = self.create_publisher(Clock, '/clock', 1)
+    def _init_file_player_ros_interfaces(self):
+        """ConPR 전용 publisher 초기화 (lazy).
+
+        ConPR 데이터를 처음 로드할 때만 호출.
+        KITTI 데이터를 로드해도 ConPR 토픽은 생성되지 않는다.
+        """
+        self._init_common_ros_interfaces()
+        if self._conpr_pubs_initialized:
+            return
+
+        self.pose_pub     = self.create_publisher(PointStamped, '/pose/position', 1000)
+        self.imu_pub      = self.create_publisher(Imu, '/imu', 1000)
+        self.cam_pub      = self.create_publisher(Image, '/camera/color/image', 1000)
+        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 1000)
 
         if LIVOX_AVAILABLE:
             self.livox_pub = self.create_publisher(CustomMsg, '/livox/lidar', 1000)
 
-        self.cam_pub = self.create_publisher(Image, '/camera/color/image', 1000)
-        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 1000)
+        self._conpr_pubs_initialized = True
+        self.get_logger().info('ConPR File Player publishers initialized')
 
-        self.start_sub = self.create_subscription(
-            Bool, '/file_player_start', self.file_player_start_callback, 1)
-        self.stop_sub = self.create_subscription(
-            Bool, '/file_player_stop', self.file_player_stop_callback, 1)
+    def _destroy_conpr_publishers(self):
+        """ConPR publishers 정리. ROS1 bag 재생 시 /livox/lidar 등 토픽 충돌 방지.
 
-        self.get_logger().info('File Player ROS2 publishers/subscribers initialized')
+        변환된 ROS1 bag은 /livox/lidar를 PointCloud2로 저장하므로,
+        기존 livox_pub(CustomMsg)가 있으면 create_publisher 충돌 발생.
+        """
+        if not self._conpr_pubs_initialized:
+            return
+        for name, pub in [
+                ('pose_pub', self.pose_pub),
+                ('imu_pub', self.imu_pub),
+                ('cam_pub', self.cam_pub),
+                ('cam_info_pub', self.cam_info_pub),
+                ('livox_pub', self.livox_pub),
+        ]:
+            if pub is not None:
+                try:
+                    self.destroy_publisher(pub)
+                except Exception as e:
+                    self.get_logger().warn(f'[ConPR] destroy {name}: {e}')
+        self.pose_pub = None
+        self.imu_pub = None
+        self.cam_pub = None
+        self.cam_info_pub = None
+        self.livox_pub = None
+        self._conpr_pubs_initialized = False
+        self.get_logger().info('ConPR publishers destroyed (for bag playback)')
+
+    def _init_kitti_ros_interfaces(self):
+        """KITTI 전용 publisher 초기화 (lazy).
+
+        KITTI 데이터를 처음 로드할 때만 호출.
+        ConPR 토픽(/pose, /imu 등)은 생성하지 않는다.
+        """
+        self._init_common_ros_interfaces()
+        if self._kitti_pubs_initialized:
+            return
+
+        self.kitti_velo_pub = self.create_publisher(
+            PointCloud2, KITTI_FILE_PLAYER_PC2_TOPIC, 1000)
+        self.kitti_cam_pub  = self.create_publisher(
+            Image, '/kitti/camera_color_left/image_raw', 1000)
+
+        # /tf_static: transient_local QoS → 늦게 subscribe해도 최신 값 수신
+        tf_static_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.kitti_tf_static_pub = self.create_publisher(TFMessage, '/tf_static', tf_static_qos)
+        self.kitti_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
+        self._kitti_pubs_initialized = True
+        self.get_logger().info('KITTI File Player publishers initialized')
+
+    def _init_kaist_ros_interfaces(self):
+        """KAIST 전용 publisher 초기화 (lazy).
+
+        KAIST 데이터를 처음 로드할 때만 호출.
+        11개 토픽: Imu, NavSatFix×2, PointCloud2×2, LaserScan×2, Image×2, TF×2
+        """
+        self._init_common_ros_interfaces()
+        if self._kaist_pubs_initialized:
+            return
+
+        self.kaist_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 1000)
+        self.kaist_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 1000)
+        self.kaist_vrs_pub = self.create_publisher(NavSatFix, '/vrs_gps/fix', 1000)
+        self.kaist_vlp_left_pub = self.create_publisher(
+            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[0], 1000)
+        self.kaist_vlp_right_pub = self.create_publisher(
+            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[1], 1000)
+        self.kaist_sick_back_pub = self.create_publisher(
+            LaserScan, '/lms511_back/scan', 1000)
+        self.kaist_sick_mid_pub = self.create_publisher(
+            LaserScan, '/lms511_middle/scan', 1000)
+        self.kaist_stereo_left_pub = self.create_publisher(
+            Image, '/stereo/left/image_raw', 1000)
+        self.kaist_stereo_right_pub = self.create_publisher(
+            Image, '/stereo/right/image_raw', 1000)
+
+        tf_static_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.kaist_tf_static_pub = self.create_publisher(
+            TFMessage, '/tf_static', tf_static_qos)
+        self.kaist_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
+        self._kaist_pubs_initialized = True
+        self.get_logger().info('KAIST File Player publishers initialized')
+
+    def _init_mulran_ros_interfaces(self):
+        """MulRan 전용 publisher 초기화 (lazy)."""
+        self._init_common_ros_interfaces()
+        if self._mulran_pubs_initialized:
+            return
+
+        self.mulran_ouster_pub = self.create_publisher(
+            PointCloud2, MULRAN_FILE_PLAYER_PC2_TOPIC, 1000)
+        self.mulran_radar_pub = self.create_publisher(
+            Image, '/radar/polar', 1000)
+        self.mulran_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 1000)
+        self.mulran_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 1000)
+        self.mulran_gt_pub = self.create_publisher(Odometry, '/gt', 1000)
+        self.mulran_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
+        mulran_tf_static_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.mulran_tf_static_pub = self.create_publisher(
+            TFMessage, '/tf_static', mulran_tf_static_qos)
+
+        self._mulran_pubs_initialized = True
+        self.get_logger().info('MulRan File Player publishers initialized')
+
+    def _find_kitti_calib_dir(self, drive_path):
+        """드라이브 경로에서 calib 디렉토리를 탐색하여 반환한다.
+
+        KITTI 데이터셋 디렉토리 구조:
+          <base>/<date>/<date>_drive_<id>_sync/   ← drive_path
+          <base>/<date>/<date>_calib/              ← calib dir (sibling of drive)
+          또는
+          <base>/<date>_calib/                     ← calib dir (parent 레벨)
+
+        탐색 전략:
+          1. drive_path 부모 디렉토리에서 '*_calib' 패턴 항목 탐색 (형제 calib 우선)
+          2. drive_path 조부모 디렉토리에서 '*_calib' 패턴 항목 탐색
+
+        Args:
+            drive_path (str): KITTI 드라이브 데이터 디렉토리 경로
+
+        Returns:
+            str | None: calib 파일(.txt)이 실제로 존재하는 디렉토리 경로.
+                        찾지 못하면 None 반환.
+        """
+        drive_path = os.path.realpath(drive_path)
+        candidates = []
+
+        # 탐색 범위: 부모 → 조부모 → 증조부모 (date 폴더에 calib 형제로 있을 수 있음)
+        d = drive_path
+        for _ in range(4):
+            d = os.path.dirname(d)
+            if not d or d == drive_path:
+                break
+            if os.path.isdir(d):
+                try:
+                    for entry in sorted(os.listdir(d)):
+                        if entry.endswith('_calib') and os.path.isdir(os.path.join(d, entry)):
+                            candidates.append(os.path.join(d, entry))
+                except OSError:
+                    pass
+
+        # 후보 calib 디렉토리에서 실제 calib .txt 파일 유무로 유효성 검사
+        for calib_base in candidates:
+            # KITTI raw 구조: <date>_calib/<date>/ 하위에 txt가 있을 수 있음
+            inner = None
+            try:
+                for sub in sorted(os.listdir(calib_base)):
+                    sub_path = os.path.join(calib_base, sub)
+                    if os.path.isdir(sub_path) and glob.glob(os.path.join(sub_path, '*.txt')):
+                        inner = sub_path
+                        break
+            except OSError:
+                pass
+
+            # 내부 날짜 서브디렉토리가 있으면 그 쪽을 우선, 없으면 base 자체 검사
+            for calib_dir in ([inner, calib_base] if inner else [calib_base]):
+                if calib_dir and glob.glob(os.path.join(calib_dir, 'calib_*.txt')):
+                    self.get_logger().info(f'KITTI calib dir found: {calib_dir}')
+                    return calib_dir
+
+        self.get_logger().warn(f'KITTI calib dir not found for drive path: {drive_path}')
+        return None
 
     def _init_slam_subscriber(self):
         """Lazy initialization of SLAM-related subscribers.
@@ -1911,46 +2760,58 @@ class WebGUINode(Node):
         self.get_logger().info(f'Recorder bag name set to: {bag_name}')
         return True
 
+    def invalidate_ros_topics_list_cache(self):
+        """토픽 목록 API 캐시 무효화 (load_data·bag 로드 직후 목록이 바뀔 때)."""
+        self._ros_topics_list_cache = None
+
     def get_recorder_topics(self):
         """Get list of current ROS2 topics with type information.
+
+        같은 프로세스의 rclpy 그래프를 조회한다 (ros2 topic list 서브프로세스 없음 → 지연·블로킹 감소).
 
         Returns:
             list[dict]: [{'name': '/topic', 'type': 'pkg/msg/Type'}, ...]
         """
         try:
-            # ros2 topic list -t: 타입 정보 포함 출력 (예: /topic [sensor_msgs/msg/PointCloud2])
-            cmd = ['bash', '-c', 'source /opt/ros/jazzy/setup.bash && ros2 topic list -t']
-            result = subprocess.run(
-                cmd,
-                env=self._ros_env,
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            now = time.monotonic()
+            cache = getattr(self, '_ros_topics_list_cache', None)
+            ttl = getattr(self, '_ros_topics_list_cache_ttl_sec', 0.75)
+            if cache is not None:
+                ts, topics = cache
+                if (now - ts) < ttl and topics is not None:
+                    return topics
 
-            if result.returncode == 0:
-                topics = []
-                for line in result.stdout.strip().split('\n'):
-                    line = line.strip()
-                    if not line:
+            raw = self.get_topic_names_and_types()
+            topics = []
+            seen = set()
+            for name, type_list in raw:
+                for tp in type_list:
+                    key = (name, tp)
+                    if key in seen:
                         continue
-                    # ros2 topic list -t 출력 형식: /topic_name [pkg/msg/Type]
-                    if ' [' in line and line.endswith(']'):
-                        name, rest = line.split(' [', 1)
-                        topic_type = rest[:-1].strip()  # trailing ']' 제거
-                        topics.append({'name': name.strip(), 'type': topic_type})
-                    else:
-                        # 타입 정보 없는 경우 fallback
-                        topics.append({'name': line, 'type': ''})
-                self.get_logger().info(f'Found {len(topics)} ROS2 topics')
-                return topics
-            else:
-                self.get_logger().error(f'Failed to get ROS2 topics. Return code: {result.returncode}')
-                self.get_logger().error(f'stderr: {result.stderr}')
-                return []
+                    seen.add(key)
+                    topics.append({'name': name, 'type': tp})
+            self._ros_topics_list_cache = (now, topics)
+            self.get_logger().debug(f'get_recorder_topics: {len(topics)} (rclpy graph)')
+            return topics
         except Exception as e:
-            self.get_logger().error(f'Error getting topics: {str(e)}')
+            self.get_logger().error(f'Error getting topics (rclpy): {str(e)}')
             return []
+
+    def _player_load_result(
+            self, success, message, dataset=None, player_pc2_topics=None):
+        """load_data HTTP 응답용.
+
+        player_pc2_topics:
+          - list: 이 모드에서 웹 노드가 발행하는 PointCloud2 (UI가 구독 동기화)
+          - None: bag 등 자동 동기화 불가 → 클라이언트는 추적 중인 file-player PC2만 해제
+        """
+        return {
+            'success': success,
+            'message': message,
+            'dataset': dataset,
+            'player_pc2_topics': player_pc2_topics,
+        }
 
     def record_bag(self, topics, save_as_ros1=False):
         """Start or stop bag recording.
@@ -2068,8 +2929,842 @@ class WebGUINode(Node):
         }
 
     # File Player Functions
+
+    def _is_kitti_drive_path(self, path: str) -> bool:
+        """경로가 KITTI drive 디렉토리인지 확인한다.
+        velodyne_points/timestamps.txt 파일 존재 여부로 판별한다.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
+        return os.path.isfile(ts_file)
+
+    def _is_kaist_dataset_path(self, path: str) -> bool:
+        """경로가 KAIST Complex Urban 시퀀스 디렉토리인지 확인한다.
+
+        sensor_data/VLP_left_stamp.csv 또는 sensor_data/data_stamp.csv 존재 여부로 판별.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        sensor_dir = os.path.join(path, 'sensor_data')
+        if not os.path.isdir(sensor_dir):
+            return False
+        vlp_stamp = os.path.join(sensor_dir, 'VLP_left_stamp.csv')
+        data_stamp = os.path.join(sensor_dir, 'data_stamp.csv')
+        return os.path.isfile(vlp_stamp) or os.path.isfile(data_stamp)
+
+    def _is_mulran_dataset_path(self, path: str) -> bool:
+        """MulRan 시퀀스 루트인지 판별한다.
+
+        KAIST도 sensor_data/data_stamp.csv 를 가질 수 있으므로, load_player_data 에서
+        KAIST 검사보다 먼저 호출해야 한다. MulRan은 (stamp,sensor) CSV + Ouster/레이더 레이아웃으로 구분한다.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            conv = MulRanConverter()
+            sd = conv._find_sensor_data_dir(path)
+            if sd is None:
+                return False
+            stamp_csv = os.path.join(sd, 'data_stamp.csv')
+            rows = conv._parse_data_stamp(stamp_csv)
+            if not rows:
+                return False
+            if not (conv._get_ouster_dir(sd, path) or conv._get_radar_polar_dir(sd, path)):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _load_kitti_direct(self, path: str) -> dict:
+        """KITTI drive 디렉토리를 직접 File Player로 로드한다.
+
+        velodyne_points/timestamps.txt 에서 타임스탬프를 읽어
+        기존 data_stamp 구조(timestamp_ns → frame_idx_str)를 구축한다.
+        playback_worker 에서 player_is_kitti 플래그를 보고 KITTI 파일을 직접 읽어 publish.
+        """
+        from ros2_autonav_webui.kitti_converter import KittiConverter
+
+        # 기존 재생 정지
+        self.player_playing = False
+        self.player_paused  = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
+
+        ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
+        try:
+            conv = KittiConverter()
+            timestamps_ns = conv._load_timestamps(ts_file)
+        except Exception as e:
+            self.get_logger().error(f'Failed to read KITTI timestamps: {e}')
+            return self._player_load_result(
+                False, str(e), 'kitti', None)
+
+        if not timestamps_ns:
+            self.get_logger().error(f'No valid timestamps in {ts_file}')
+            return self._player_load_result(
+                False, f'No valid timestamps in {ts_file}', 'kitti', None)
+
+        # data_stamp: {timestamp_ns: frame_index_str}
+        self.data_stamp = {}
+        for idx, ts_ns in enumerate(timestamps_ns):
+            if ts_ns > 0:
+                self.data_stamp[ts_ns] = f'{idx:010d}'
+
+        if not self.data_stamp:
+            self.get_logger().error('data_stamp is empty after parsing KITTI timestamps')
+            return self._player_load_result(
+                False, 'data_stamp empty', 'kitti', None)
+
+        sorted_stamps = sorted(self.data_stamp.keys())
+        self.player_initial_stamp   = sorted_stamps[0]
+        self.player_last_stamp      = sorted_stamps[-1]
+        self.player_timestamp       = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos      = 0
+        self.player_seek_requested  = False
+        self.player_seek_to_stamp   = self.player_initial_stamp
+
+        self.player_path        = path
+        self.player_is_kitti    = True
+        self.player_is_ros2_bag = False
+        self.kitti_drive_path   = path
+        self.kitti_static_tf_msg = None  # 재생 중 /tf_static 주기 재발행용
+
+        self.livox_cache = {}
+        self.cam_cache   = {}
+
+        # KITTI 전용 publisher만 초기화 (ConPR 토픽 오염 방지)
+        self._init_kitti_ros_interfaces()
+
+        # ── calib 디렉토리 탐색 → Static TF 1회 publish ──────────────────────
+        # kitti_calib_dir / oxts 상태 초기화 (재로드 대비)
+        self.kitti_calib_dir = None
+        self.kitti_oxts_files = []
+        self.kitti_oxts_timestamps = []
+        self.kitti_origin_oxts = None
+        self.kitti_mercator_scale = None
+
+        calib_dir = self._find_kitti_calib_dir(path)
+        if calib_dir:
+            self.kitti_calib_dir = calib_dir
+            try:
+                calib_imu_to_velo = conv._parse_calib_file(
+                    os.path.join(calib_dir, 'calib_imu_to_velo.txt'))
+                calib_velo_to_cam = conv._parse_calib_file(
+                    os.path.join(calib_dir, 'calib_velo_to_cam.txt'))
+                calib_cam_to_cam = conv._parse_calib_file(
+                    os.path.join(calib_dir, 'calib_cam_to_cam.txt'))
+                # stamp: ROS2 tf_static 구독자 호환을 위해 현재 시각 사용
+                now = self.get_clock().now()
+                from builtin_interfaces.msg import Time as TimeMsg
+                stamp = TimeMsg()
+                stamp.sec = now.nanoseconds // 1_000_000_000
+                stamp.nanosec = int(now.nanoseconds % 1_000_000_000)
+                static_tf_msg = conv._build_static_tf(
+                    calib_imu_to_velo, calib_velo_to_cam,
+                    calib_cam_to_cam=calib_cam_to_cam,
+                    stamp=stamp,
+                )
+                # transient_local QoS 덕분에 늦게 subscribe해도 수신됨
+                if self.kitti_tf_static_pub and static_tf_msg:
+                    self.kitti_static_tf_msg = static_tf_msg
+                    self.kitti_tf_static_pub.publish(static_tf_msg)
+                    n_tf = len(static_tf_msg.transforms) if static_tf_msg.transforms else 0
+                    dbg = ''
+                    if n_tf >= 2:
+                        t = static_tf_msg.transforms[1].transform.translation
+                        dbg = f' imu→velo=({t.x:.2f},{t.y:.2f},{t.z:.2f})'
+                    self.get_logger().info(
+                        f'KITTI static TF from {calib_dir}: {n_tf} transforms{dbg}')
+            except Exception as e:
+                self.get_logger().warn(f'KITTI static TF publish failed: {e}')
+        else:
+            self.get_logger().warn(f'KITTI calib directory not found near: {path}')
+            # calib 없어도 velo_link 연결을 위해 identity chain 생성
+            try:
+                static_tf_msg = conv._build_static_tf({}, {}, stamp=None)
+                if static_tf_msg and static_tf_msg.transforms:
+                    self.kitti_static_tf_msg = static_tf_msg
+                    self.get_logger().info('KITTI fallback identity TF chain created')
+            except Exception:
+                pass
+
+        # ── oxts 파일 목록 + 타임스탬프 파싱 + Mercator 원점 계산 ─────────────
+        oxts_dir = os.path.join(path, 'oxts')
+        oxts_ts_file = os.path.join(oxts_dir, 'timestamps.txt')
+        if os.path.isfile(oxts_ts_file):
+            try:
+                self.kitti_oxts_timestamps = conv._load_timestamps(oxts_ts_file)
+                oxts_data_dir = os.path.join(oxts_dir, 'data')
+                if os.path.isdir(oxts_data_dir):
+                    self.kitti_oxts_files = sorted(
+                        glob.glob(os.path.join(oxts_data_dir, '*.txt')))
+                    # Mercator 원점: 첫 번째 OXTS 데이터 기준
+                    if self.kitti_oxts_files:
+                        first_oxts = conv._load_oxts_file(self.kitti_oxts_files[0])
+                        if first_oxts:
+                            self.kitti_origin_oxts = first_oxts
+                            self.kitti_mercator_scale = math.cos(
+                                math.radians(first_oxts[0]))
+                            self.get_logger().info(
+                                f'KITTI oxts loaded: {len(self.kitti_oxts_files)} files, '
+                                f'origin lat={first_oxts[0]:.4f}'
+                            )
+            except Exception as e:
+                self.get_logger().warn(f'KITTI oxts parsing failed: {e}')
+        else:
+            self.get_logger().warn(f'KITTI oxts timestamps not found: {oxts_ts_file}')
+
+        self.player_data_loaded = True
+
+        self.get_logger().info(
+            f'KITTI drive loaded: {path} '
+            f'({len(self.data_stamp)} frames, '
+            f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
+        )
+        return self._player_load_result(
+            True, 'KITTI loaded', 'kitti', [KITTI_FILE_PLAYER_PC2_TOPIC])
+
+    def _publish_kitti_frame(self, frame_idx: int, stamp_ns: int):
+        """KITTI 프레임(velodyne + camera)을 ROS2 토픽으로 publish한다."""
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        drive_path = self.kitti_drive_path
+        if not drive_path:
+            return
+
+        if self._kitti_conv is None:
+            from ros2_autonav_webui.kitti_converter import KittiConverter
+            self._kitti_conv = KittiConverter()
+        conv = self._kitti_conv
+
+        stamp_msg = TimeMsg()
+        stamp_msg.sec      = int(stamp_ns // 1_000_000_000)
+        stamp_msg.nanosec  = int(stamp_ns %  1_000_000_000)
+
+        # ── Velodyne PointCloud2 ─────────────────────────────────────
+        bin_path = os.path.join(
+            drive_path, 'velodyne_points', 'data', f'{frame_idx:010d}.bin')
+        if os.path.isfile(bin_path):
+            try:
+                pc2_msg = conv._make_pointcloud2_msg(bin_path, stamp_msg)
+                if pc2_msg and self.kitti_velo_pub:
+                    self.kitti_velo_pub.publish(pc2_msg)
+            except Exception as e:
+                self.get_logger().warn(f'KITTI velodyne publish failed (frame {frame_idx}): {e}')
+
+        # ── Camera image (image_02 우선, 없으면 image_00) ─────────────
+        for cam_dir, encoding in [('image_02', 'bgr8'), ('image_00', 'mono8')]:
+            img_path = os.path.join(
+                drive_path, cam_dir, 'data', f'{frame_idx:010d}.png')
+            if os.path.isfile(img_path):
+                try:
+                    img_msg = conv._make_image_msg(img_path, encoding, stamp_msg)
+                    if img_msg and self.kitti_cam_pub:
+                        self.kitti_cam_pub.publish(img_msg)
+                except Exception as e:
+                    self.get_logger().warn(f'KITTI image publish failed (frame {frame_idx}): {e}')
+                break
+
+        # ── TF: /tf에 dynamic + static 통합 발행 (rosbridge는 /tf_static QoS 호환 안 됨) ─
+        if self.kitti_tf_pub:
+            all_transforms = []
+            # 1) Dynamic: world → base_link
+            if (self.kitti_oxts_files and self.kitti_origin_oxts and self.kitti_mercator_scale
+                    and frame_idx < len(self.kitti_oxts_files)):
+                try:
+                    oxts = conv._load_oxts_file(self.kitti_oxts_files[frame_idx])
+                    if oxts:
+                        dyn_msg = conv._make_dynamic_tf(
+                            oxts, self.kitti_origin_oxts,
+                            self.kitti_mercator_scale, stamp_msg
+                        )
+                        all_transforms.extend(dyn_msg.transforms)
+                except Exception as e:
+                    self.get_logger().debug(
+                        f'KITTI dynamic TF failed (frame {frame_idx}): {e}')
+            # 2) Static: base_link → imu → velo → camera (매 프레임 /tf에 포함)
+            if self.kitti_static_tf_msg and self.kitti_static_tf_msg.transforms:
+                for t in self.kitti_static_tf_msg.transforms:
+                    t_copy = TransformStamped()
+                    t_copy.header.stamp = stamp_msg
+                    t_copy.header.frame_id = t.header.frame_id
+                    t_copy.child_frame_id = t.child_frame_id
+                    t_copy.transform = t.transform
+                    all_transforms.append(t_copy)
+            if all_transforms:
+                from tf2_msgs.msg import TFMessage
+                tf_msg = TFMessage()
+                tf_msg.transforms = all_transforms
+                self.kitti_tf_pub.publish(tf_msg)
+
+    def _load_kaist_direct(self, path: str) -> dict:
+        """KAIST 시퀀스 디렉토리를 직접 File Player로 로드한다.
+
+        VLP_left_stamp.csv 또는 data_stamp.csv에서 타임스탬프를 읽어
+        data_stamp 구조(stamp_ns → frame_idx_str)를 구축한다.
+        global_pose.csv, xsens_imu.csv, gps.csv, vrs_gps.csv 사전 로드.
+        /tf_static 1회 publish.
+        """
+        from ros2_autonav_webui.kaist_converter import KaistConverter
+
+        # 기존 재생 정지
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
+
+        sensor_dir = os.path.join(path, 'sensor_data')
+        calib_dir = os.path.join(path, 'calibration')
+        pose_csv = os.path.join(path, 'global_pose.csv')
+
+        try:
+            conv = KaistConverter()
+        except Exception as e:
+            self.get_logger().error(f'Failed to import KaistConverter: {e}')
+            return self._player_load_result(
+                False, str(e), 'kaist', None)
+
+        # 마스터 타임라인: 모든 센서의 stamp 병합 (VLP Left/Right, IMU, GPS, SICK, global_pose 등)
+        all_stamps = set()
+        vlp_left_stamps = conv._load_stamp_csv(
+            os.path.join(sensor_dir, 'VLP_left_stamp.csv'))
+        if not vlp_left_stamps:
+            vlp_left_stamps = conv._load_stamp_csv(
+                os.path.join(sensor_dir, 'data_stamp.csv'))
+        for ts in vlp_left_stamps:
+            if ts > 0:
+                all_stamps.add(ts)
+
+        vlp_right_dir = os.path.join(sensor_dir, 'VLP_right')
+        vlp_right_stamps = conv._load_stamp_csv(
+            os.path.join(sensor_dir, 'VLP_right_stamp.csv'))
+        if not vlp_right_stamps and os.path.isdir(vlp_right_dir):
+            from pathlib import Path
+            for f in sorted(Path(vlp_right_dir).glob('*.bin')):
+                try:
+                    all_stamps.add(int(f.stem))
+                except ValueError:
+                    pass
+        else:
+            for ts in vlp_right_stamps:
+                if ts > 0:
+                    all_stamps.add(ts)
+
+        for sick_sub in ('SICK_back', 'lms511_back'):
+            sick_back_dir = os.path.join(sensor_dir, sick_sub)
+            stamp_file = os.path.join(sensor_dir, f'{sick_sub.replace("lms511", "SICK")}_stamp.csv')
+            sick_back_stamps = conv._load_stamp_csv(stamp_file)
+            if not sick_back_stamps and os.path.isdir(sick_back_dir):
+                from pathlib import Path
+                for f in sorted(Path(sick_back_dir).glob('*.bin')):
+                    try:
+                        all_stamps.add(int(f.stem))
+                    except ValueError:
+                        pass
+                break
+            for ts in sick_back_stamps:
+                if ts > 0:
+                    all_stamps.add(ts)
+            if sick_back_stamps:
+                break
+
+        for sick_sub in ('SICK_middle', 'lms511_middle'):
+            sick_mid_dir = os.path.join(sensor_dir, sick_sub)
+            stamp_file = os.path.join(sensor_dir, f'{sick_sub.replace("lms511", "SICK")}_stamp.csv')
+            sick_mid_stamps = conv._load_stamp_csv(stamp_file)
+            if not sick_mid_stamps and os.path.isdir(sick_mid_dir):
+                from pathlib import Path
+                for f in sorted(Path(sick_mid_dir).glob('*.bin')):
+                    try:
+                        all_stamps.add(int(f.stem))
+                    except ValueError:
+                        pass
+                break
+            for ts in sick_mid_stamps:
+                if ts > 0:
+                    all_stamps.add(ts)
+            if sick_mid_stamps:
+                break
+
+        self.kaist_global_poses = conv._parse_global_pose(pose_csv)
+        for p in self.kaist_global_poses:
+            if p[0] > 0:
+                all_stamps.add(p[0])
+
+        imu_file = os.path.join(sensor_dir, 'xsens_imu.csv')
+        if not os.path.exists(imu_file):
+            imu_file = os.path.join(sensor_dir, 'imu.csv')
+        imu_rows = conv._load_kaist_imu_csv(imu_file)
+        imu_rows.sort(key=lambda r: r.get('stamp', 0))
+        self.kaist_imu_data = ([r['stamp'] for r in imu_rows], imu_rows)
+        for s in self.kaist_imu_data[0]:
+            all_stamps.add(s)
+
+        gps_rows = conv._load_kaist_gps_csv(os.path.join(sensor_dir, 'gps.csv'))
+        gps_rows.sort(key=lambda r: r.get('stamp', 0))
+        self.kaist_gps_data = ([r['stamp'] for r in gps_rows], gps_rows)
+        for s in self.kaist_gps_data[0]:
+            all_stamps.add(s)
+
+        vrs_file = os.path.join(sensor_dir, 'vrs_gps.csv')
+        vrs_rows = conv._load_kaist_gps_csv(vrs_file) if os.path.exists(vrs_file) else []
+        vrs_rows.sort(key=lambda r: r.get('stamp', 0))
+        self.kaist_vrs_data = ([r['stamp'] for r in vrs_rows], vrs_rows)
+        for s in self.kaist_vrs_data[0]:
+            all_stamps.add(s)
+
+        # stereo_stamp.csv 사용 (디렉토리 glob보다 훨씬 빠름)
+        stereo_stamps = conv._load_stamp_csv(os.path.join(sensor_dir, 'stereo_stamp.csv'))
+        for ts in stereo_stamps:
+            if ts > 0:
+                all_stamps.add(ts)
+
+        if not all_stamps:
+            self.get_logger().error('KAIST: No valid timestamps from any sensor')
+            return self._player_load_result(
+                False, 'No valid timestamps', 'kaist', None)
+
+        # data_stamp: {timestamp_ns: str(timestamp_ns)} — KAIST bin 파일명이 stamp.bin
+        self.data_stamp = {ts_ns: str(ts_ns) for ts_ns in all_stamps if ts_ns > 0}
+
+        if not self.data_stamp:
+            self.get_logger().error('data_stamp is empty after parsing KAIST timestamps')
+            return self._player_load_result(
+                False, 'data_stamp empty', 'kaist', None)
+
+        sorted_stamps = sorted(self.data_stamp.keys())
+        self.player_initial_stamp = sorted_stamps[0]
+        self.player_last_stamp = sorted_stamps[-1]
+        self.player_timestamp = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos = 0
+        self.player_seek_requested = False
+        self.player_seek_to_stamp = self.player_initial_stamp
+
+        self.player_path = path
+        self.player_is_kitti = False   # KAIST 모드 진입 시 KITTI 해제
+        self.player_is_kaist = True
+        self.player_is_ros2_bag = False
+        self.kaist_dataset_path = path
+
+        self.livox_cache = {}
+        self.cam_cache = {}
+
+        self._init_kaist_ros_interfaces()
+
+        # global_pose, imu, gps, vrs는 위 마스터 타임라인 구축 시 이미 로드됨
+
+        # Static TF 1회 publish
+        if os.path.isdir(calib_dir):
+            try:
+                stamp_time = conv._ns_to_time_msg(sorted_stamps[0])
+                static_tf_msg = conv._build_static_tf(calib_dir, stamp_time)
+                if static_tf_msg and self.kaist_tf_static_pub:
+                    self.kaist_tf_static_pub.publish(static_tf_msg)
+                    self.get_logger().info(f'KAIST static TF published from: {calib_dir}')
+            except Exception as e:
+                self.get_logger().warn(f'KAIST static TF publish failed: {e}')
+        else:
+            self.get_logger().warn(f'KAIST calibration directory not found: {calib_dir}')
+
+        self.player_data_loaded = True
+
+        self.get_logger().info(
+            f'KAIST sequence loaded: {path} '
+            f'({len(self.data_stamp)} frames, '
+            f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
+        )
+        return self._player_load_result(
+            True, 'KAIST loaded', 'kaist', list(KAIST_FILE_PLAYER_PC2_TOPICS))
+
+    def _load_mulran_direct(self, path: str) -> dict:
+        """MulRan 시퀀스를 File Player로 직접 로드한다 (data_stamp.csv 타임라인)."""
+        from ros2_autonav_webui.mulran_converter import MulRanConverter
+
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        try:
+            conv = MulRanConverter()
+            ctx = conv._load_sequence_context(path)
+        except Exception as e:
+            self.get_logger().error(f'MulRan load failed: {e}')
+            return self._player_load_result(False, str(e), 'mulran', None)
+
+        if not ctx['data_stamps']:
+            return self._player_load_result(
+                False, 'No data_stamp entries', 'mulran', None)
+
+        events_by_stamp = {}
+        for stamp_ns, sensor_name in ctx['data_stamps']:
+            events_by_stamp.setdefault(stamp_ns, []).append(sensor_name)
+
+        sorted_stamps = sorted(events_by_stamp.keys())
+        self.data_stamp = {s: 'mulran' for s in sorted_stamps}
+        self.mulran_events_by_stamp = events_by_stamp
+        self.mulran_ctx = ctx
+        self.mulran_dataset_path = path
+
+        self.player_initial_stamp = sorted_stamps[0]
+        self.player_last_stamp = sorted_stamps[-1]
+        self.player_timestamp = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos = 0
+        self.player_seek_requested = False
+        self.player_seek_to_stamp = self.player_initial_stamp
+
+        self.player_path = path
+        self.player_is_kitti = False
+        self.player_is_kaist = False
+        self.player_is_mulran = True
+        self.player_is_ros2_bag = False
+        self.player_is_ros1_bag = False
+
+        self.livox_cache = {}
+        self.cam_cache = {}
+        self._mulran_last_clock_pub_ns = None
+
+        self._init_mulran_ros_interfaces()
+
+        stamp0 = conv._ns_to_time_msg(sorted_stamps[0])
+        tf_static_msg = conv.build_mulran_tf_static_message(
+            stamp0,
+            ctx.get('calib_ouster_xyz_rpy'),
+            ctx.get('calib_radar_xyz_rpy'),
+        )
+        if tf_static_msg and getattr(self, 'mulran_tf_static_pub', None):
+            self.mulran_tf_static_pub.publish(tf_static_msg)
+            self.get_logger().info(
+                'MulRan /tf_static published: base_link → ouster, radar_polar (고정 외장 상수)')
+
+        self.player_data_loaded = True
+        self.get_logger().info(
+            f'MulRan sequence loaded: {path} ({len(self.data_stamp)} timeline stamps)'
+        )
+        pc2_topics = [MULRAN_FILE_PLAYER_PC2_TOPIC] if ctx.get('ouster_dir') else []
+        return self._player_load_result(
+            True, 'MulRan loaded', 'mulran', pc2_topics if pc2_topics else None)
+
+    def _publish_mulran_frame(self, stamp_ns: int):
+        """MulRan data_stamp 한 시각의 센서 이벤트를 publish (bag 변환과 동일 정책)."""
+        ctx = self.mulran_ctx
+        if not ctx:
+            return
+        if self._mulran_conv is None:
+            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            self._mulran_conv = MulRanConverter()
+        conv = self._mulran_conv
+        stamp_time = conv._ns_to_time_msg(stamp_ns)
+
+        for sensor_name in self.mulran_events_by_stamp.get(stamp_ns, []):
+            sn = sensor_name.lower()
+            if sn == 'ouster' and ctx['ouster_dir'] and self.mulran_ouster_pub:
+                bin_path = os.path.join(ctx['ouster_dir'], f'{stamp_ns}.bin')
+                msg = conv._make_ouster_pc2(bin_path, stamp_time)
+                if msg:
+                    self.mulran_ouster_pub.publish(msg)
+            elif sn == 'radar' and ctx['radar_dir'] and self.mulran_radar_pub:
+                png_path = os.path.join(ctx['radar_dir'], f'{stamp_ns}.png')
+                msg = conv._make_radar_image(png_path, stamp_time)
+                if msg:
+                    self.mulran_radar_pub.publish(msg)
+            elif sn == 'imu' and ctx['imu_bisect'][0] and self.mulran_imu_pub:
+                row = conv._find_nearest(ctx['imu_bisect'], stamp_ns)
+                if row:
+                    imu_msg = conv._make_imu_msg(row, stamp_time, ctx['imu_version'])
+                    self.mulran_imu_pub.publish(imu_msg)
+            elif sn == 'gps' and ctx['gps_bisect'][0] and self.mulran_gps_pub:
+                row = conv._find_nearest(ctx['gps_bisect'], stamp_ns)
+                if row:
+                    gps_msg = conv._make_navsatfix_msg(row, stamp_time)
+                    self.mulran_gps_pub.publish(gps_msg)
+
+            if ctx['global_poses'] and self.mulran_gt_pub and self.mulran_tf_pub:
+                pose = conv._find_nearest_pose(
+                    ctx['pose_stamps'], ctx['global_poses'], stamp_ns)
+                if pose:
+                    _, R, T = pose
+                    odom_msg = conv._make_gt_odometry(R, T, stamp_time)
+                    tf_msg = conv._make_dynamic_tf(R, T, stamp_time)
+                    if odom_msg:
+                        self.mulran_gt_pub.publish(odom_msg)
+                    if tf_msg:
+                        self.mulran_tf_pub.publish(tf_msg)
+
+        if self.clock_pub:
+            last = self._mulran_last_clock_pub_ns
+            if last is None or (stamp_ns - last) >= _MULRAN_CLOCK_MIN_INTERVAL_NS:
+                self._mulran_last_clock_pub_ns = stamp_ns
+                clock_msg = Clock()
+                clock_msg.clock = Time(nanoseconds=stamp_ns).to_msg()
+                self.clock_pub.publish(clock_msg)
+
+    def _publish_kaist_frame(self, stamp_ns: int):
+        """KAIST 프레임(VLP, SICK, Stereo, IMU, GPS, VRS, Dynamic TF)을 ROS2 토픽으로 publish한다."""
+        from builtin_interfaces.msg import Time as TimeMsg
+
+        path = self.kaist_dataset_path
+        if not path:
+            return
+
+        if self._kaist_conv is None:
+            from ros2_autonav_webui.kaist_converter import KaistConverter
+            self._kaist_conv = KaistConverter()
+        conv = self._kaist_conv
+        sensor_dir = os.path.join(path, 'sensor_data')
+        stamp_time = conv._ns_to_time_msg(stamp_ns)
+
+        # Dynamic TF (world → base_link)
+        pose = conv._find_nearest_pose(self.kaist_global_poses, stamp_ns)
+        if pose and self.kaist_tf_pub:
+            _, R, T = pose
+            tf_msg = conv._make_dynamic_tf(R, T, stamp_time)
+            if tf_msg:
+                self.kaist_tf_pub.publish(tf_msg)
+
+        # IMU
+        if self.kaist_imu_data and self.kaist_imu_pub:
+            imu_row = conv._find_nearest_by_stamp(self.kaist_imu_data, stamp_ns)
+            if imu_row:
+                imu_msg = conv._make_imu_msg(imu_row, stamp_time)
+                self.kaist_imu_pub.publish(imu_msg)
+
+        # GPS
+        if self.kaist_gps_data and self.kaist_gps_pub:
+            gps_row = conv._find_nearest_by_stamp(self.kaist_gps_data, stamp_ns)
+            if gps_row:
+                gps_msg = conv._make_navsatfix_msg(gps_row, stamp_time)
+                self.kaist_gps_pub.publish(gps_msg)
+
+        # VRS GPS
+        if self.kaist_vrs_data and self.kaist_vrs_pub:
+            vrs_row = conv._find_nearest_by_stamp(self.kaist_vrs_data, stamp_ns)
+            if vrs_row:
+                vrs_msg = conv._make_navsatfix_msg(vrs_row, stamp_time)
+                self.kaist_vrs_pub.publish(vrs_msg)
+
+        # VLP Left
+        vlp_left_dir = os.path.join(sensor_dir, 'VLP_left')
+        bin_path = os.path.join(vlp_left_dir, f'{stamp_ns}.bin')
+        if os.path.isfile(bin_path) and self.kaist_vlp_left_pub:
+            vlp_msg = conv._make_vlp_msg(bin_path, 'left_velodyne', stamp_time)
+            if vlp_msg:
+                self.kaist_vlp_left_pub.publish(vlp_msg)
+
+        # VLP Right (VLP_right 또는 vlp_right 디렉토리)
+        for vlp_right_sub in ('VLP_right', 'vlp_right'):
+            vlp_right_dir = os.path.join(sensor_dir, vlp_right_sub)
+            bin_path = os.path.join(vlp_right_dir, f'{stamp_ns}.bin')
+            if os.path.isfile(bin_path) and self.kaist_vlp_right_pub:
+                vlp_msg = conv._make_vlp_msg(bin_path, 'right_velodyne', stamp_time)
+                if vlp_msg:
+                    self.kaist_vlp_right_pub.publish(vlp_msg)
+                break
+
+        # SICK Back (SICK_back 또는 lms511_back 디렉토리)
+        for subdir in ('SICK_back', 'lms511_back'):
+            sick_back_dir = os.path.join(sensor_dir, subdir)
+            bin_path = os.path.join(sick_back_dir, f'{stamp_ns}.bin')
+            if os.path.isfile(bin_path) and self.kaist_sick_back_pub:
+                scan_msg = conv._make_laserscan_msg(bin_path, 'back_sick', stamp_time)
+                if scan_msg:
+                    self.kaist_sick_back_pub.publish(scan_msg)
+                break
+
+        # SICK Middle (SICK_middle 또는 lms511_middle 디렉토리)
+        for subdir in ('SICK_middle', 'lms511_middle'):
+            sick_mid_dir = os.path.join(sensor_dir, subdir)
+            bin_path = os.path.join(sick_mid_dir, f'{stamp_ns}.bin')
+            if os.path.isfile(bin_path) and self.kaist_sick_mid_pub:
+                scan_msg = conv._make_laserscan_msg(bin_path, 'middle_sick', stamp_time)
+                if scan_msg:
+                    self.kaist_sick_mid_pub.publish(scan_msg)
+                break
+
+        # Stereo Left (데이터 없으면 스킵 — urban27-dongtan 등)
+        stereo_left_dir = os.path.join(sensor_dir, 'image', 'stereo_left')
+        img_path = os.path.join(stereo_left_dir, f'{stamp_ns}.png')
+        if os.path.isfile(img_path) and self.kaist_stereo_left_pub:
+            img_msg = conv._make_stereo_msg(img_path, stamp_time, 'stereo_left')
+            if img_msg:
+                self.kaist_stereo_left_pub.publish(img_msg)
+
+        # Stereo Right
+        stereo_right_dir = os.path.join(sensor_dir, 'image', 'stereo_right')
+        img_path = os.path.join(stereo_right_dir, f'{stamp_ns}.png')
+        if os.path.isfile(img_path) and self.kaist_stereo_right_pub:
+            img_msg = conv._make_stereo_msg(img_path, stamp_time, 'stereo_right')
+            if img_msg:
+                self.kaist_stereo_right_pub.publish(img_msg)
+
+    def _is_ros2_bag_path(self, path: str) -> bool:
+        """경로가 ROS2 bag (.db3 파일 또는 bag 디렉토리)인지 확인한다."""
+        if not path:
+            return False
+        # .db3 파일 직접 지정
+        if path.endswith('.db3') and os.path.exists(path):
+            return True
+        # 디렉토리인 경우: metadata.yaml 또는 .db3 파일 포함 여부 확인
+        if os.path.isdir(path):
+            if os.path.exists(os.path.join(path, 'metadata.yaml')):
+                return True
+            db3_files = glob.glob(os.path.join(path, '*.db3'))
+            if db3_files:
+                return True
+        return False
+
+    def _load_ros2_bag_player(self, path: str) -> dict:
+        """ROS2 bag 경로를 기존 bag_play_toggle 인프라로 로드한다.
+
+        .db3 파일이 지정된 경우 부모 디렉토리를 bag_path로 사용한다.
+
+        player_play_toggle()에서 bag_play_toggle()로 위임되도록
+        player_path / player_data_loaded / player_is_ros2_bag 도 함께 설정한다.
+        """
+        # 기존 ConPR playback 스레드 정지
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        # 기존 bag 재생 중이면 중지
+        if self.bag_playing:
+            if self.bag_process:
+                self.bag_process.terminate()
+                try:
+                    self.bag_process.wait(timeout=5)
+                except Exception:
+                    self.bag_process.kill()
+                self.bag_process = None
+            self.bag_playing = False
+            self.bag_paused = False
+
+        # .db3 파일인 경우 부모 디렉토리를 bag 경로로 사용
+        if path.endswith('.db3'):
+            bag_dir = os.path.dirname(path)
+        else:
+            bag_dir = path
+
+        self.bag_path = bag_dir
+
+        # ── File Player UI 상태 동기화 ─────────────────────────────────────
+        # UI가 player_path / player_data_loaded 를 읽으므로 올바른 값으로 갱신
+        self.player_path = bag_dir
+        self.player_data_loaded = True   # play 버튼 활성화
+        self.player_is_ros2_bag = True   # player_play_toggle 에서 분기 용도
+        self.player_is_kitti = False
+        self.player_is_kaist = False
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
+        self.player_slider_pos = 0
+        self.player_timestamp = 0
+        self.livox_cache = {}
+        self.cam_cache = {}
+
+        self.get_logger().info(f'Loaded ROS2 bag for player: {bag_dir}')
+        return self._player_load_result(
+            True, 'ROS2 bag path set', 'ros2_bag', None)
+
+    def _load_ros1_bag_player(self, path: str) -> dict:
+        """ROS1 .bag 파일 경로를 File Player 인프라로 로드한다.
+
+        변환 완료 후 _onKittiConvertDone 또는 수동 load 시 호출된다.
+        play 버튼이 눌리면 player_play_toggle() → start_ros1_playback()으로 위임.
+        """
+        # ConPR publishers 정리 (변환된 bag은 /livox/lidar를 PointCloud2로 저장 → 충돌 방지)
+        self._destroy_conpr_publishers()
+
+        # 기존 ConPR playback 스레드 정지
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        # 기존 ROS1 재생 중이면 중지
+        self.stop_ros1_playback()
+
+        self.bag_path = path
+        self.player_path = path
+        self.player_data_loaded = True
+        self.player_is_ros2_bag = False
+        self.player_is_ros1_bag = True
+        self.player_is_kitti = False
+        self.player_is_kaist = False
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
+        self.player_slider_pos = 0
+        self.player_timestamp = 0
+        self.livox_cache = {}
+        self.cam_cache = {}
+
+        self.get_logger().info(f'Loaded ROS1 bag for player: {path}')
+        return self._player_load_result(
+            True, 'ROS1 bag path set', 'ros1_bag', None)
+
     def load_player_data(self, path):
         """Load file player data from the specified path"""
+        self.invalidate_ros_topics_list_cache()
+
+        # KITTI drive 디렉토리인 경우 직접 플레이어로 로드
+        if self._is_kitti_drive_path(path):
+            self.get_logger().info(f'Detected KITTI drive path: {path}')
+            return self._load_kitti_direct(path)
+
+        # MulRan (KAIST와 data_stamp.csv 경로가 겹칠 수 있어 KAIST보다 먼저 판별)
+        if self._is_mulran_dataset_path(path):
+            self.get_logger().info(f'Detected MulRan sequence path: {path}')
+            return self._load_mulran_direct(path)
+
+        # KAIST 시퀀스 디렉토리인 경우 직접 플레이어로 로드
+        if self._is_kaist_dataset_path(path):
+            self.get_logger().info(f'Detected KAIST sequence path: {path}')
+            return self._load_kaist_direct(path)
+
+        # ROS1 .bag 파일인 경우 ROS1 bag player 인프라로 위임
+        if path.endswith('.bag') and os.path.isfile(path):
+            self.get_logger().info(f'Detected ROS1 .bag path: {path}')
+            return self._load_ros1_bag_player(path)
+
+        # ROS2 bag 경로인 경우 기존 bag playback 인프라로 위임
+        if self._is_ros2_bag_path(path):
+            self.get_logger().info(f'Detected ROS2 bag path: {path}')
+            return self._load_ros2_bag_player(path)
+
         # 기존 재생 스레드를 완전히 정지시킨 후 새 데이터 로드
         # (두 번째 디렉토리 로드 후 재생 안 되는 버그 수정)
         self.player_playing = False
@@ -2079,6 +3774,17 @@ class WebGUINode(Node):
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.player_seek_requested = False
+        self.player_seek_to_stamp  = 0
+        self.player_is_ros2_bag = False   # ConPR 모드로 복귀
+        self.player_is_ros1_bag = False   # ROS1 모드 해제
+        self.player_is_kitti = False      # KITTI 모드 해제
+        self.player_is_kaist = False      # KAIST 모드 해제
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
+
+        # ROS1 bag 재생 중이면 중지 (PointCloud2 publisher 정리 → ConPR CustomMsg 생성 가능)
+        self.stop_ros1_playback()
 
         if self.playback_active:
             self.playback_active = False
@@ -2099,7 +3805,8 @@ class WebGUINode(Node):
             stamp_file = os.path.join(path, 'data_stamp.csv')
             if not os.path.exists(stamp_file):
                 self.get_logger().error(f'data_stamp.csv not found in {path}')
-                return False
+                return self._player_load_result(
+                    False, f'data_stamp.csv not found in {path}', 'conpr', [])
 
             # Load data stamps
             self.data_stamp = {}
@@ -2117,7 +3824,8 @@ class WebGUINode(Node):
 
             if not self.data_stamp:
                 self.get_logger().error('No valid data found in data_stamp.csv')
-                return False
+                return self._player_load_result(
+                    False, 'No valid data in data_stamp.csv', 'conpr', [])
 
             timestamps = sorted(self.data_stamp.keys())
             self.player_initial_stamp = timestamps[0]
@@ -2187,13 +3895,315 @@ class WebGUINode(Node):
             self.player_data_loaded = True
             # Lazy-initialize File Player ROS2 publishers/subscribers on first load
             self._init_file_player_ros_interfaces()
-            return True
+            return self._player_load_result(
+                True, 'ConPR data loaded', 'conpr', [])
 
         except Exception as e:
             self.get_logger().error(f'Failed to load player data: {str(e)}')
             import traceback
             traceback.print_exc()
-            return False
+            return self._player_load_result(False, str(e), 'conpr', [])
+
+    # ── KITTI 변환 함수 ────────────────────────────────────────────────────────
+
+    def scan_kitti_directory(self, path: str) -> dict:
+        """KITTI 데이터셋 디렉토리를 탐색하여 calib/drive 정보를 반환한다.
+
+        Args:
+            path: 사용자가 선택한 날짜 디렉토리 (예: /path/to/2011_09_30)
+
+        Returns:
+            {'success': True, 'scan_result': {...}} or {'success': False, 'error': '...'}
+        """
+        try:
+            from ros2_autonav_webui.kitti_converter import KittiConverter
+            converter = KittiConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'KITTI scan complete: date={result["date"]}, '
+                f'{len(result["drive_dirs"])} drive(s) found')
+            return {'success': True, 'scan_result': result}
+        except Exception as e:
+            self.get_logger().error(f'KITTI scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_kitti_conversion(
+        self,
+        base_dir: str,
+        calib_dir: str,
+        data_path: str,
+        drive_name: str,
+        bag_format: str = 'ros2',
+    ) -> dict:
+        """KITTI 데이터를 ROS2 bag 또는 ROS1 .bag으로 변환하는 백그라운드 스레드를 시작한다.
+
+        변환 진행률은 WebSocket(포트 8081)을 통해 전체 클라이언트에 push된다.
+
+        Args:
+            bag_format: 출력 bag 형식 - 'ros2' (기본) 또는 'ros1'
+                        'ros1'이면 KittiConverter.convert_to_ros1bag()로 직접 변환 (.bag).
+                        'ros2'이면 KittiConverter.convert_to_ros2bag()로 변환 (_bag 디렉토리).
+
+        Returns:
+            {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
+        """
+        if self.kitti_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        if bag_format == 'ros1':
+            final_output_path = os.path.join(base_dir, f"{drive_name}.bag")
+        else:
+            final_output_path = os.path.join(base_dir, f"{drive_name}_bag")
+
+        def _run():
+            self.kitti_converter_running = True
+            try:
+                from ros2_autonav_webui.kitti_converter import KittiConverter
+                converter = KittiConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'kitti_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'KITTI conversion started: {data_path} → {final_output_path} '
+                    f'[format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    # ROS1: KITTI → ROS1 .bag 직접 변환 (중간 파일 없음)
+                    converter.convert_to_ros1bag(
+                        calib_dir=calib_dir,
+                        data_path=data_path,
+                        output_bag_path=final_output_path,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    # ROS2: KITTI → ROS2 bag 변환
+                    converter.convert_to_ros2bag(
+                        calib_dir=calib_dir,
+                        data_path=data_path,
+                        output_bag_path=final_output_path,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'KITTI conversion complete: {final_output_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kitti_convert_done',
+                    'bag_path': final_output_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'KITTI conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kitti_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.kitti_converter_running = False
+
+        self.kitti_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='kitti-convert')
+        self.kitti_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': final_output_path}
+
+    # ── KAIST 변환 함수 ────────────────────────────────────────────────────────
+
+    def scan_kaist_directory(self, path: str) -> dict:
+        """KAIST Complex Urban 데이터셋 디렉토리를 탐색하여 시퀀스 목록을 반환한다.
+
+        Args:
+            path: 사용자가 선택한 디렉토리 (예: /path/to/complex_urban)
+
+        Returns:
+            {'success': True, 'sequences': [{name, path}, ...]} or {'success': False, 'error': '...'}
+        """
+        try:
+            from ros2_autonav_webui.kaist_converter import KaistConverter
+            converter = KaistConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'KAIST scan complete: {len(result["sequences"])} sequence(s) found')
+            return result
+        except Exception as e:
+            self.get_logger().error(f'KAIST scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_kaist_conversion(
+        self,
+        sequence_dir: str,
+        output_path: str,
+        sensors: list | None = None,
+        bag_format: str = 'ros2',
+    ) -> dict:
+        """KAIST 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
+
+        변환 진행률은 WebSocket(포트 8081)을 통해 전체 클라이언트에 push된다.
+
+        Args:
+            sequence_dir: KAIST 시퀀스 디렉토리 (calibration/, sensor_data/, global_pose.csv 포함)
+            output_path: 출력 경로 (ROS2: 디렉토리, ROS1: 무시하고 sequence_name.bag 사용)
+            sensors: 포함할 센서 목록 (None이면 전체)
+            bag_format: 'ros2' (기본) 또는 'ros1'
+
+        Returns:
+            {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
+        """
+        if self.kaist_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        if bag_format == 'ros1':
+            seq_name = os.path.basename(sequence_dir.rstrip(os.sep))
+            output_bag_path = os.path.join(
+                os.path.dirname(sequence_dir), seq_name + '.bag'
+            )
+        else:
+            output_bag_path = output_path
+
+        def _run():
+            self.kaist_converter_running = True
+            try:
+                from ros2_autonav_webui.kaist_converter import KaistConverter
+                converter = KaistConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'kaist_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'KAIST conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    converter.convert_to_ros1bag(
+                        sequence_dir=sequence_dir,
+                        output_bag_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    converter.convert_to_ros2bag(
+                        sequence_dir=sequence_dir,
+                        output_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'KAIST conversion complete: {output_bag_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kaist_convert_done',
+                    'bag_path': output_bag_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'KAIST conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'kaist_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.kaist_converter_running = False
+
+        self.kaist_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='kaist-convert')
+        self.kaist_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
+
+    def scan_mulran_directory(self, path: str) -> dict:
+        """MulRan 데이터셋 베이스 디렉토리를 탐색하여 시퀀스 목록을 반환한다."""
+        try:
+            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            converter = MulRanConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'MulRan scan complete: {len(result["sequences"])} sequence(s) found')
+            return result
+        except Exception as e:
+            self.get_logger().error(f'MulRan scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_mulran_conversion(
+        self,
+        sequence_dir: str,
+        output_path: str,
+        sensors: list | None = None,
+        bag_format: str = 'ros2',
+    ) -> dict:
+        """MulRan 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다."""
+        if self.mulran_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        if bag_format == 'ros1':
+            seq_name = os.path.basename(sequence_dir.rstrip(os.sep))
+            output_bag_path = os.path.join(
+                os.path.dirname(sequence_dir), seq_name + '.bag'
+            )
+        else:
+            output_bag_path = output_path
+
+        def _run():
+            self.mulran_converter_running = True
+            try:
+                from ros2_autonav_webui.mulran_converter import MulRanConverter
+                converter = MulRanConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'mulran_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'MulRan conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    converter.convert_to_ros1bag(
+                        sequence_dir=sequence_dir,
+                        output_bag_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    converter.convert_to_ros2bag(
+                        sequence_dir=sequence_dir,
+                        output_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'MulRan conversion complete: {output_bag_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'mulran_convert_done',
+                    'bag_path': output_bag_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'MulRan conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'mulran_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.mulran_converter_running = False
+
+        self.mulran_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='mulran-convert')
+        self.mulran_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
 
     def load_livox_data(self, stamp):
         """Load LiDAR data from .bin file for given timestamp"""
@@ -2307,19 +4317,26 @@ class WebGUINode(Node):
             return None
 
     def timer_callback(self):
-        """Timer callback to update processed_stamp (1배속 고정)"""
-        current_time = time.time()
+        """Timer callback (100μs 주기).
 
-        if self.player_playing and not self.player_paused:
-            if self.player_prev_time > 0:
-                dt = current_time - self.player_prev_time
-                # 실제 경과 시간(ns) 만큼 processed_stamp 증가 (1배속)
-                self.player_processed_stamp += int(dt * 1e9)
-
-        self.player_prev_time = current_time
-
+        - 정지 상태: processed_stamp 를 0 으로 리셋
+        - KITTI 재생 중: 100μs 마다 /clock 을 publish 하여 시각화 끊김 최소화
+          (KITTI 데이터는 10Hz 이지만 clock 은 더 자주 갱신해야 RViz2 가 부드러움)
+        """
         if not self.player_playing:
             self.player_processed_stamp = 0
+            return
+
+        # KITTI 재생 중: 매 timer tick 마다 /clock 갱신 (100μs → 10000Hz)
+        # player_processed_stamp 는 playback_worker 가 관리하므로 읽기만 한다.
+        if getattr(self, 'player_is_kitti', False) and self.clock_pub:
+            try:
+                clock_ns = self.player_initial_stamp + self.player_processed_stamp
+                clock_msg = Clock()
+                clock_msg.clock = Time(nanoseconds=clock_ns).to_msg()
+                self.clock_pub.publish(clock_msg)
+            except Exception:
+                pass
 
     def bag_timer_callback(self):
         """Timer callback to update bag current time during playback"""
@@ -2329,16 +4346,41 @@ class WebGUINode(Node):
             # bag_playback_rate 배속을 반영하여 bag 시간 업데이트
             self.bag_current_time = self.bag_start_offset + elapsed_time * self.bag_playback_rate
 
-            # Stop when reaching end
+            # 끝 도달 시: loop 모드면 0으로 리셋, 아니면 duration에 고정
             if self.bag_current_time >= self.bag_duration:
-                self.bag_current_time = self.bag_duration
-                # Note: We don't auto-stop here, let ros2 bag play finish naturally
+                if self.bag_player_loop:
+                    self.bag_start_real_time = current_real_time
+                    self.bag_start_offset = 0.0
+                    self.bag_current_time = 0.0
+                else:
+                    self.bag_current_time = self.bag_duration
 
     def player_play_toggle(self):
         """Toggle play/stop"""
         if not self.player_data_loaded:
             self.get_logger().warn('No data loaded. Please load data first.')
             return False
+
+        # ── ROS2 bag 모드: bag_play_toggle()로 위임 ────────────────────────
+        if getattr(self, 'player_is_ros2_bag', False):
+            self.get_logger().info('ROS2 bag mode: delegating to bag_play_toggle()')
+            return self.bag_play_toggle()
+
+        # ── ROS1 .bag 모드: start/stop_ros1_playback()으로 위임 ─────────────
+        if getattr(self, 'player_is_ros1_bag', False):
+            thread = self.ros1_player_thread
+            if thread is not None and thread.is_alive():
+                self.get_logger().info('ROS1 bag mode: stopping playback')
+                self.stop_ros1_playback()
+                return True
+            else:
+                self.get_logger().info(
+                    f'ROS1 bag mode: starting playback ({self.bag_path})')
+                return self.start_ros1_playback(
+                    self.bag_path,
+                    topics=None,
+                    rate=getattr(self, 'ros1_player_rate', 1.0),
+                )
 
         self.player_playing = not self.player_playing
         self.player_paused = False
@@ -2480,6 +4522,7 @@ class WebGUINode(Node):
             - ROS1 포맷: 'sensor_msgs/Image'       (parts 2개)
             - ROS2 포맷: 'sensor_msgs/msg/Image'   (parts 3개)
             두 포맷을 모두 처리합니다.
+            - ROS1 tf/tfMessage → ROS2 tf2_msgs/msg/TFMessage 매핑
 
             Args:
                 ros1_type_str (str): 예) 'sensor_msgs/msg/Image' 또는 'sensor_msgs/Image'
@@ -2487,6 +4530,8 @@ class WebGUINode(Node):
             Returns:
                 bool: True if importable and class exists
             """
+            if ros1_type_str in ('tf/tfMessage', 'tf/msg/tfMessage'):
+                return True
             try:
                 parts = ros1_type_str.split('/')
                 if len(parts) == 2:
@@ -2555,6 +4600,8 @@ class WebGUINode(Node):
         """ROS1 bag 재생 시작.
 
         기존 스레드가 있으면 중지한 후 새 스레드를 시작합니다.
+        ConPR livox_pub(CustomMsg)가 /livox/lidar에 있으면 PointCloud2 publisher 생성 실패하므로
+        재생 직전에 반드시 정리합니다.
 
         Args:
             bag_path (str): ROS1 .bag 파일 경로
@@ -2564,11 +4611,23 @@ class WebGUINode(Node):
         Returns:
             bool: True if successfully started
         """
-        # 기존 스레드 정리
+        # ConPR CustomMsg publisher 정리 (같은 /livox/lidar 토픽 충돌 방지)
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+        self._destroy_conpr_publishers()
+
+        # 기존 ROS1 스레드 정리
         self.stop_ros1_playback()
 
         self.ros1_player_rate = rate
         self.ros1_player_thread = Ros1BagPlayerThread(bag_path, topics, rate, self)
+        self.ros1_player_thread.set_loop(self.bag_player_loop)
         self.ros1_player_thread.start()
         self.get_logger().info(
             f'[ROS1 Player] Started: {bag_path}, topics={topics or "ALL"}, rate={rate}x'
@@ -2656,7 +4715,15 @@ class WebGUINode(Node):
                 self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
                 return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
 
-            cmd = [convert_cmd, '--src', self.bag_path, '--dst', output_dir]
+            cmd = [
+                convert_cmd,
+                '--src',
+                self.bag_path,
+                '--dst',
+                output_dir,
+                '--src-typestore',
+                'ros1_noetic',
+            ]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -2668,6 +4735,8 @@ class WebGUINode(Node):
                 error_msg = result.stderr.strip() or result.stdout.strip()
                 self.get_logger().error(f'rosbags-convert failed: {error_msg}')
                 return {'success': False, 'error': error_msg}
+
+            _patch_rosbag2_tf_static_qos(output_dir, self.get_logger())
 
             self.get_logger().info(f'ROS1 bag converted successfully: {output_dir}')
             return {'success': True, 'output_path': output_dir}
@@ -2798,12 +4867,25 @@ class WebGUINode(Node):
                     cmd.extend(['--rate', str(rate)])
                 self.get_logger().info(f'Playback rate: {rate}x')
 
+                # Add loop flag if enabled
+                if self.bag_player_loop:
+                    cmd.append('--loop')
+                    self.get_logger().info('Loop playback enabled')
+
                 # Add topic filter if topics are selected
+                # ROS1 bag player 참조: /tf, /tf_static는 3D Viewer 좌표 변환에 필수.
+                # 토픽 선택 시 항상 /tf, /tf_static 포함 (나올때가 있고 안나올때가 있는 문제 해결)
+                # ros2 bag play는 bag에 없는 토픽은 무시하므로 항상 추가해도 무방
                 if selected_topics and len(selected_topics) > 0:
-                    self.bag_selected_topics = selected_topics
+                    topics_to_play = list(selected_topics)
+                    for tf_topic in ('/tf', '/tf_static'):
+                        if tf_topic not in topics_to_play:
+                            topics_to_play.append(tf_topic)
+                            self.get_logger().info(f'[bag play] Including {tf_topic} for 3D Viewer TF')
+                    self.bag_selected_topics = topics_to_play
                     cmd.append('--topics')
-                    cmd.extend(selected_topics)
-                    self.get_logger().info(f'Playing selected topics: {selected_topics}')
+                    cmd.extend(topics_to_play)
+                    self.get_logger().info(f'Playing selected topics: {topics_to_play}')
                 else:
                     self.get_logger().info('Playing all topics')
 
@@ -2863,21 +4945,26 @@ class WebGUINode(Node):
             return False
 
     def set_bag_position(self, position_ratio):
-        """Set bag playback position (0.0 to 1.0)"""
+        """Set bag playback position (0.0 to 1.0). ROS1/ROS2 bag 모두 지원."""
         if self.bag_duration <= 0:
             return False
 
         target_time = position_ratio * self.bag_duration
 
-        # If playing, restart from new position
+        # ROS1 bag 재생 중: Ros1BagPlayerThread.set_seek() 호출
+        thread = self.ros1_player_thread
+        if thread is not None and thread.is_alive():
+            thread.set_seek(target_time)
+            self.bag_current_time = target_time
+            self.get_logger().info(f'[ROS1] Set bag position to {target_time}s ({position_ratio*100}%)')
+            return True
+
+        # ROS2 bag: 기존 로직
         if self.bag_playing:
-            # Stop current playback
             self.bag_play_toggle()
             time.sleep(0.1)
-            # Restart from new position (현재 속도 유지)
             self.bag_play_toggle(self.bag_selected_topics, target_time, self.bag_playback_rate)
         else:
-            # Just update the position
             self.bag_current_time = target_time
             self.bag_start_offset = target_time
 
@@ -2992,7 +5079,8 @@ class WebGUINode(Node):
             'topics': self.bag_topics,
             'selected_topics': self.bag_selected_topics,
             'duration': self.bag_duration,
-            'current_time': self.bag_current_time
+            'current_time': self.bag_current_time,
+            'loop': self.bag_player_loop,
         }
 
     def playback_worker(self):
@@ -3002,14 +5090,19 @@ class WebGUINode(Node):
         - timestamps 는 Play 시작 시 한 번 복사 → 새 디렉토리 로드 후 재생 시 갱신됨
         - 인덱스(current_idx) 추적으로 매 루프 O(n) 전체 순회를 O(k) 로 단축
           (k: 이번 루프에서 실제로 발행할 스탬프 수)
-        - 배속(player_speed)은 timer_callback 에서 processed_stamp 를 증가시키므로
-          worker 는 단순히 current_idx 를 앞으로 전진시키기만 하면 됨
+        - 배속(player_speed)은 worker 내부 wall-clock으로 직접 계산
+          (timer_callback 의존 제거 → KITTI/ConPR 모두 안정적 동작)
         """
         self.get_logger().info('Playback worker started')
 
         timestamps = []      # Play 시작 시 data_stamp 에서 복사
         current_idx = 0      # 다음 처리할 timestamps 인덱스
         was_playing = False  # 이전 루프의 재생 상태 (재시작 감지용)
+        was_paused = False   # pause 상태 추적 (resume 시 기준 시간 재조정)
+
+        # wall-clock 기준 타이밍 (timer_callback 불필요)
+        _wall_start = 0.0    # play/resume 시점 wall time
+        _proc_start = 0      # play/resume 시점 player_processed_stamp
 
         while self.playback_active:
             time.sleep(0.001)  # 1ms sleep
@@ -3020,8 +5113,32 @@ class WebGUINode(Node):
                     current_idx = 0
                     timestamps = []
                 was_playing = False
-                time.sleep(0.01)
+                was_paused = False
+                time.sleep(0.05)  # 재생 중지 시 CPU 절약
                 continue
+
+            # ── wall-clock 기반 player_processed_stamp 갱신 ──────────────
+            now = time.time()
+            if self.player_seek_requested:
+                # seek 발생 → 일반 wall-clock 갱신을 막아 player_processed_stamp
+                # 덮어쓰기 방지.  실제 seek 처리는 아래 elif 블록에서 수행.
+                # _proc_start 를 seek 목표로 미리 설정해 두면 혹시 elif 가 같은
+                # 이터레이션에서 실행되지 않더라도 다음 이터레이션 정상 진행 가능.
+                _wall_start = now
+                _proc_start = self.player_seek_to_stamp - self.player_initial_stamp
+            elif not self.player_paused:
+                if was_paused:
+                    # pause 에서 resume 됨 → 기준 시간 재설정 (멈춘 시간 제외)
+                    _wall_start = now
+                    _proc_start = self.player_processed_stamp
+                    was_paused = False
+                elif _wall_start > 0:
+                    elapsed_ns = int((now - _wall_start) * 1e9 * self.player_speed)
+                    self.player_processed_stamp = _proc_start + elapsed_ns
+            else:
+                if not was_paused:
+                    was_paused = True
+            # ─────────────────────────────────────────────────────────────
 
             # Play 시작 시(또는 재시작 시) timestamps 를 현재 data_stamp 로 갱신
             if not was_playing:
@@ -3031,34 +5148,95 @@ class WebGUINode(Node):
                 while current_idx < len(timestamps) and timestamps[current_idx] <= self.player_timestamp:
                     current_idx += 1
                 self.player_seek_requested = False
+                # wall-clock 기준 초기화
+                _wall_start = now
+                _proc_start = self.player_processed_stamp
+                was_paused = self.player_paused
                 self.get_logger().info(
-                    f'Playback started: {len(timestamps)} stamps, idx={current_idx}, '
-                    f'speed={self.player_speed}'
+                    f'Playback started: {len(timestamps)} stamps, speed={self.player_speed}'
                 )
             elif self.player_seek_requested:
-                # 재생 중 seek → 인덱스를 새 위치로 재설정
+                # 재생 중 seek ─────────────────────────────────────────────
+                # player_seek_to_stamp 에서 목표 위치를 읽는다.
+                # (HTTP 스레드가 player_processed_stamp 를 직접 쓰지 않으므로
+                #  여기서 처음이자 유일하게 worker 가 값을 확정한다.)
+                seek_stamp = self.player_seek_to_stamp
+                self.player_processed_stamp = seek_stamp - self.player_initial_stamp
+                self.player_timestamp = seek_stamp
                 self.player_seek_requested = False
                 current_idx = 0
-                while current_idx < len(timestamps) and timestamps[current_idx] <= self.player_timestamp:
+                while current_idx < len(timestamps) and timestamps[current_idx] <= seek_stamp:
                     current_idx += 1
-                self.get_logger().info(f'Seek: idx reset to {current_idx}')
+                _wall_start = now
+                _proc_start = self.player_processed_stamp
+                self.get_logger().info(
+                    f'Seek done: stamp={seek_stamp}, idx={current_idx}'
+                )
             was_playing = True
 
             # 현재 목표 스탬프 계산
             target_stamp = self.player_initial_stamp + self.player_processed_stamp
 
+            # Stop/Pause 시 즉시 중단 (inner loop 내부에서도 체크 — 배치 처리 중 반응)
+            # 배치당 최대 프레임 수 제한으로 latency 스파이크 방지
+            _batch_limit = 20
+            _batch_count = 0
+
             # 인덱스를 앞으로 전진하면서 target_stamp 이하의 스탬프만 발행 (O(k))
             while current_idx < len(timestamps):
+                if not self.player_playing or self.player_paused:
+                    break
+                if _batch_count >= _batch_limit:
+                    break
                 stamp = timestamps[current_idx]
                 if stamp > target_stamp:
                     break
                 current_idx += 1
+                _batch_count += 1
 
                 if stamp <= self.player_timestamp:
                     # 이미 발행한 스탬프 (seek 복귀 시 skip)
                     continue
 
                 data_type = self.data_stamp.get(stamp, "")
+
+                # ── KITTI direct play ──────────────────────────────────────
+                if getattr(self, 'player_is_kitti', False):
+                    try:
+                        frame_idx = int(data_type)
+                        self._publish_kitti_frame(frame_idx, stamp)
+                        # 클락 메시지 발행
+                        if self.clock_pub:
+                            clock_msg = Clock()
+                            clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                            self.clock_pub.publish(clock_msg)
+                    except Exception as e:
+                        self.get_logger().warn(f'KITTI frame publish error: {e}')
+                    # player_timestamp는 예외 여부와 무관하게 항상 갱신
+                    self.player_timestamp = stamp
+                    continue  # ConPR 분기 스킵
+
+                # ── KAIST direct play ──────────────────────────────────────
+                if getattr(self, 'player_is_kaist', False):
+                    try:
+                        self._publish_kaist_frame(stamp)
+                        if self.clock_pub:
+                            clock_msg = Clock()
+                            clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                            self.clock_pub.publish(clock_msg)
+                    except Exception as e:
+                        self.get_logger().warn(f'KAIST frame publish error: {e}')
+                    self.player_timestamp = stamp
+                    continue  # ConPR 분기 스킵
+
+                if getattr(self, 'player_is_mulran', False):
+                    try:
+                        # /clock 는 _publish_mulran_frame 내부에서 10ms 간격으로 throttle
+                        self._publish_mulran_frame(stamp)
+                    except Exception as e:
+                        self.get_logger().warn(f'MulRan frame publish error: {e}')
+                    self.player_timestamp = stamp
+                    continue
 
                 if data_type == "pose" and stamp in self.pose_data:
                     x, y, z = self.pose_data[stamp]
@@ -3111,9 +5289,13 @@ class WebGUINode(Node):
                         )
 
                 # 클락 메시지 발행
-                clock_msg = Clock()
-                clock_msg.clock = Time(nanoseconds=stamp).to_msg()
-                self.clock_pub.publish(clock_msg)
+                if self.clock_pub:
+                    try:
+                        clock_msg = Clock()
+                        clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                        self.clock_pub.publish(clock_msg)
+                    except Exception as e:
+                        self.get_logger().warn(f'Clock publish error: {e}')
 
                 self.player_timestamp = stamp
 
@@ -3130,6 +5312,9 @@ class WebGUINode(Node):
                     self.player_processed_stamp = 0
                     self.player_timestamp = self.player_initial_stamp
                     current_idx = 0
+                    # wall-clock 기준도 리셋 (리셋 없으면 elapsed_ns 폭주)
+                    _wall_start = now
+                    _proc_start = 0
                 else:
                     self.get_logger().info('Playback finished')
                     self.player_playing = False
@@ -3139,28 +5324,26 @@ class WebGUINode(Node):
         self.get_logger().info('Playback worker stopped')
 
     def reset_player_position(self, position):
-        """Reset playback position (0-10000)"""
+        """Reset playback position (0-10000)
+
+        player_processed_stamp / player_timestamp 는 playback_worker 에서만 쓰도록
+        race-condition 을 방지한다.  HTTP 핸들러 스레드는 player_seek_to_stamp 와
+        player_seek_requested 만 설정하고 나머지는 worker 에 위임한다.
+        """
         if not self.player_data_loaded:
             return
 
         ratio = position / 10000.0
         total_duration = self.player_last_stamp - self.player_initial_stamp
+        target_stamp = int(self.player_initial_stamp + int(ratio * total_duration))
 
-        # Update processed_stamp to match the slider position
-        self.player_processed_stamp = int(ratio * total_duration)
-
-        # Update timestamp to the target position
-        target_stamp = int(self.player_initial_stamp + self.player_processed_stamp)
-        self.player_timestamp = target_stamp
+        # 슬라이더 위치는 즉시 반영 (시각적 피드백)
         self.player_slider_pos = position
+        # seek 목표를 worker 에 전달 — player_processed_stamp 직접 쓰기 ×
+        self.player_seek_to_stamp = target_stamp
+        self.player_seek_requested = True  # 마지막에 설정 (원자성 보장)
 
-        # Reset timer for smooth playback after seeking
-        self.player_prev_time = time.time()
-
-        # worker 에게 인덱스를 재설정하도록 신호
-        self.player_seek_requested = True
-
-        self.get_logger().info(f'Reset position to {position} (stamp: {target_stamp}, processed: {self.player_processed_stamp}ns)')
+        self.get_logger().info(f'Seek requested: pos={position} → stamp={target_stamp}')
 
     def save_rosbag(self):
         """Save loaded data to rosbag2 format"""
@@ -3169,8 +5352,11 @@ class WebGUINode(Node):
             return False
 
         try:
-            bag_path = os.path.join(self.player_path, "output")
+            # KITTI와 동일한 정책: {base_dir}/{name}_bag
+            bag_name = os.path.basename(os.path.normpath(self.player_path)) or 'output'
+            bag_path = os.path.join(self.player_path, f"{bag_name}_bag")
             self.save_bag_progress = "0%"
+            self.save_bag_message = "Starting conversion..."
             self.get_logger().info(f'Starting rosbag conversion to: {bag_path}')
 
             # Create writer
@@ -3263,6 +5449,7 @@ class WebGUINode(Node):
                         time.sleep(0)  # GIL 반납 → HTTP 스레드가 폴링 요청 처리 가능
 
             # Write pose data
+            self.save_bag_message = "Converting pose messages..."
             self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
             for stamp, (x, y, z) in sorted(self.pose_data.items()):
                 msg = PointStamped()
@@ -3280,6 +5467,7 @@ class WebGUINode(Node):
                 update_progress()
 
             # Write IMU data
+            self.save_bag_message = "Converting IMU messages..."
             self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
             for stamp, imu_values in sorted(self.imu_data.items()):
                 msg = Imu()
@@ -3305,6 +5493,7 @@ class WebGUINode(Node):
 
             # Write LiDAR data
             if LIVOX_AVAILABLE and len(livox_stamps) > 0:
+                self.save_bag_message = "Converting LiDAR messages..."
                 self.get_logger().info(f'Writing {len(livox_stamps)} LiDAR messages...')
                 for stamp in sorted(livox_stamps):
                     livox_msg = self.load_livox_data(stamp)
@@ -3318,6 +5507,7 @@ class WebGUINode(Node):
 
             # Write Camera data
             if len(cam_stamps) > 0:
+                self.save_bag_message = "Converting camera messages..."
                 self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
                 for stamp in sorted(cam_stamps):
                     cam_data = self.load_camera_data(stamp)
@@ -3337,18 +5527,235 @@ class WebGUINode(Node):
 
             del writer
             self.save_bag_progress = None
+            self.save_bag_message = None
             self.get_logger().info('Rosbag conversion complete!')
             return True
 
         except Exception as e:
             self.save_bag_progress = None
+            self.save_bag_message = None
             self.get_logger().error(f'Failed to save rosbag: {str(e)}')
             import traceback
             traceback.print_exc()
             return False
 
-    def start_save_rosbag(self):
-        """Start save_rosbag() in a background thread so HTTP server stays responsive."""
+    def save_rosbag_ros1(self):
+        """로드된 ConPR 데이터를 ROS1 .bag 형식으로 직접 저장한다.
+
+        rosbags.rosbag1.Writer + migrate_bytes()를 사용하여 ROS2 CDR 직렬화 후
+        즉시 ROS1 raw bytes로 변환하여 .bag에 기록한다.
+
+        Livox 데이터는 CustomMsg 대신 sensor_msgs/PointCloud2로 변환하여 저장한다.
+        표준 타입이므로 migrate_bytes() 캐시 적중률 100% → 변환 속도 대폭 향상.
+        또한 rosbridge 타입 호환성 보장 → 3D Viewer에서 정상 시각화 가능.
+
+        출력 경로: {player_path}/output.bag
+        """
+        if not self.player_data_loaded:
+            self.get_logger().error('No data loaded. Please load data first.')
+            return False
+
+        try:
+            from pathlib import Path as _Path
+            from rosbags.rosbag1 import Writer as Ros1Writer
+            from rosbags.typesys import get_typestore, Stores
+            from rosbags.convert.converter import migrate_bytes as _migrate_bytes
+        except ImportError as e:
+            self.get_logger().error(
+                f'rosbags 라이브러리가 필요합니다. pip install rosbags\n원인: {e}'
+            )
+            return False
+
+        try:
+            # KITTI와 동일한 정책: {base_dir}/{name}.bag
+            bag_name = os.path.basename(os.path.normpath(self.player_path)) or 'output'
+            bag_path = _Path(self.player_path) / f'{bag_name}.bag'
+            self.save_bag_progress = '0%'
+            self.save_bag_message = "Starting conversion..."
+            self.get_logger().info(f'Starting ROS1 bag save to: {bag_path}')
+
+            src_store = get_typestore(Stores.ROS2_JAZZY)
+            dst_store = get_typestore(Stores.ROS1_NOETIC)
+            migrate_cache: dict = {}
+
+            def _cdr_to_ros1(conn, cdr_bytes: bytes) -> bytes:
+                return bytes(_migrate_bytes(
+                    src_store, dst_store,
+                    conn.msgtype, conn.msgtype,
+                    migrate_cache, cdr_bytes,
+                    src_is2=True, dst_is2=False,
+                ))
+
+            def _livox_custommsg_to_pointcloud2(livox_msg, stamp_ns: int) -> PointCloud2:
+                """Livox CustomMsg → sensor_msgs/PointCloud2 변환.
+
+                PointCloud2 필드: x, y, z (float32), intensity (float32 = reflectivity),
+                tag (uint8), line (uint8). point_step = 18 bytes.
+                """
+                _fields = [
+                    PointField(name='x',         offset=0,  datatype=PointField.FLOAT32, count=1),
+                    PointField(name='y',         offset=4,  datatype=PointField.FLOAT32, count=1),
+                    PointField(name='z',         offset=8,  datatype=PointField.FLOAT32, count=1),
+                    PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+                    PointField(name='tag',       offset=16, datatype=PointField.UINT8,   count=1),
+                    PointField(name='line',      offset=17, datatype=PointField.UINT8,   count=1),
+                ]
+                _point_step = 18  # 4+4+4+4+1+1
+                _num_pts = len(livox_msg.points)
+                _buf = bytearray(_num_pts * _point_step)
+                for _i, _pt in enumerate(livox_msg.points):
+                    _off = _i * _point_step
+                    struct.pack_into('ffff', _buf, _off, _pt.x, _pt.y, _pt.z, float(_pt.reflectivity))
+                    struct.pack_into('BB', _buf, _off + 16, _pt.tag, _pt.line)
+                _pc2 = PointCloud2()
+                _pc2.header.stamp = Time(nanoseconds=stamp_ns).to_msg()
+                _pc2.header.frame_id = livox_msg.header.frame_id or 'livox'
+                _pc2.height = 1
+                _pc2.width = _num_pts
+                _pc2.fields = _fields
+                _pc2.is_bigendian = False
+                _pc2.point_step = _point_step
+                _pc2.row_step = _point_step * _num_pts
+                _pc2.data = bytes(_buf)
+                _pc2.is_dense = True
+                return _pc2
+
+            # ── Livox 프레임 수집 (PointCloud2로 저장하므로 커스텀 타입 등록 불필요) ──
+            livox_stamps = []
+            if LIVOX_AVAILABLE and len(self.livox_file_list) > 0:
+                livox_stamps = [s for s, dtype in self.data_stamp.items()
+                                if dtype == 'livox']
+                self.get_logger().info(
+                    f'Livox → PointCloud2: {len(livox_stamps)} frames')
+
+            # 데이터 크기 계산 (진행률용)
+            cam_stamps = []
+            if len(self.cam_file_list) > 0:
+                cam_stamps = [s for s, dtype in self.data_stamp.items() if dtype == 'cam']
+            total_items = (len(self.pose_data) + len(self.imu_data)
+                           + len(cam_stamps) + len(livox_stamps))
+            processed_items = 0
+            last_pct = -1
+
+            def update_progress():
+                nonlocal processed_items, last_pct
+                processed_items += 1
+                if total_items > 0:
+                    pct = int(processed_items / total_items * 100)
+                    if pct != last_pct:
+                        self.save_bag_progress = f'{pct}%'
+                        last_pct = pct
+                        time.sleep(0)
+
+            # 기존 output.bag 삭제
+            if bag_path.exists():
+                bag_path.unlink()
+
+            with Ros1Writer(bag_path) as writer:
+                # 커넥션 등록
+                pose_conn = writer.add_connection(
+                    '/pose/position', 'geometry_msgs/msg/PointStamped', typestore=dst_store)
+                imu_conn = writer.add_connection(
+                    '/imu', 'sensor_msgs/msg/Imu', typestore=dst_store)
+                img_conn = None
+                caminfo_conn = None
+                if cam_stamps:
+                    img_conn = writer.add_connection(
+                        '/camera/color/image', 'sensor_msgs/msg/Image', typestore=dst_store)
+                    caminfo_conn = writer.add_connection(
+                        '/camera/color/camera_info', 'sensor_msgs/msg/CameraInfo',
+                        typestore=dst_store)
+                livox_conn = None
+                if livox_stamps:
+                    livox_conn = writer.add_connection(
+                        '/livox/lidar', 'sensor_msgs/msg/PointCloud2',
+                        typestore=dst_store)
+
+                def _write(conn, ros2_msg, ts_ns: int):
+                    try:
+                        cdr = bytes(serialize_message(ros2_msg))
+                        raw = _cdr_to_ros1(conn, cdr)
+                        writer.write(conn, ts_ns, raw)
+                    except Exception as _e:
+                        self.get_logger().warn(f'ROS1 write skipped: {_e}')
+
+                # Write pose data
+                self.save_bag_message = "Converting pose messages..."
+                self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
+                for stamp, (x, y, z) in sorted(self.pose_data.items()):
+                    msg = PointStamped()
+                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.frame_id = 'imu_link'
+                    msg.point.x = x
+                    msg.point.y = y
+                    msg.point.z = z
+                    _write(pose_conn, msg, stamp)
+                    update_progress()
+
+                # Write IMU data
+                self.save_bag_message = "Converting IMU messages..."
+                self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
+                for stamp, imu_values in sorted(self.imu_data.items()):
+                    msg = Imu()
+                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.frame_id = 'imu_link'
+                    msg.orientation.x = imu_values[0]
+                    msg.orientation.y = imu_values[1]
+                    msg.orientation.z = imu_values[2]
+                    msg.orientation.w = imu_values[3]
+                    msg.angular_velocity.x = imu_values[4]
+                    msg.angular_velocity.y = imu_values[5]
+                    msg.angular_velocity.z = imu_values[6]
+                    msg.linear_acceleration.x = imu_values[7]
+                    msg.linear_acceleration.y = imu_values[8]
+                    msg.linear_acceleration.z = imu_values[9]
+                    _write(imu_conn, msg, stamp)
+                    update_progress()
+
+                # Write Livox data as PointCloud2
+                if livox_conn:
+                    self.save_bag_message = "Converting LiDAR messages..."
+                    self.get_logger().info(
+                        f'Writing {len(livox_stamps)} Livox messages as PointCloud2...')
+                    for stamp in sorted(livox_stamps):
+                        livox_msg = self.load_livox_data(stamp)
+                        if livox_msg:
+                            pc2_msg = _livox_custommsg_to_pointcloud2(livox_msg, stamp)
+                            _write(livox_conn, pc2_msg, stamp)
+                        update_progress()
+
+                # Write Camera data
+                if cam_stamps and img_conn and caminfo_conn:
+                    self.save_bag_message = "Converting camera messages..."
+                    self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
+                    for stamp in sorted(cam_stamps):
+                        cam_data = self.load_camera_data(stamp)
+                        if cam_data:
+                            img_msg, cam_info_msg = cam_data
+                            _write(img_conn, img_msg, stamp)
+                            _write(caminfo_conn, cam_info_msg, stamp)
+                        update_progress()
+
+            self.save_bag_progress = None
+            self.save_bag_message = None
+            self.get_logger().info(f'ROS1 bag save complete: {bag_path}')
+            return True
+
+        except Exception as e:
+            self.save_bag_progress = None
+            self.save_bag_message = None
+            self.get_logger().error(f'Failed to save ROS1 bag: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def start_save_rosbag(self, bag_format: str = 'ros2'):
+        """save_rosbag() 또는 save_rosbag_ros1()을 백그라운드 스레드에서 실행한다.
+
+        Args:
+            bag_format: 'ros2' (기본) — ROS2 bag (output/ 디렉토리)
+                        'ros1'        — ROS1 .bag 파일 (output.bag)
+        """
         if self.save_bag_saving:
             self.get_logger().warn('Bag save already in progress')
             return False
@@ -3357,10 +5764,14 @@ class WebGUINode(Node):
             self.save_bag_saving = True
             self.save_bag_success = False
             try:
-                self.save_bag_success = self.save_rosbag()
+                if bag_format == 'ros1':
+                    self.save_bag_success = self.save_rosbag_ros1()
+                else:
+                    self.save_bag_success = self.save_rosbag()
             finally:
                 self.save_bag_saving = False
                 self.save_bag_progress = None
+                self.save_bag_message = None
 
         t = threading.Thread(target=_run, daemon=True)
         t.start()
@@ -3386,6 +5797,7 @@ class WebGUINode(Node):
             'slider_pos': self.player_slider_pos,
             'data_loaded': self.player_data_loaded,
             'save_bag_progress': self.save_bag_progress,
+            'save_bag_message': self.save_bag_message,
             'save_bag_saving': self.save_bag_saving,
             'save_bag_success': self.save_bag_success
         }
@@ -3446,10 +5858,12 @@ def browse_directory(start_path="/home"):
                 'is_file': False
             })
 
-        # List directories and files
+        # List directories and files (hide dotfiles / dot-directories)
         if path.exists() and path.is_dir():
-            # First add directories
-            for entry in sorted(path.iterdir()):
+            visible = sorted(
+                e for e in path.iterdir() if not e.name.startswith('.')
+            )
+            for entry in visible:
                 if entry.is_dir():
                     entries.append({
                         'name': entry.name,
@@ -3457,9 +5871,7 @@ def browse_directory(start_path="/home"):
                         'is_dir': True,
                         'is_file': False
                     })
-
-            # Then add files
-            for entry in sorted(path.iterdir()):
+            for entry in visible:
                 if entry.is_file():
                     entries.append({
                         'name': entry.name,
@@ -3541,7 +5953,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             except Exception as e:
                 self.send_json_response({'success': False, 'error': str(e)})
         elif parsed_path.path == '/api/viewer/pc2_topics':
-            # PC2 전용: 현재 활성화된 PointCloud2 토픽 목록
+            # PC2 전용: 현재 활성화된 PointCloud2 토픽 목록 (rosbridge 불필요)
             try:
                 all_topics = self.node.get_recorder_topics()
                 pc2_topics = [
@@ -3553,6 +5965,18 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                     )
                 ]
                 self.send_json_response({'success': True, 'topics': pc2_topics})
+            except Exception as e:
+                self.send_json_response({'success': False, 'error': str(e), 'topics': []})
+        elif parsed_path.path == '/api/viewer/livox_topics':
+            # Livox CustomMsg 토픽 목록 (Python 백엔드, rosbridge 불필요)
+            try:
+                all_topics = self.node.get_recorder_topics()
+                livox_topics = [
+                    t['name'] if isinstance(t, dict) else t
+                    for t in all_topics
+                    if (t.get('type', '') if isinstance(t, dict) else '') == 'livox_ros_driver2/msg/CustomMsg'
+                ]
+                self.send_json_response({'success': True, 'topics': livox_topics})
             except Exception as e:
                 self.send_json_response({'success': False, 'error': str(e), 'topics': []})
         else:
@@ -3603,6 +6027,19 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         # Bag Player API endpoints
         elif parsed_path.path == '/api/bag/load':
             path = data.get('path', '')
+            # ConPR → bag 전환 시 CustomMsg publisher 및 재생 정리 (같은 /livox/lidar 토픽 충돌 방지)
+            if path:
+                self.node._destroy_conpr_publishers()
+                self.node.player_playing = False
+                self.node.player_paused = False
+                if self.node.playback_active:
+                    self.node.playback_active = False
+                    old_thread = self.node.playback_thread
+                    self.node.playback_thread = None
+                    if old_thread and old_thread.is_alive():
+                        old_thread.join(timeout=1.0)
+                self.node.stop_ros1_playback()
+            self.node.invalidate_ros_topics_list_cache()
             self.node.bag_path = path
             # Automatically get bag info when loading
             info = self.node.get_bag_info()
@@ -3656,6 +6093,12 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/bag/stop_ros1':
             success = self.node.stop_ros1_playback()
             response = {'success': success, 'message': 'ROS1 playback stopped'}
+        elif parsed_path.path == '/api/bag/set_loop':
+            loop = data.get('loop', False)
+            self.node.bag_player_loop = bool(loop)
+            if self.node.ros1_player_thread is not None:
+                self.node.ros1_player_thread.set_loop(self.node.bag_player_loop)
+            response = {'success': True, 'loop': self.node.bag_player_loop}
 
         # Bag Recorder API endpoints
         elif parsed_path.path == '/api/recorder/set_bag_name':
@@ -3863,10 +6306,107 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 response = {'success': False, 'message': str(e)}
 
         # File Player API endpoints
+        elif parsed_path.path == '/api/player/scan_kitti':
+            # KITTI 디렉토리 탐색
+            # body: { "path": "/path/to/2011_09_30" }
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_kitti_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_kitti':
+            # KITTI → ROS2 bag 또는 ROS1 .bag 변환
+            # body: { "base_dir": "...", "calib_dir": "...", "data_path": "...",
+            #         "drive_name": "...", "bag_format": "ros2"|"ros1" }
+            base_dir   = data.get('base_dir', '')
+            calib_dir  = data.get('calib_dir', '')
+            data_path  = data.get('data_path', '')
+            drive_name = data.get('drive_name', '')
+            bag_format = data.get('bag_format', 'ros2')
+            if not all([base_dir, calib_dir, data_path, drive_name]):
+                response = {'success': False, 'error': 'Missing required fields: base_dir, calib_dir, data_path, drive_name'}
+            else:
+                response = self.node.start_kitti_conversion(
+                    base_dir, calib_dir, data_path, drive_name, bag_format
+                )
+
+        elif parsed_path.path == '/api/player/scan_kaist':
+            # KAIST 디렉토리 탐색
+            # body: { "path": "/path/to/complex_urban" }
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_kaist_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_kaist':
+            # KAIST → ROS1/ROS2 bag 변환
+            # body: { "sequence_dir": "...", "output_path": "...", "sensors": [...], "bag_format": "ros2"|"ros1" }
+            sequence_dir = data.get('sequence_dir', '')
+            output_path = data.get('output_path', '')
+            sensors = data.get('sensors')
+            bag_format = data.get('bag_format', 'ros2')
+            if not sequence_dir:
+                response = {'success': False, 'error': 'Missing sequence_dir'}
+            elif not output_path:
+                response = {'success': False, 'error': 'Missing output_path'}
+            else:
+                response = self.node.start_kaist_conversion(
+                    sequence_dir=sequence_dir,
+                    output_path=output_path,
+                    sensors=sensors,
+                    bag_format=bag_format,
+                )
+
+        elif parsed_path.path == '/api/player/scan_mulran':
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_mulran_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_mulran':
+            sequence_dir = data.get('sequence_dir', '')
+            output_path = data.get('output_path', '')
+            sensors = data.get('sensors')
+            bag_format = data.get('bag_format', 'ros2')
+            if not sequence_dir:
+                response = {'success': False, 'error': 'Missing sequence_dir'}
+            elif not output_path:
+                response = {'success': False, 'error': 'Missing output_path'}
+            else:
+                response = self.node.start_mulran_conversion(
+                    sequence_dir=sequence_dir,
+                    output_path=output_path,
+                    sensors=sensors,
+                    bag_format=bag_format,
+                )
+
         elif parsed_path.path == '/api/player/load_data':
             path = data.get('path', '')
-            success = self.node.load_player_data(path)
-            response = {'success': success, 'message': 'Data loaded' if success else 'Failed to load data'}
+            load_out = self.node.load_player_data(path)
+            if isinstance(load_out, dict):
+                response = {
+                    'success': load_out.get('success', False),
+                    'message': load_out.get('message', ''),
+                    'dataset': load_out.get('dataset'),
+                    'player_pc2_topics': load_out.get('player_pc2_topics'),
+                }
+            else:
+                ok = bool(load_out)
+                response = {
+                    'success': ok,
+                    'message': 'Data loaded' if ok else 'Failed to load data',
+                    'dataset': None,
+                    'player_pc2_topics': None,
+                }
         elif parsed_path.path == '/api/player/play':
             success = self.node.player_play_toggle()
             response = {'success': success, 'playing': self.node.player_playing}
@@ -3874,7 +6414,9 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             success = self.node.player_pause_toggle()
             response = {'success': success, 'paused': self.node.player_paused}
         elif parsed_path.path == '/api/player/save_bag':
-            started = self.node.start_save_rosbag()
+            # body: { "bag_format": "ros2" | "ros1" }  (기본값 "ros2")
+            bag_fmt = data.get('bag_format', 'ros2')
+            started = self.node.start_save_rosbag(bag_format=bag_fmt)
             response = {'success': started, 'message': 'Save started' if started else 'Save already in progress'}
         elif parsed_path.path == '/api/player/set_loop':
             self.node.player_loop = data.get('loop', False)

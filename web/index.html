@@ -185,7 +185,7 @@
                         <div></div>
                     </div>
 
-                    <!-- 재생 속도 슬라이더 (bag 로드 시 표시, ROS1/ROS2 공용) -->
+                    <!-- 재생 속도 + Loop (bag 로드 시 표시, ROS1/ROS2 공용) -->
                     <div id="ros1-playback-controls" style="display:none; padding: 8px 0 4px 0;">
                         <div class="form-group">
                             <label>Playback Rate:</label>
@@ -194,6 +194,10 @@
                                        style="flex: 1; min-width: 160px;"
                                        oninput="updatePlaybackRate(this.value)" />
                                 <span id="playback-rate-label" style="min-width: 36px; color: var(--accent, #4ad6ff); font-weight: 600;">1.0x</span>
+                                <label style="cursor:pointer; margin-left: 8px;">
+                                    <input type="checkbox" id="bag-player-loop" onchange="setBagPlayerLoop(this.checked)">
+                                    Loop
+                                </label>
                             </div>
                             <div></div>
                         </div>
@@ -253,9 +257,23 @@
             <!-- File Player Sub-Tab -->
             <div id="file-player-subtab" class="subtab-content">
                 <div class="section card">
-                    <h2>ConPR File Player</h2>
+                    <h2>File Player</h2>
 
                     <div class="player-control">
+                        <!-- 데이터셋 형식 선택 -->
+                        <div class="player-row">
+                            <div class="player-info">
+                                <span class="player-info-key">Dataset</span>
+                                <select id="dataset-format-select" onchange="onDatasetFormatChange(this.value)"
+                                        style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                    <option value="conpr">ConPR</option>
+                                    <option value="kitti">KITTI Raw</option>
+                                    <option value="kaist">KAIST Complex Urban</option>
+                                    <option value="mulran">MulRan</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <div class="player-row">
                             <div class="player-info">
                                 <span class="player-info-key">Path</span>
@@ -263,7 +281,108 @@
                             </div>
                             <div class="player-actions">
                                 <button onclick="loadPlayerPath()">Load</button>
-                                <button onclick="saveBag()">Save bag</button>
+                            </div>
+                        </div>
+                        <div class="player-row" id="conpr-save-row">
+                            <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
+                                <div id="conpr-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                                    <div id="conpr-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
+                                    <span id="conpr-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
+                                </div>
+                                <span id="conpr-progress-msg" style="font-size:12px; color:var(--muted);"></span>
+                                <select id="bag-format-select"
+                                        style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                    <option value="ros2">ROS2</option>
+                                    <option value="ros1">ROS1</option>
+                                </select>
+                                <button id="save-bag-btn" onclick="saveBag()">Save bag</button>
+                            </div>
+                        </div>
+
+                        <!-- KITTI 전용 UI (dataset=kitti 선택 시 표시) -->
+                        <div id="kitti-ui" style="display:none;">
+                            <div class="player-row">
+                                <div class="player-info">
+                                    <span class="player-info-key">Drive</span>
+                                    <select id="kitti-drive-select"
+                                            onchange="onKittiDriveChange(this.value)"
+                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="">— Select a drive —</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="player-row">
+                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
+                                    <div id="kitti-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                                        <div id="kitti-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
+                                        <span id="kitti-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
+                                    </div>
+                                    <span id="kitti-progress-msg" style="font-size:12px; color:var(--muted);"></span>
+                                    <select id="kitti-bag-format-select"
+                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="ros2">ROS2</option>
+                                        <option value="ros1">ROS1</option>
+                                    </select>
+                                    <button id="kitti-convert-btn" onclick="convertKitti()">Save Bag</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- KAIST 전용 UI (dataset=kaist 선택 시 표시) -->
+                        <div id="kaist-ui" style="display:none;">
+                            <div class="player-row">
+                                <div class="player-info">
+                                    <span class="player-info-key">Sequence</span>
+                                    <select id="kaist-sequence-select"
+                                            onchange="onKaistSequenceChange(this.value)"
+                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="">— Select a sequence —</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="player-row">
+                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
+                                    <div id="kaist-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                                        <div id="kaist-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
+                                        <span id="kaist-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
+                                    </div>
+                                    <span id="kaist-progress-msg" style="font-size:12px; color:var(--muted);"></span>
+                                    <select id="kaist-bag-format-select"
+                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="ros2">ROS2</option>
+                                        <option value="ros1">ROS1</option>
+                                    </select>
+                                    <button id="kaist-convert-btn" onclick="convertKaist()">Save Bag</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- MulRan 전용 UI (dataset=mulran 선택 시 표시) -->
+                        <div id="mulran-ui" style="display:none;">
+                            <div class="player-row">
+                                <div class="player-info">
+                                    <span class="player-info-key">Sequence</span>
+                                    <select id="mulran-sequence-select"
+                                            onchange="onMulranSequenceChange(this.value)"
+                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="">— Select a sequence —</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="player-row">
+                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
+                                    <div id="mulran-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
+                                        <div id="mulran-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
+                                        <span id="mulran-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
+                                    </div>
+                                    <span id="mulran-progress-msg" style="font-size:12px; color:var(--muted);"></span>
+                                    <select id="mulran-bag-format-select"
+                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                        <option value="ros2">ROS2</option>
+                                        <option value="ros1">ROS1</option>
+                                    </select>
+                                    <button id="mulran-convert-btn" onclick="convertMulran()">Save Bag</button>
+                                </div>
                             </div>
                         </div>
                         <div class="player-row">
@@ -315,26 +434,28 @@
             <div id="plot-subtab" class="subtab-content active">
                 <div class="section card">
                     <h2>Plot</h2>
-                    <div class="plot-container">
+                    <div class="plot-container" id="plot-container">
                         <!-- 왼쪽 Display 창 (통합 트리 뷰) -->
-                        <div class="plot-display-panel">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                        <div class="plot-display-panel" id="plot-display-panel">
+                            <div class="plot-display-panel-header views-panel-header">
                                 <h3>Topic List</h3>
-                                <div style="display: flex; gap: 8px;">
-                                    <button onclick="expandAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Expand All</button>
-                                    <button onclick="collapseAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Collapse All</button>
+                                <button type="button" id="plot-display-collapse-btn" class="views-collapse-btn"
+                                        onclick="togglePlotDisplayPanel()"
+                                        title="토픽 목록 패널 접기/펼치기">▶</button>
+                            </div>
+                            <div id="plot-display-panel-body" class="plot-display-panel-body">
+                                <div class="plot-display-toolbar">
+                                    <button type="button" onclick="expandAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Expand All</button>
+                                    <button type="button" onclick="collapseAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Collapse All</button>
                                 </div>
-                            </div>
-                            <!-- 검색창 -->
-                            <div style="margin-bottom: 12px;">
-                                <input type="text" id="plot-search-input" placeholder="Search by name for topics..." 
-                                       style="width: 100%; padding: 8px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text);"
-                                       oninput="filterPlotTree(this.value)">
-                            </div>
-                            <!-- 통합 트리 (토픽 + 메시지) -->
-                            <div id="plot-tree" style="overflow-y: auto; max-height: 600px;">
-                                <div style="color: var(--muted); padding: 12px; text-align: center;">
-                                    Loading topics...
+                                <div class="viewer-add-btn-group plot-add-btn-group">
+                                    <button type="button" id="plot-add-topics-btn" onclick="openPlotTopicSelectionModal()">+ Add</button>
+                                </div>
+                                <!-- 통합 트리 (토픽 + 메시지) -->
+                                <div id="plot-tree" class="plot-tree-scroll">
+                                    <div style="color: var(--muted); padding: 12px; text-align: center;">
+                                        Loading topics...
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -385,32 +506,39 @@
                     </div>
                     <div class="viewer-layout">
                         <!-- 왼쪽: Display 패널 -->
-                        <div class="viewer-display-panel">
-                            <h3>Displays</h3>
-                            <!-- Fixed Frame 입력 (RViz 스타일 커스텀 드롭다운) -->
-                            <div class="fixed-frame-row">
-                                <label class="fixed-frame-label">Fixed Frame:</label>
-                                <div class="fixed-frame-combo" id="fixed-frame-combo">
-                                    <input id="fixed-frame-input" class="fixed-frame-input"
-                                           value="map"
-                                           placeholder="e.g. map"
-                                           title="TF 기준 프레임 (클릭 또는 직접 입력)"
-                                           onfocus="onFixedFrameFocus()"
-                                           oninput="onFixedFrameInput(this.value)"
-                                           onkeydown="onFixedFrameKeydown(event)"
-                                           onblur="onFixedFrameBlur(event)"
-                                           autocomplete="off" />
-                                    <button class="fixed-frame-dropdown-btn"
-                                            onmousedown="event.preventDefault(); toggleFixedFrameDropdown();"
-                                            title="사용 가능한 TF 프레임 목록">▾</button>
-                                    <div id="fixed-frame-dropdown" class="fixed-frame-dropdown" style="display:none;"></div>
+                        <div class="viewer-display-panel" id="viewer-display-panel">
+                            <div class="viewer-display-panel-header views-panel-header">
+                                <h3>Displays</h3>
+                                <button type="button" id="viewer-display-collapse-btn" class="views-collapse-btn"
+                                        onclick="toggleViewerDisplayPanel()"
+                                        title="Displays 패널 접기/펼치기">▶</button>
+                            </div>
+                            <div id="viewer-display-panel-body" class="viewer-display-panel-body">
+                                <!-- Fixed Frame 입력 (RViz 스타일 커스텀 드롭다운) -->
+                                <div class="fixed-frame-row">
+                                    <label class="fixed-frame-label">Fixed Frame:</label>
+                                    <div class="fixed-frame-combo" id="fixed-frame-combo">
+                                        <input id="fixed-frame-input" class="fixed-frame-input"
+                                               value="map"
+                                               placeholder="e.g. map"
+                                               title="TF 기준 프레임 (클릭 또는 직접 입력)"
+                                               onfocus="onFixedFrameFocus()"
+                                               oninput="onFixedFrameInput(this.value)"
+                                               onkeydown="onFixedFrameKeydown(event)"
+                                               onblur="onFixedFrameBlur(event)"
+                                               autocomplete="off" />
+                                        <button class="fixed-frame-dropdown-btn"
+                                                onmousedown="event.preventDefault(); toggleFixedFrameDropdown();"
+                                                title="사용 가능한 TF 프레임 목록">▾</button>
+                                        <div id="fixed-frame-dropdown" class="fixed-frame-dropdown" style="display:none;"></div>
+                                    </div>
                                 </div>
-                            </div>
-                            <div class="viewer-add-btn-group">
-                                <button id="viewer-add-display-btn" onclick="openAddDisplayModal()">+ Add</button>
-                            </div>
-                            <div id="viewer-display-panel-content">
-                                <!-- renderDisplayPanel()로 동적 렌더링 -->
+                                <div class="viewer-add-btn-group">
+                                    <button id="viewer-add-display-btn" onclick="openAddDisplayModal()">+ Add</button>
+                                </div>
+                                <div id="viewer-display-panel-content">
+                                    <!-- renderDisplayPanel()로 동적 렌더링 -->
+                                </div>
                             </div>
                         </div>
                         <!-- 오른쪽: 3D 뷰어 캔버스 -->
@@ -513,6 +641,25 @@
             <div class="modal-footer">
                 <button onclick="confirmTopicSelection()">Confirm</button>
                 <button onclick="closeTopicSelection()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Plot: 표시할 ROS 토픽 선택 (Bag Player Select Topic과 동일 UX) -->
+    <div id="plot-topic-selection-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Select Topics</h3>
+                <span class="close" onclick="closePlotTopicSelectionModal()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="topic-list" id="plot-modal-topic-list">
+                    <!-- checkboxes filled by openPlotTopicSelectionModal() -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" onclick="confirmPlotTopicSelectionModal()">Confirm</button>
+                <button type="button" onclick="closePlotTopicSelectionModal()">Cancel</button>
             </div>
         </div>
     </div>
