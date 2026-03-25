@@ -1429,6 +1429,7 @@ function _detachAllStreamWorkers() {
 /**
  * 3D Viewer 토픽 구독 전체 리셋 (백·데이터셋 전환 시)
  * 구독이 없어도 Display/설정/워커/백그라운드 TF 보조 구독을 비운다.
+ * ConPR·KITTI·KAIST·MulRan File Player 및 ROS bag 전환 시 동일 경로로 호출된다.
  */
 function resetViewerTopicSubscriptions() {
     const topicNames = Array.from(viewer3DState.topicSubscriptions.keys());
@@ -1737,9 +1738,9 @@ function resetAll3DViewer() {
 }
 
 /**
- * 백/데이터 재생 전환 시 이전 TF·프레임 캐시 제거 (KAIST→KITTI 등)
- * - tfFrameTree, _allKnownFrames, topicFrameIds, laserScanLastMessage 초기화
- * - TF 디스플레이는 빈 트리로 재빌드 후 다음 /tf 수신으로 갱신
+ * 백/데이터 재생 전환 시 이전 TF·프레임 캐시 제거 (ConPR·KITTI·KAIST·MulRan·bag 간 전환)
+ * - topicFrameIds, laserScanLastMessage 초기화 (/os1_points·/radar/polar 등 File Player 잔류 frame_id 제거)
+ * - TF 디스플레이는 선택된 /tf 토픽에 대해 재빌드 후 다음 메시지로 갱신
  */
 function resetBagFrameAndTFState() {
     _resetTfCameraAssistState();
@@ -1775,6 +1776,7 @@ let _lastPlayerFilePc2Topics = [];
 /**
  * 서버 load_data 응답의 player_pc2_topics 로 PC2 구독·Display 를 맞춘다.
  * - 배열: 웹 노드가 발행하는 PC2 목록(백엔드와 동일 문자열). 이전 load 추적 토픽 중 여기 없으면 해제 후 목록 반영.
+ *   (예: KITTI /kitti/velo/pointcloud, KAIST /ns2/velodyne_points 등, MulRan /os1_points)
  * - null/undefined: ROS bag 등 자동 목록 없음 → 추적 중인 file-player PC2 만 해제.
  */
 function syncPlayerFilePointCloudSubscriptions(playerPc2Topics) {
@@ -1829,6 +1831,7 @@ function syncPlayerFilePointCloudSubscriptions(playerPc2Topics) {
 
 /**
  * File Player load_data 직후: 씬 메시 + TF·프레임 캐시만 초기화 (syncPlayerFilePointCloudSubscriptions 이후 호출).
+ * MulRan direct play(/gt, /tf, /os1_points 등) 포함 모든 File Player 데이터셋에 공통 적용.
  */
 function resetViewerAfterPlayerLoad() {
     if (!viewer3DState.scene) {
@@ -1836,7 +1839,7 @@ function resetViewerAfterPlayerLoad() {
         _allKnownFrames.clear();
         viewer3DState.topicFrameIds.clear();
         viewer3DState.laserScanLastMessage.clear();
-        console.log('[Viewer] Player load: caches cleared (3D scene not initialized)');
+        console.log('[Viewer] Player load: caches cleared (3D scene not initialized, incl. MulRan/KAIST/KITTI)');
         return;
     }
     resetAll3DViewer();

@@ -32,6 +32,13 @@ const kaistState = {
     // 진행률/완료/오류는 8081 WebSocket kaist_convert_* 메시지로 수신
 };
 
+const mulranState = {
+    baseDir: null,    // 사용자가 선택한 MulRan 최상위 디렉토리
+    sequences: [],    // 시퀀스 목록 [{name, path}]
+    converting: false, // 변환 중 여부
+    // 진행률/완료/오류는 8081 WebSocket mulran_convert_* 메시지로 수신
+};
+
 // Cached DOM elements
 const domCache = {
     elements: {},
@@ -945,17 +952,19 @@ async function convertToRos1() {
 // File Player Functions
 
 /**
- * 데이터셋 형식 변경 핸들러 (ConPR / KITTI Raw / KAIST Complex Urban)
- * @param {string} format - 선택된 형식 ('conpr', 'kitti', 'kaist')
+ * 데이터셋 형식 변경 핸들러 (ConPR / KITTI Raw / KAIST Complex Urban / MulRan)
+ * @param {string} format - 선택된 형식 ('conpr', 'kitti', 'kaist', 'mulran')
  */
 function onDatasetFormatChange(format) {
     const kittiUi = domCache.get('kitti-ui');
     const kaistUi = domCache.get('kaist-ui');
+    const mulranUi = domCache.get('mulran-ui');
     const conprSaveRow = domCache.get('conpr-save-row');
 
     if (format === 'kitti') {
         kittiUi.style.display = 'block';
         if (kaistUi) { kaistUi.style.display = 'none'; }
+        if (mulranUi) { mulranUi.style.display = 'none'; }
         if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
         kittiState.baseDir = null;
         kittiState.calibDir = null;
@@ -966,15 +975,27 @@ function onDatasetFormatChange(format) {
     } else if (format === 'kaist') {
         if (kittiUi) { kittiUi.style.display = 'none'; }
         if (kaistUi) { kaistUi.style.display = 'block'; }
+        if (mulranUi) { mulranUi.style.display = 'none'; }
         if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
         kaistState.baseDir = null;
         kaistState.sequences = [];
         domCache.get('player-path-label').textContent = '—';
         _resetKaistSequenceSelect();
         _resetKaistProgressBar();
+    } else if (format === 'mulran') {
+        if (kittiUi) { kittiUi.style.display = 'none'; }
+        if (kaistUi) { kaistUi.style.display = 'none'; }
+        if (mulranUi) { mulranUi.style.display = 'block'; }
+        if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
+        mulranState.baseDir = null;
+        mulranState.sequences = [];
+        domCache.get('player-path-label').textContent = '—';
+        _resetMulranSequenceSelect();
+        _resetMulranProgressBar();
     } else {
         if (kittiUi) { kittiUi.style.display = 'none'; }
         if (kaistUi) { kaistUi.style.display = 'none'; }
+        if (mulranUi) { mulranUi.style.display = 'none'; }
         if (conprSaveRow) { conprSaveRow.style.display = ''; }
     }
 }
@@ -1017,6 +1038,28 @@ function _resetKaistProgressBar() {
     const fill = domCache.get('kaist-progress-fill');
     const text = domCache.get('kaist-progress-text');
     const msg = domCache.get('kaist-progress-msg');
+    if (bar) { bar.style.display = 'none'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msg) { msg.textContent = ''; }
+}
+
+/**
+ * MulRan 시퀀스 선택 셀렉트를 초기 상태로 리셋
+ */
+function _resetMulranSequenceSelect() {
+    const sel = domCache.get('mulran-sequence-select');
+    if (sel) { sel.innerHTML = '<option value="">— Select a sequence —</option>'; }
+}
+
+/**
+ * MulRan 변환 진행바 리셋
+ */
+function _resetMulranProgressBar() {
+    const bar = domCache.get('mulran-progress-bar');
+    const fill = domCache.get('mulran-progress-fill');
+    const text = domCache.get('mulran-progress-text');
+    const msg = domCache.get('mulran-progress-msg');
     if (bar) { bar.style.display = 'none'; }
     if (fill) { fill.style.width = '0%'; }
     if (text) { text.textContent = '0%'; }
@@ -1392,6 +1435,171 @@ async function _onKaistConvertDone(bagPath, btn, bar, fill, text, msg) {
     if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
 }
 
+// ── MulRan ────────────────────────────────────────────────────────────────────
+
+/**
+ * MulRan 디렉토리 탐색: scan_mulran API 호출 후 시퀀스 목록 업데이트
+ * ``.../Mulran`` 상위만 고르면 ParkingLot·DCC01 등 하위 시퀀스가 드롭다운에 채워지고,
+ * 시퀀스가 1개면 자동으로 load_data까지 수행한다.
+ */
+async function loadMulranDirectory() {
+    openFileBrowser(async (path) => {
+        domCache.get('player-path-label').textContent = 'Scanning...';
+        _resetMulranSequenceSelect();
+        _resetMulranProgressBar();
+
+        const result = await apiCall('/api/player/scan_mulran', { path });
+        if (!result.success) {
+            domCache.get('player-path-label').textContent = 'Scan failed';
+            alert('MulRan scan failed: ' + (result.error || result.message || 'Unknown error'));
+            return;
+        }
+
+        const sequences = result.sequences || [];
+        mulranState.baseDir = path;
+        mulranState.sequences = sequences;
+
+        domCache.get('player-path-label').textContent = path;
+
+        const sel = domCache.get('mulran-sequence-select');
+        if (sel) {
+            sel.innerHTML = '<option value="">— Select a sequence —</option>';
+            sequences.forEach((seq, idx) => {
+                const opt = document.createElement('option');
+                opt.value = String(idx);
+                opt.textContent = seq.name || seq.path || `Sequence ${idx}`;
+                sel.appendChild(opt);
+            });
+        }
+
+        if (sequences.length === 0) {
+            alert('No MulRan sequences found in the selected directory.');
+        } else {
+            console.log(`[MulRan] Found ${sequences.length} sequence(s) in ${path}`);
+            // 시퀀스가 하나뿐이면 드롭다운 선택·load_data 까지 자동 (상위 Mulran 폴더만 고른 경우)
+            if (sequences.length === 1 && sel) {
+                sel.value = '0';
+                await onMulranSequenceChange('0');
+            }
+        }
+    }, '/home/kkw/dataset');
+}
+
+/**
+ * MulRan 시퀀스 드롭다운 선택 변경 시 자동 호출.
+ * 선택된 시퀀스를 load_data API로 바로 로드 → Direct Play 활성화.
+ */
+async function onMulranSequenceChange(seqIdx) {
+    if (seqIdx === '' || seqIdx === null || !mulranState.baseDir) return;
+    const seq = mulranState.sequences[parseInt(seqIdx)];
+    if (!seq) return;
+
+    domCache.get('player-path-label').textContent = 'Loading...';
+    const sequencePath = seq.path || seq;
+    const result = await apiCall('/api/player/load_data', { path: sequencePath });
+    if (result && result.success) {
+        domCache.get('player-path-label').textContent = sequencePath;
+        console.log('[MulRan] Sequence auto-loaded:', sequencePath);
+        applyPlayerLoadDataViewerSync(result);
+
+        const autoStartCheck = domCache.get('player-auto-start');
+        if (autoStartCheck && autoStartCheck.checked) {
+            console.log('[MulRan] Auto start enabled — starting playback');
+            await playPlayer();
+        }
+    } else {
+        const errMsg = result ? (result.message || result.error || 'Unknown') : 'No response';
+        domCache.get('player-path-label').textContent = 'Load failed';
+        console.error('[MulRan] Sequence auto-load failed:', errMsg);
+    }
+}
+
+/**
+ * MulRan 시퀀스를 ROS bag으로 변환 (Save Bag).
+ * 현재 선택된 시퀀스를 /api/player/convert_mulran 으로 전송.
+ * 진행률은 WebSocket(8081)을 통해 수신.
+ */
+async function convertMulran() {
+    const sel = domCache.get('mulran-sequence-select');
+    const seqIdx = sel ? sel.value : '';
+    if (seqIdx === '' || seqIdx === null) {
+        alert('먼저 시퀀스를 선택하세요.');
+        return;
+    }
+    if (!mulranState.baseDir) {
+        alert('MulRan 디렉토리를 먼저 로드하세요.');
+        return;
+    }
+
+    const seq = mulranState.sequences[parseInt(seqIdx)];
+    if (!seq) {
+        alert('유효하지 않은 시퀀스 선택입니다.');
+        return;
+    }
+
+    const sequenceDir = seq.path || seq;
+    if (mulranState.converting) {
+        alert('이미 변환 중입니다.');
+        return;
+    }
+
+    const bagFormatSel = domCache.get('mulran-bag-format-select');
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+
+    const btn   = domCache.get('mulran-convert-btn');
+    const bar   = domCache.get('mulran-progress-bar');
+    const fill  = domCache.get('mulran-progress-fill');
+    const text  = domCache.get('mulran-progress-text');
+    const msgEl = domCache.get('mulran-progress-msg');
+
+    mulranState.converting = true;
+    if (btn) { btn.disabled = true; btn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…'; }
+    if (bar) { bar.style.display = 'block'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msgEl) { msgEl.textContent = 'Starting conversion...'; }
+
+    const outputPath = sequenceDir + '_converted';
+
+    const result = await apiCall('/api/player/convert_mulran', {
+        sequence_dir: sequenceDir,
+        output_path: outputPath,
+        bag_format: bagFormat
+    });
+
+    if (!result || !result.success) {
+        mulranState.converting = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+        if (bar) { bar.style.display = 'none'; }
+        const errMsg = result ? (result.error || result.message || 'Unknown') : 'No response';
+        alert('변환 시작 실패: ' + errMsg);
+    }
+    // 진행률·완료·오류는 _handleBackendWsMessage의 WebSocket 핸들러에서 처리
+}
+
+/**
+ * MulRan 변환 완료 후 처리: 진행바 완료 표시 → load_data로 자동 로드
+ */
+async function _onMulranConvertDone(bagPath, btn, bar, fill, text, msg) {
+    if (fill) { fill.style.width = '100%'; }
+    if (text) { text.textContent = '100%'; }
+    if (msg) { msg.textContent = 'Conversion complete! Loading bag...'; }
+
+    const loadResult = await apiCall('/api/player/load_data', { path: bagPath });
+    if (loadResult && loadResult.success) {
+        domCache.get('player-path-label').textContent = bagPath;
+        if (msg) { msg.textContent = 'Ready to play'; }
+        console.log('[MulRan] Bag loaded:', bagPath);
+        applyPlayerLoadDataViewerSync(loadResult);
+    } else {
+        if (msg) { msg.textContent = 'Load failed'; }
+        alert('Failed to load converted bag: ' + (loadResult ? (loadResult.message || loadResult.error || 'Unknown error') : 'No response'));
+    }
+
+    mulranState.converting = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+}
+
 async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
     // 진행바 100% 완료 표시
     fill.style.width = '100%';
@@ -1429,6 +1637,10 @@ async function loadPlayerPath() {
     }
     if (format === 'kaist') {
         await loadKaistDirectory();
+        return;
+    }
+    if (format === 'mulran') {
+        await loadMulranDirectory();
         return;
     }
 
@@ -2585,6 +2797,34 @@ function _handleBackendWsMessage(rawData) {
         const bar  = domCache.get('kaist-progress-bar');
         const msgEl = domCache.get('kaist-progress-msg');
         kaistState.converting = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+        if (bar) { bar.style.display = 'none'; }
+        if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
+        alert('Conversion error: ' + (msg.error || 'Unknown'));
+
+    // ── MulRan 변환 진행률 / 완료 / 오류 ─────────────────────────────────────
+    } else if (msg.type === 'mulran_convert_progress') {
+        const fill  = domCache.get('mulran-progress-fill');
+        const text  = domCache.get('mulran-progress-text');
+        const msgEl = domCache.get('mulran-progress-msg');
+        const pct = parseInt(msg.progress || 0);
+        if (fill && !isNaN(pct)) { fill.style.width = pct + '%'; }
+        if (text && !isNaN(pct)) { text.textContent = pct + '%'; }
+        if (msgEl && msg.message) { msgEl.textContent = msg.message; }
+
+    } else if (msg.type === 'mulran_convert_done') {
+        const btn   = domCache.get('mulran-convert-btn');
+        const bar   = domCache.get('mulran-progress-bar');
+        const fill  = domCache.get('mulran-progress-fill');
+        const text  = domCache.get('mulran-progress-text');
+        const msgEl = domCache.get('mulran-progress-msg');
+        _onMulranConvertDone(msg.bag_path, btn, bar, fill, text, msgEl).catch(console.error);
+
+    } else if (msg.type === 'mulran_convert_error') {
+        const btn   = domCache.get('mulran-convert-btn');
+        const bar   = domCache.get('mulran-progress-bar');
+        const msgEl = domCache.get('mulran-progress-msg');
+        mulranState.converting = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
         if (bar) { bar.style.display = 'none'; }
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }

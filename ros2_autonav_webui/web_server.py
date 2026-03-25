@@ -7,6 +7,7 @@ from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, TransformStamped
+from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
@@ -82,6 +83,9 @@ _ros_node = None
 # File Player PointCloud2 토픽 (create_publisher 이름과 반드시 동일 — API·UI 동기화의 단일 출처)
 KITTI_FILE_PLAYER_PC2_TOPIC = '/kitti/velo/pointcloud'
 KAIST_FILE_PLAYER_PC2_TOPICS = ['/ns2/velodyne_points', '/ns1/velodyne_points']
+MULRAN_FILE_PLAYER_PC2_TOPIC = '/os1_points'
+# MulRan /clock: ROSThread 기준 10ms 이상 간격 — direct play에서 과도한 publish 방지
+_MULRAN_CLOCK_MIN_INTERVAL_NS = 10_000_000
 
 
 def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
@@ -1996,6 +2000,17 @@ class WebGUINode(Node):
         self.kaist_converter_running = False   # KAIST 변환 진행 중 여부
         self.kaist_convert_thread = None       # KAIST 변환 백그라운드 스레드
 
+        # ── MulRan direct play 모드 ─────────────────────────────────────────
+        self.player_is_mulran = False
+        self.mulran_dataset_path = None
+        self.mulran_ctx = None                 # MulRanConverter._load_sequence_context 결과
+        self.mulran_events_by_stamp = {}       # stamp_ns → [sensor_name, ...] (data_stamp.csv 순서 유지)
+        self._mulran_conv = None
+        self._mulran_pubs_initialized = False
+        self._mulran_last_clock_pub_ns = None
+        self.mulran_converter_running = False
+        self.mulran_convert_thread = None
+
         self.get_logger().info('Web GUI Node initialized with full ROS2 integration')
 
     def _setup_ros_environment(self):
@@ -2215,6 +2230,32 @@ class WebGUINode(Node):
 
         self._kaist_pubs_initialized = True
         self.get_logger().info('KAIST File Player publishers initialized')
+
+    def _init_mulran_ros_interfaces(self):
+        """MulRan 전용 publisher 초기화 (lazy)."""
+        self._init_common_ros_interfaces()
+        if self._mulran_pubs_initialized:
+            return
+
+        self.mulran_ouster_pub = self.create_publisher(
+            PointCloud2, MULRAN_FILE_PLAYER_PC2_TOPIC, 1000)
+        self.mulran_radar_pub = self.create_publisher(
+            Image, '/radar/polar', 1000)
+        self.mulran_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 1000)
+        self.mulran_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 1000)
+        self.mulran_gt_pub = self.create_publisher(Odometry, '/gt', 1000)
+        self.mulran_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
+        mulran_tf_static_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.mulran_tf_static_pub = self.create_publisher(
+            TFMessage, '/tf_static', mulran_tf_static_qos)
+
+        self._mulran_pubs_initialized = True
+        self.get_logger().info('MulRan File Player publishers initialized')
 
     def _find_kitti_calib_dir(self, drive_path):
         """드라이브 경로에서 calib 디렉토리를 탐색하여 반환한다.
@@ -2912,6 +2953,30 @@ class WebGUINode(Node):
         data_stamp = os.path.join(sensor_dir, 'data_stamp.csv')
         return os.path.isfile(vlp_stamp) or os.path.isfile(data_stamp)
 
+    def _is_mulran_dataset_path(self, path: str) -> bool:
+        """MulRan 시퀀스 루트인지 판별한다.
+
+        KAIST도 sensor_data/data_stamp.csv 를 가질 수 있으므로, load_player_data 에서
+        KAIST 검사보다 먼저 호출해야 한다. MulRan은 (stamp,sensor) CSV + Ouster/레이더 레이아웃으로 구분한다.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            conv = MulRanConverter()
+            sd = conv._find_sensor_data_dir(path)
+            if sd is None:
+                return False
+            stamp_csv = os.path.join(sd, 'data_stamp.csv')
+            rows = conv._parse_data_stamp(stamp_csv)
+            if not rows:
+                return False
+            if not (conv._get_ouster_dir(sd, path) or conv._get_radar_polar_dir(sd, path)):
+                return False
+            return True
+        except Exception:
+            return False
+
     def _load_kitti_direct(self, path: str) -> dict:
         """KITTI drive 디렉토리를 직접 File Player로 로드한다.
 
@@ -2930,6 +2995,10 @@ class WebGUINode(Node):
             self.playback_thread = None
             if old_thread and old_thread.is_alive():
                 old_thread.join(timeout=1.0)
+
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
 
         ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
         try:
@@ -3159,6 +3228,10 @@ class WebGUINode(Node):
             if old_thread and old_thread.is_alive():
                 old_thread.join(timeout=1.0)
 
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
+
         sensor_dir = os.path.join(path, 'sensor_data')
         calib_dir = os.path.join(path, 'calibration')
         pose_csv = os.path.join(path, 'global_pose.csv')
@@ -3323,6 +3396,134 @@ class WebGUINode(Node):
         return self._player_load_result(
             True, 'KAIST loaded', 'kaist', list(KAIST_FILE_PLAYER_PC2_TOPICS))
 
+    def _load_mulran_direct(self, path: str) -> dict:
+        """MulRan 시퀀스를 File Player로 직접 로드한다 (data_stamp.csv 타임라인)."""
+        from ros2_autonav_webui.mulran_converter import MulRanConverter
+
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        try:
+            conv = MulRanConverter()
+            ctx = conv._load_sequence_context(path)
+        except Exception as e:
+            self.get_logger().error(f'MulRan load failed: {e}')
+            return self._player_load_result(False, str(e), 'mulran', None)
+
+        if not ctx['data_stamps']:
+            return self._player_load_result(
+                False, 'No data_stamp entries', 'mulran', None)
+
+        events_by_stamp = {}
+        for stamp_ns, sensor_name in ctx['data_stamps']:
+            events_by_stamp.setdefault(stamp_ns, []).append(sensor_name)
+
+        sorted_stamps = sorted(events_by_stamp.keys())
+        self.data_stamp = {s: 'mulran' for s in sorted_stamps}
+        self.mulran_events_by_stamp = events_by_stamp
+        self.mulran_ctx = ctx
+        self.mulran_dataset_path = path
+
+        self.player_initial_stamp = sorted_stamps[0]
+        self.player_last_stamp = sorted_stamps[-1]
+        self.player_timestamp = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos = 0
+        self.player_seek_requested = False
+        self.player_seek_to_stamp = self.player_initial_stamp
+
+        self.player_path = path
+        self.player_is_kitti = False
+        self.player_is_kaist = False
+        self.player_is_mulran = True
+        self.player_is_ros2_bag = False
+        self.player_is_ros1_bag = False
+
+        self.livox_cache = {}
+        self.cam_cache = {}
+        self._mulran_last_clock_pub_ns = None
+
+        self._init_mulran_ros_interfaces()
+
+        stamp0 = conv._ns_to_time_msg(sorted_stamps[0])
+        tf_static_msg = conv.build_mulran_tf_static_message(
+            stamp0,
+            ctx.get('calib_ouster_xyz_rpy'),
+            ctx.get('calib_radar_xyz_rpy'),
+        )
+        if tf_static_msg and getattr(self, 'mulran_tf_static_pub', None):
+            self.mulran_tf_static_pub.publish(tf_static_msg)
+            self.get_logger().info(
+                'MulRan /tf_static published: base_link → ouster, radar_polar (고정 외장 상수)')
+
+        self.player_data_loaded = True
+        self.get_logger().info(
+            f'MulRan sequence loaded: {path} ({len(self.data_stamp)} timeline stamps)'
+        )
+        pc2_topics = [MULRAN_FILE_PLAYER_PC2_TOPIC] if ctx.get('ouster_dir') else []
+        return self._player_load_result(
+            True, 'MulRan loaded', 'mulran', pc2_topics if pc2_topics else None)
+
+    def _publish_mulran_frame(self, stamp_ns: int):
+        """MulRan data_stamp 한 시각의 센서 이벤트를 publish (bag 변환과 동일 정책)."""
+        ctx = self.mulran_ctx
+        if not ctx:
+            return
+        if self._mulran_conv is None:
+            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            self._mulran_conv = MulRanConverter()
+        conv = self._mulran_conv
+        stamp_time = conv._ns_to_time_msg(stamp_ns)
+
+        for sensor_name in self.mulran_events_by_stamp.get(stamp_ns, []):
+            sn = sensor_name.lower()
+            if sn == 'ouster' and ctx['ouster_dir'] and self.mulran_ouster_pub:
+                bin_path = os.path.join(ctx['ouster_dir'], f'{stamp_ns}.bin')
+                msg = conv._make_ouster_pc2(bin_path, stamp_time)
+                if msg:
+                    self.mulran_ouster_pub.publish(msg)
+            elif sn == 'radar' and ctx['radar_dir'] and self.mulran_radar_pub:
+                png_path = os.path.join(ctx['radar_dir'], f'{stamp_ns}.png')
+                msg = conv._make_radar_image(png_path, stamp_time)
+                if msg:
+                    self.mulran_radar_pub.publish(msg)
+            elif sn == 'imu' and ctx['imu_bisect'][0] and self.mulran_imu_pub:
+                row = conv._find_nearest(ctx['imu_bisect'], stamp_ns)
+                if row:
+                    imu_msg = conv._make_imu_msg(row, stamp_time, ctx['imu_version'])
+                    self.mulran_imu_pub.publish(imu_msg)
+            elif sn == 'gps' and ctx['gps_bisect'][0] and self.mulran_gps_pub:
+                row = conv._find_nearest(ctx['gps_bisect'], stamp_ns)
+                if row:
+                    gps_msg = conv._make_navsatfix_msg(row, stamp_time)
+                    self.mulran_gps_pub.publish(gps_msg)
+
+            if ctx['global_poses'] and self.mulran_gt_pub and self.mulran_tf_pub:
+                pose = conv._find_nearest_pose(
+                    ctx['pose_stamps'], ctx['global_poses'], stamp_ns)
+                if pose:
+                    _, R, T = pose
+                    odom_msg = conv._make_gt_odometry(R, T, stamp_time)
+                    tf_msg = conv._make_dynamic_tf(R, T, stamp_time)
+                    if odom_msg:
+                        self.mulran_gt_pub.publish(odom_msg)
+                    if tf_msg:
+                        self.mulran_tf_pub.publish(tf_msg)
+
+        if self.clock_pub:
+            last = self._mulran_last_clock_pub_ns
+            if last is None or (stamp_ns - last) >= _MULRAN_CLOCK_MIN_INTERVAL_NS:
+                self._mulran_last_clock_pub_ns = stamp_ns
+                clock_msg = Clock()
+                clock_msg.clock = Time(nanoseconds=stamp_ns).to_msg()
+                self.clock_pub.publish(clock_msg)
+
     def _publish_kaist_frame(self, stamp_ns: int):
         """KAIST 프레임(VLP, SICK, Stereo, IMU, GPS, VRS, Dynamic TF)을 ROS2 토픽으로 publish한다."""
         from builtin_interfaces.msg import Time as TimeMsg
@@ -3482,6 +3683,9 @@ class WebGUINode(Node):
         self.player_is_ros2_bag = True   # player_play_toggle 에서 분기 용도
         self.player_is_kitti = False
         self.player_is_kaist = False
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.livox_cache = {}
@@ -3520,6 +3724,9 @@ class WebGUINode(Node):
         self.player_is_ros1_bag = True
         self.player_is_kitti = False
         self.player_is_kaist = False
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.livox_cache = {}
@@ -3537,6 +3744,11 @@ class WebGUINode(Node):
         if self._is_kitti_drive_path(path):
             self.get_logger().info(f'Detected KITTI drive path: {path}')
             return self._load_kitti_direct(path)
+
+        # MulRan (KAIST와 data_stamp.csv 경로가 겹칠 수 있어 KAIST보다 먼저 판별)
+        if self._is_mulran_dataset_path(path):
+            self.get_logger().info(f'Detected MulRan sequence path: {path}')
+            return self._load_mulran_direct(path)
 
         # KAIST 시퀀스 디렉토리인 경우 직접 플레이어로 로드
         if self._is_kaist_dataset_path(path):
@@ -3567,6 +3779,9 @@ class WebGUINode(Node):
         self.player_is_ros1_bag = False   # ROS1 모드 해제
         self.player_is_kitti = False      # KITTI 모드 해제
         self.player_is_kaist = False      # KAIST 모드 해제
+        self.player_is_mulran = False
+        self.mulran_ctx = None
+        self.mulran_events_by_stamp = {}
 
         # ROS1 bag 재생 중이면 중지 (PointCloud2 publisher 정리 → ConPR CustomMsg 생성 가능)
         self.stop_ros1_playback()
@@ -3902,6 +4117,92 @@ class WebGUINode(Node):
         self.kaist_convert_thread = threading.Thread(
             target=_run, daemon=True, name='kaist-convert')
         self.kaist_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
+
+    def scan_mulran_directory(self, path: str) -> dict:
+        """MulRan 데이터셋 베이스 디렉토리를 탐색하여 시퀀스 목록을 반환한다."""
+        try:
+            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            converter = MulRanConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'MulRan scan complete: {len(result["sequences"])} sequence(s) found')
+            return result
+        except Exception as e:
+            self.get_logger().error(f'MulRan scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_mulran_conversion(
+        self,
+        sequence_dir: str,
+        output_path: str,
+        sensors: list | None = None,
+        bag_format: str = 'ros2',
+    ) -> dict:
+        """MulRan 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다."""
+        if self.mulran_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        if bag_format == 'ros1':
+            seq_name = os.path.basename(sequence_dir.rstrip(os.sep))
+            output_bag_path = os.path.join(
+                os.path.dirname(sequence_dir), seq_name + '.bag'
+            )
+        else:
+            output_bag_path = output_path
+
+        def _run():
+            self.mulran_converter_running = True
+            try:
+                from ros2_autonav_webui.mulran_converter import MulRanConverter
+                converter = MulRanConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'mulran_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'MulRan conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    converter.convert_to_ros1bag(
+                        sequence_dir=sequence_dir,
+                        output_bag_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    converter.convert_to_ros2bag(
+                        sequence_dir=sequence_dir,
+                        output_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'MulRan conversion complete: {output_bag_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'mulran_convert_done',
+                    'bag_path': output_bag_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'MulRan conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'mulran_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.mulran_converter_running = False
+
+        self.mulran_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='mulran-convert')
+        self.mulran_convert_thread.start()
         return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
 
     def load_livox_data(self, stamp):
@@ -4927,6 +5228,15 @@ class WebGUINode(Node):
                         self.get_logger().warn(f'KAIST frame publish error: {e}')
                     self.player_timestamp = stamp
                     continue  # ConPR 분기 스킵
+
+                if getattr(self, 'player_is_mulran', False):
+                    try:
+                        # /clock 는 _publish_mulran_frame 내부에서 10ms 간격으로 throttle
+                        self._publish_mulran_frame(stamp)
+                    except Exception as e:
+                        self.get_logger().warn(f'MulRan frame publish error: {e}')
+                    self.player_timestamp = stamp
+                    continue
 
                 if data_type == "pose" and stamp in self.pose_data:
                     x, y, z = self.pose_data[stamp]
@@ -6047,6 +6357,32 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 response = {'success': False, 'error': 'Missing output_path'}
             else:
                 response = self.node.start_kaist_conversion(
+                    sequence_dir=sequence_dir,
+                    output_path=output_path,
+                    sensors=sensors,
+                    bag_format=bag_format,
+                )
+
+        elif parsed_path.path == '/api/player/scan_mulran':
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_mulran_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_mulran':
+            sequence_dir = data.get('sequence_dir', '')
+            output_path = data.get('output_path', '')
+            sensors = data.get('sensors')
+            bag_format = data.get('bag_format', 'ros2')
+            if not sequence_dir:
+                response = {'success': False, 'error': 'Missing sequence_dir'}
+            elif not output_path:
+                response = {'success': False, 'error': 'Missing output_path'}
+            else:
+                response = self.node.start_mulran_conversion(
                     sequence_dir=sequence_dir,
                     output_path=output_path,
                     sensors=sensors,
