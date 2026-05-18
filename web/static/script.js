@@ -1112,17 +1112,39 @@ async function loadKittiDirectory() {
 /** File Player load_data 성공 시 이전 백/뷰어 상태 전부 비우고 서버 PC2 목록만 다시 연결 */
 function applyPlayerLoadDataViewerSync(result) {
     if (!result || !result.success) return;
+
+    // 데이터 전환 전에 현재 이미지 구독 토픽 저장 (리셋 후 자동 재구독용)
+    const prevImageTopics = (typeof viewer3DState !== 'undefined' && viewer3DState.imageSubscriptions)
+        ? Array.from(viewer3DState.imageSubscriptions.keys())
+        : [];
+
     if (typeof resetViewerTopicSubscriptions === 'function') {
-        resetViewerTopicSubscriptions();
+        resetViewerTopicSubscriptions();  // _detachAllStreamWorkers → imageSubscriptions 초기화
     }
     if (typeof syncPlayerFilePointCloudSubscriptions === 'function') {
         syncPlayerFilePointCloudSubscriptions(result.player_pc2_topics);
     }
+
+    // 이전 이미지 구독 복원: 데이터 전환 후에도 이미지 패널이 자동으로 이어짐
+    if (prevImageTopics.length > 0 && typeof subscribeToImage === 'function') {
+        prevImageTopics.forEach(function(topicName) {
+            subscribeToImage(topicName);
+        });
+    }
+
     if (typeof resetBagFrameAndTFState === 'function') {
         resetBagFrameAndTFState();
     }
     if (typeof resetAll3DViewer === 'function') {
         resetAll3DViewer();
+    }
+
+    // 데이터 전환 후 /tf · /tf_static 백그라운드 구독 재시작:
+    // resetViewerTopicSubscriptions 내부의 restartBackgroundTfPipeline이
+    // rosConnected=false 타이밍 경쟁으로 실패했을 경우를 대비한 보강.
+    // TRANSIENT_LOCAL /tf_static 재수신 → MulRan·KAIST 좌표 변환 보장.
+    if (typeof window.startBackgroundFrameCollection === 'function') {
+        window.startBackgroundFrameCollection();
     }
 }
 
@@ -2322,6 +2344,8 @@ function closeSaveMapModal() {
     domCache.get('save-map-modal').style.display = 'none';
 }
 
+let _saveMapPollTimer = null;
+
 async function confirmSaveMap() {
     const directoryName = domCache.get('save-map-directory').value.trim();
 
@@ -2330,19 +2354,97 @@ async function confirmSaveMap() {
         return;
     }
 
-    console.log('Saving map to directory:', directoryName);
-
-    // Close modal
     closeSaveMapModal();
 
-    // Call API to save map
     const result = await apiCall('/api/slam/save_map', { directory: directoryName });
 
     if (result.success) {
-        alert('Map save request sent successfully!\nDirectory: ' + directoryName + '\n' + (result.message || ''));
-        console.log('Map save result:', result.message);
+        _showSaveMapStatus('Saving map to "' + directoryName + '"...', true);
+        _startSaveMapPolling();
     } else {
-        alert('Failed to save map: ' + (result.message || 'Unknown error'));
+        alert('Failed to start map save: ' + (result.message || 'Unknown error'));
+    }
+}
+
+function _showSaveMapStatus(message, saving) {
+    const area = domCache.get('slam-save-map-status-area');
+    const msgEl = domCache.get('slam-save-map-msg');
+    const spinner = domCache.get('slam-save-map-spinner');
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = saving ? 'inline-block' : 'none';
+    cancelBtn.style.display = saving ? 'inline-block' : 'none';
+    area.style.display = 'block';
+
+    if (!saving) {
+        area.style.background = '#f0fff4';
+        area.style.borderColor = '#a8e6c0';
+    } else {
+        area.style.background = '#f0f4ff';
+        area.style.borderColor = '#b3c6f7';
+    }
+}
+
+function _showSaveMapError(message) {
+    const area = domCache.get('slam-save-map-status-area');
+    const msgEl = domCache.get('slam-save-map-msg');
+    const spinner = domCache.get('slam-save-map-spinner');
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    area.style.display = 'block';
+    area.style.background = '#fff0f0';
+    area.style.borderColor = '#f7b3b3';
+}
+
+function _startSaveMapPolling() {
+    if (_saveMapPollTimer) {
+        clearInterval(_saveMapPollTimer);
+    }
+    _saveMapPollTimer = setInterval(_pollSaveMapStatus, 2000);
+}
+
+async function _pollSaveMapStatus() {
+    try {
+        const status = await apiCall('/api/slam/save_map_status');
+
+        if (status.done) {
+            clearInterval(_saveMapPollTimer);
+            _saveMapPollTimer = null;
+
+            if (status.success) {
+                _showSaveMapStatus('✓ ' + (status.message || 'Map saved successfully'), false);
+            } else if (status.message && status.message.includes('Cancelled')) {
+                _showSaveMapError('Cancelled: ' + status.message);
+            } else {
+                _showSaveMapError('✗ ' + (status.message || 'Map save failed'));
+            }
+        } else if (status.saving) {
+            _showSaveMapStatus(status.message || 'Saving...', true);
+        }
+    } catch (e) {
+        console.error('Failed to poll save map status:', e);
+    }
+}
+
+async function cancelSaveMap() {
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Cancelling...';
+
+    const result = await apiCall('/api/slam/cancel_save_map', {});
+
+    if (result.success) {
+        clearInterval(_saveMapPollTimer);
+        _saveMapPollTimer = null;
+        _showSaveMapError('Cancelled by user');
+    } else {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Cancel';
+        console.warn('Cancel failed:', result.message);
     }
 }
 

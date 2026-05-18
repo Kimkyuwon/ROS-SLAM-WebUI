@@ -1423,6 +1423,8 @@ function _detachAllStreamWorkers() {
         }
         _imgStreamWorker = null;
     }
+    // Worker 종료 후 imageSubscriptions 상태 초기화 — 미초기화 시 재구독 시도가 조기 리턴됨
+    viewer3DState.imageSubscriptions.clear();
     _pc2FrameCounts.clear();
 }
 
@@ -1882,6 +1884,16 @@ function _getPC2StreamWorker() {
 
         // pos/col 은 이미 count 크기만큼의 뷰(subarray)로 전달됨
         _uploadPC2ToGPU(topicName, pos, col, count);
+
+        // _uploadPC2ToGPU 내부에서 lazy 생성된 pcFrameGroup에 TF 즉시 적용
+        // (subscribeToPointCloud 시점에 scene이 null이어서 pcFrameGroup 미생성된 경우)
+        if (!pcFrameGroup) {
+            const newGroup = viewer3DState.pcFrameGroups.get(topicName);
+            if (newGroup) {
+                viewer3DState.topicFrameIds.set(topicName, frameId);
+                applyFrameTransformToObject(newGroup, frameId);
+            }
+        }
     };
 
     // Python Backend PC2 WebSocket 서버에 연결 (포트 8081)
@@ -1941,8 +1953,14 @@ function _getImgStreamWorker() {
 function _uploadPC2ToGPU(topicName, pos, col, count) {
     if (count === 0) return;
 
-    const pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
-    if (!pcFrameGroup) return;
+    let pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
+    if (!pcFrameGroup) {
+        // subscribeToPointCloud 호출 시 scene이 null이었던 경우 lazy 생성
+        if (!viewer3DState.scene) return;
+        pcFrameGroup = new THREE.Group();
+        viewer3DState.scene.add(pcFrameGroup);
+        viewer3DState.pcFrameGroups.set(topicName, pcFrameGroup);
+    }
 
     // 새 데이터 도착 → 다음 animate()에서 렌더 트리거
     viewer3DState.needsRender = true;
@@ -2121,11 +2139,6 @@ function _uploadPC2ToGPU(topicName, pos, col, count) {
 
 // Subscribe to PointCloud2 topic
 function subscribeToPointCloud(topicName) {
-    if (!viewer3DState.rosConnected) {
-        console.warn('[PC2] Not connected to ROS');
-        return;
-    }
-
     // 재구독 방지: 이미 구독 중인 토픽이면 건너뜀
     if (viewer3DState.topicSubscriptions.has(topicName)) {
         return viewer3DState.topicSubscriptions.get(topicName);
@@ -2134,11 +2147,15 @@ function subscribeToPointCloud(topicName) {
     console.log('[PC2] Subscribing to topic (StreamWorker):', topicName);
 
     // PC2 frame 래퍼 그룹 (frame_id → fixedFrame 변환 적용 대상)
-    let pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
-    if (!pcFrameGroup) {
-        pcFrameGroup = new THREE.Group();
-        viewer3DState.scene.add(pcFrameGroup);
-        viewer3DState.pcFrameGroups.set(topicName, pcFrameGroup);
+    // rosConnected 여부와 무관하게 생성 — binary WebSocket은 rosbridge 불필요
+    // scene이 아직 null이면 _uploadPC2ToGPU에서 lazy 생성
+    if (viewer3DState.scene) {
+        let pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
+        if (!pcFrameGroup) {
+            pcFrameGroup = new THREE.Group();
+            viewer3DState.scene.add(pcFrameGroup);
+            viewer3DState.pcFrameGroups.set(topicName, pcFrameGroup);
+        }
     }
 
     // 현재 색상 설정을 Worker에 전달
@@ -2183,12 +2200,14 @@ function subscribeToLivox(topicName) {
 
     console.log('[Livox] Subscribing to topic (StreamWorker):', topicName);
 
-    // PC2 frame 래퍼 그룹
-    let pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
-    if (!pcFrameGroup) {
-        pcFrameGroup = new THREE.Group();
-        viewer3DState.scene.add(pcFrameGroup);
-        viewer3DState.pcFrameGroups.set(topicName, pcFrameGroup);
+    // PC2 frame 래퍼 그룹 — scene이 null이면 _uploadPC2ToGPU에서 lazy 생성
+    if (viewer3DState.scene) {
+        let pcFrameGroup = viewer3DState.pcFrameGroups.get(topicName);
+        if (!pcFrameGroup) {
+            pcFrameGroup = new THREE.Group();
+            viewer3DState.scene.add(pcFrameGroup);
+            viewer3DState.pcFrameGroups.set(topicName, pcFrameGroup);
+        }
     }
 
     const settings = viewer3DState.topicSettings.get(topicName) || {};

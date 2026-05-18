@@ -2422,3 +2422,7 @@ h3 {
     box-shadow: 0 6px 20px rgba(74, 180, 255, 0.25);
     color: #aedff7;
 }
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
