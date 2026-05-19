@@ -30,6 +30,14 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+# 센서 워커가 한 프레임을 처리한 뒤 고정 sleep으로 CPU를 양보하는 시간(초).
+# 비율 기반(elapsed × ratio)은 무거운 작업(카메라×4, Ouster 등 80-120ms)에서
+# sleep이 40-60ms까지 늘어나 frame period(100ms)를 초과 → drop-frame 유발.
+# 3ms 고정으로: 무거운 작업(80ms + 3ms = 83ms) < 100ms → drop 없음,
+# 동시에 HTTP 핸들러가 3ms 창을 통해 GIL·CPU 획득 → 레이턴시 균일.
+_POST_PUBLISH_YIELD_S = 0.003
+
+
 class _SensorPublishWorker:
     """중량 센서(LiDAR/Radar) 파일 I/O + publish 전담 백그라운드 스레드.
 
@@ -66,6 +74,18 @@ class _SensorPublishWorker:
             pass
         self._thread.join(timeout=timeout)
 
+    def clear(self):
+        """큐에 적재된 미처리 항목을 모두 버린다.
+
+        정지/일시정지 직후 워커가 마지막 프레임을 publish해 발생하는
+        레이턴시 스파이크를 방지한다. 현재 처리 중인 항목은 중단할 수 없다.
+        """
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+
     # ── internal ─────────────────────────────────────────────────────────────
 
     def _run(self):
@@ -78,7 +98,15 @@ class _SensorPublishWorker:
                 break
             fn, args = item
             try:
+                t0 = time.monotonic()
                 fn(*args)
+                elapsed = time.monotonic() - t0
+                # 작업 후 고정 3ms sleep으로 GIL·CPU 양보.
+                # 비율 기반(elapsed×0.5)은 카메라×4(~80ms) 처리 시 40ms sleep →
+                # 합계 120ms > 10Hz 주기(100ms) → drop-frame 유발.
+                # 3ms 고정: 80ms 작업도 83ms < 100ms → drop 없음 + HTTP 핸들러 응답 가능.
+                if elapsed > 0.002:  # 2ms 미만 경량 작업은 sleep 불필요
+                    time.sleep(_POST_PUBLISH_YIELD_S)
             except Exception:
                 pass
 from urllib.parse import parse_qs, urlparse
@@ -2050,6 +2078,11 @@ class WebGUINode(Node):
         self.slam_output = ""
         self.slam_status = "Ready"
         self.slam_process = None
+        self.slam_optimization_process = None
+
+        # Multi-Session Optimization async state
+        self.slam_opt_running = False
+        self.slam_opt_status = {'running': False, 'done': False, 'success': None, 'message': ''}
 
         # Save map async state
         self.slam_map_saving = False
@@ -2179,7 +2212,7 @@ class WebGUINode(Node):
         self.player_seek_to_stamp  = 0      # seek 목표 타임스탬프 (HTTP 스레드→worker 전달용)
 
         # Timer for playback (matching C++ implementation)
-        self.create_timer(0.0001, self.timer_callback)  # 100us = 0.0001s
+        self.create_timer(0.01, self.timer_callback)  # 10ms = 100Hz (이전 100μs=10,000Hz는 GIL 과도 점유)
 
         # Timer for bag playback time tracking
         self.create_timer(0.1, self.bag_timer_callback)  # 100ms = 0.1s
@@ -2571,6 +2604,26 @@ class WebGUINode(Node):
         self._mulran_ouster_worker._thread.name = 'mulran-ouster'
         self._mulran_radar_worker = _SensorPublishWorker()
         self._mulran_radar_worker._thread.name = 'mulran-radar'
+
+    def _clear_all_sensor_workers(self):
+        """모든 센서 워커 큐를 비워 pending 프레임 publish를 취소한다.
+
+        정지/일시정지 직후 백그라운드 워커가 큐에 남은 대용량 프레임을
+        publish하면 ROS2/DDS 레이어가 수백 ms 동안 바빠져 HTTP ping 응답이
+        지연된다. clear()로 미처리 항목을 버려 이 현상을 방지한다.
+        모든 데이터셋(KAIST/KITTI/MulRan/ConPR) 워커를 포함한다.
+        """
+        for attr in (
+            '_kaist_vlp_left_worker', '_kaist_vlp_right_worker',
+            '_kaist_sick_back_worker', '_kaist_sick_mid_worker',
+            '_kaist_stereo_worker',
+            '_kitti_velo_worker', '_kitti_cam_worker',
+            '_mulran_ouster_worker', '_mulran_radar_worker',
+            '_conpr_livox_worker', '_conpr_cam_worker',
+        ):
+            worker = getattr(self, attr, None)
+            if worker is not None:
+                worker.clear()
 
     def _start_kaist_workers(self):
         """KAIST 전용 VLP / SICK / Stereo 백그라운드 워커를 (재)시작한다."""
@@ -3069,63 +3122,202 @@ class WebGUINode(Node):
     def run_slam_optimization(self):
         if not self.slam_map1 or not self.slam_map2:
             self.slam_status = "Error: Please load both Map 1 and Map 2"
-            return False
+            return False, self.slam_status
 
         if not self.slam_output:
             self.slam_status = "Error: Please set output directory"
-            return False
+            return False, self.slam_status
 
+        if self.slam_opt_running:
+            return False, 'Optimization already in progress'
+
+        # 이미 실행 중인 optimization 프로세스가 있으면 종료
+        if self.slam_optimization_process and self.slam_optimization_process.poll() is None:
+            self.get_logger().info('Stopping existing optimization process before restart')
+            self._stop_process(self.slam_optimization_process, 'Long-term Mapping')
+            self.slam_optimization_process = None
+
+        self.slam_opt_running = True
+        self.slam_opt_status = {'running': True, 'done': False, 'success': None, 'message': 'Initializing...'}
         self.slam_status = "Running Multi-Session Optimization..."
         self.get_logger().info('=== Starting Multi-Session SLAM Optimization ===')
         self.get_logger().info(f'Map 1: {self.slam_map1}')
         self.get_logger().info(f'Map 2: {self.slam_map2}')
         self.get_logger().info(f'Output: {self.slam_output}')
 
-        # Kill any existing processes first
-        self.kill_slam_processes()
+        # 기존 lt_mapper 잔류 프로세스 정리
+        self._kill_processes_by_pattern(['lt_mapper.launch.py', 'long_term_mapping'])
         time.sleep(0.5)
 
-        # Update parameters
+        # params.yaml 업데이트
         self.update_slam_parameters()
-        time.sleep(0.1)  # Wait for file write to complete
+        time.sleep(0.1)
 
-        # Launch optimization in new terminal
         try:
-            # Create command to run in new terminal
             bash_cmd = (
                 'source /opt/ros/jazzy/setup.bash && '
                 'source /home/kkw/localization_ws/install/setup.bash && '
                 'ros2 launch long_term_mapping lt_mapper.launch.py'
             )
+            cmd = ['bash', '-c', bash_cmd]
 
-            # Open new terminal and run the command
-            cmd = [
-                'gnome-terminal',
-                '--title=Multi-Session SLAM Optimization',
-                '--',
-                'bash', '-c',
-                f'{bash_cmd}; echo ""; echo "Press Enter to close this window..."; read'
-            ]
+            # PYTHONUNBUFFERED=1: ros2 launch(Python) stdout 버퍼링 방지
+            popen_env = dict(self._ros_env)
+            popen_env['PYTHONUNBUFFERED'] = '1'
 
-            self.get_logger().info(f'Opening new terminal for optimization')
-
-            # Launch in new terminal - it's independent from web_gui
-            subprocess.Popen(
+            self.slam_optimization_process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True  # Create new process group
+                env=popen_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True
             )
 
-            self.get_logger().info('Optimization launched in new terminal')
-            self.slam_status = "Optimization launched in new terminal"
-            return True
+            self.get_logger().info(
+                f'Long-term mapping started (PID: {self.slam_optimization_process.pid})')
+            self.slam_opt_status['message'] = 'Running optimization...'
+
+            t = threading.Thread(
+                target=self._read_optimization_output,
+                args=(self.slam_optimization_process,),
+                daemon=True
+            )
+            t.start()
+            return True, 'Optimization started'
+
         except Exception as e:
             self.slam_status = f"Error: Failed to start optimization - {str(e)}"
+            self.slam_opt_running = False
+            self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
             self.get_logger().error(f'Failed to start optimization: {str(e)}')
             import traceback
             traceback.print_exc()
-            return False
+            return False, str(e)
+
+    # 메인 터미널 및 UI 상태에 표시할 LTmapping 메시지 화이트리스트
+    _OPT_MSG_WHITELIST = (
+        'Session Edge Loading Complete.',
+        'Place Recognition Complete.',
+        'Loop Edge Generation Complete.',
+        'Pose Factor loading Complete.',
+        'Graph Optimization Complete.',
+        'Map Merging Complete.',
+        'Map Update Complete.',
+        'Long Term SLAM Complete.',
+    )
+
+    def _set_opt_success(self, process):
+        """LTmapping 노드 완료 확정 (중복 호출 방지)"""
+        if self.slam_optimization_process is not process:
+            return
+        if self.slam_opt_status.get('done'):
+            return
+        self.slam_status = "Optimization complete!"
+        self.slam_opt_status = {'running': False, 'done': True, 'success': True,
+                                'message': 'Long Term SLAM Complete.'}
+        self.slam_opt_running = False
+        self.get_logger().info('=== Long-term mapping completed successfully ===')
+
+    def _read_optimization_output(self, process):
+        """long_term_mapping 프로세스 출력을 읽어 화이트리스트 메시지만 get_logger로 포워드.
+
+        완료 감지 우선순위:
+        1. ros2 launch가 출력하는 "LTmapping" + "finished cleanly" (노드 정상 종료 이벤트)
+        2. "[LTmapping]: Long Term SLAM Complete." 메시지 감지 (메시지 방식 fallback)
+        3. process.wait() returncode=0 (전체 launch 프로세스 종료)
+        """
+        try:
+            for line in iter(process.stdout.readline, ''):
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+
+                # ── 우선순위 1: LTmapping 노드 종료 이벤트 감지 ────────────────────────
+                # ros2 launch가 출력하는 형태: "[launch]: process[LTmapping-1]: process has finished cleanly"
+                if 'LTmapping' in line and 'finished cleanly' in line:
+                    self.get_logger().info(f'[launch] LTmapping node finished: {line.strip()}')
+                    self._set_opt_success(process)
+                    continue
+
+                # ── 우선순위 2: [LTmapping]: 메시지 파싱 ────────────────────────────────
+                if '[LTmapping]:' in line:
+                    msg_part = line.split('[LTmapping]:')[-1].strip()
+                    # 화이트리스트에 있는 메시지만 출력 및 UI 업데이트
+                    if any(msg_part.startswith(w) for w in self._OPT_MSG_WHITELIST):
+                        self.get_logger().info(f'[LTmapping] {msg_part}')
+                        if self.slam_optimization_process is process \
+                                and not self.slam_opt_status.get('done'):
+                            self.slam_opt_status['message'] = msg_part
+
+                        # "Long Term SLAM Complete." 메시지 fallback 감지
+                        if msg_part.startswith('Long Term SLAM Complete.'):
+                            self._set_opt_success(process)
+
+            # ── 우선순위 3: 전체 launch 프로세스 종료 시 ────────────────────────────────
+            process.wait()
+            if self.slam_optimization_process is not process:
+                return
+            if self.slam_opt_status.get('done'):
+                return
+            if process.returncode == 0:
+                self._set_opt_success(process)
+            else:
+                msg = f'Process exited with code {process.returncode}'
+                self.slam_status = f"Optimization failed (exit: {process.returncode})"
+                self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                        'message': msg}
+                self.get_logger().error(f'Long-term mapping exited with code: {process.returncode}')
+        except Exception as e:
+            if self.slam_optimization_process is process:
+                self.get_logger().error(f'Error reading optimization output: {str(e)}')
+                self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
+        finally:
+            self.slam_opt_running = False
+            if self.slam_optimization_process is process:
+                self.slam_optimization_process = None
+
+    def cancel_optimization(self):
+        """Multi-Session Optimization 프로세스 즉시 중단.
+
+        상태를 Cancelled/Exited로 바로 설정하고 HTTP 응답을 즉시 반환한 뒤,
+        실제 프로세스 킬은 백그라운드 스레드에서 SIGKILL로 처리한다.
+
+        slam_opt_running이 False여도 (계산 완료 후 RViz가 살아있는 상태)
+        slam_optimization_process가 살아있으면 프로세스 그룹을 킬한다.
+        """
+        proc = self.slam_optimization_process
+        if not proc or proc.poll() is not None:
+            return False, 'No optimization process running'
+
+        self.get_logger().info('Cancelling optimization by user request')
+
+        # 먼저 참조를 끊어 _read_optimization_output 스레드가 상태를 덮어쓰지 못하게 한다.
+        self.slam_optimization_process = None
+        self.slam_opt_running = False
+        self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                'message': 'Cancelled by user'}
+        self.slam_status = "Optimization cancelled"
+
+        # 프로세스 킬은 백그라운드에서 처리 (HTTP 응답 블로킹 방지)
+        def _kill_proc():
+            try:
+                if proc and proc.poll() is None:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                    proc.wait(timeout=5)
+                    self.get_logger().info('Optimization process killed (SIGKILL)')
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                self.get_logger().error(f'Error killing optimization process: {str(e)}')
+
+        threading.Thread(target=_kill_proc, daemon=True).start()
+        return True, 'Cancelled'
+
+    def get_optimization_status(self):
+        """현재 optimization 상태 반환"""
+        return dict(self.slam_opt_status)
 
     def update_slam_parameters(self):
         param_file = "/home/kkw/localization_ws/src/long_term_mapping/config/params.yaml"
@@ -5014,18 +5206,18 @@ class WebGUINode(Node):
             return None
 
     def timer_callback(self):
-        """Timer callback (100μs 주기).
+        """Timer callback (10ms 주기 = 100Hz).
 
         - 정지 상태: processed_stamp 를 0 으로 리셋
-        - KITTI 재생 중: 100μs 마다 /clock 을 publish 하여 시각화 끊김 최소화
-          (KITTI 데이터는 10Hz 이지만 clock 은 더 자주 갱신해야 RViz2 가 부드러움)
+        - KITTI 재생 중: 10ms 마다 /clock 을 publish 하여 시각화 업데이트
+          (이전 100μs=10,000Hz는 GIL을 초당 200ms+ 점유 → latency 스파이크 원인)
         """
         if not self.player_playing:
             self.player_processed_stamp = 0
             return
 
-        # KITTI 재생 중: 매 timer tick 마다 /clock 갱신 (100μs → 10000Hz)
-        # player_processed_stamp 는 playback_worker 가 관리하므로 읽기만 한다.
+        # KITTI 재생 중: 10ms마다 /clock 갱신 (100Hz로도 RViz2 시각화 충분히 부드러움)
+        # playback_worker가 VLP 프레임마다(10Hz) 이미 clock 발행하므로 보조 역할
         if getattr(self, 'player_is_kitti', False) and self.clock_pub:
             try:
                 clock_ns = self.player_initial_stamp + self.player_processed_stamp
@@ -5109,6 +5301,8 @@ class WebGUINode(Node):
                 self.playback_thread = None
                 if old_thread and old_thread.is_alive():
                     old_thread.join(timeout=0.5)
+            # 워커 큐 클리어: 정지 직후 대용량 publish로 인한 레이턴시 스파이크 방지
+            self._clear_all_sensor_workers()
             self.player_processed_stamp = 0
             self.player_timestamp = self.player_initial_stamp
             self.player_slider_pos = 0
@@ -5122,6 +5316,9 @@ class WebGUINode(Node):
             self.player_paused = not self.player_paused
             status = "Paused" if self.player_paused else "Resumed"
             self.get_logger().info(f'Playback {status}')
+            if self.player_paused:
+                # 일시정지 시 워커 큐 클리어: 잔여 대용량 프레임 publish 방지
+                self._clear_all_sensor_workers()
             return True
         return False
 
@@ -5529,6 +5726,12 @@ class WebGUINode(Node):
         if self.bag_playing:
             # Stop playback
             self.get_logger().info('Stopping bag playback...')
+            # SIGSTOP 상태로 멈춰 있는 경우 먼저 재개해야 terminate가 즉시 동작함
+            if self.bag_paused and self.bag_process:
+                try:
+                    os.kill(self.bag_process.pid, signal.SIGCONT)
+                except Exception:
+                    pass
             if self.bag_process:
                 self.bag_process.terminate()
                 try:
@@ -5615,31 +5818,80 @@ class WebGUINode(Node):
         return True
 
     def bag_pause_toggle(self):
-        """Toggle bag playback pause/resume"""
+        """Toggle bag playback pause/resume.
+
+        rosbag2_interfaces 서비스(/rosbag2_player/pause, /rosbag2_player/resume)를 우선
+        사용한다. 서비스가 없을 때만 SIGSTOP/SIGCONT fallback을 사용한다.
+
+        ROS2 서비스 방식은 DDS 하트비트 스레드를 그대로 유지하므로, SIGSTOP 방식에서
+        발생하는 재개 후 메시지 재전송(old timestamp) → FAST_LIO imu_buffer clear →
+        궤적 점프 문제를 방지한다.
+        """
         if not self.bag_playing or not self.bag_process:
             self.get_logger().warn('No bag playback in progress')
             return False
 
         try:
-            if self.bag_paused:
-                # Resume playback
-                self.get_logger().info('Resuming bag playback...')
-                os.kill(self.bag_process.pid, signal.SIGCONT)
-                self.bag_paused = False
-                # Adjust start time to account for pause duration
-                pause_duration = time.time() - self.bag_pause_time
-                self.bag_start_real_time += pause_duration
-            else:
-                # Pause playback
-                self.get_logger().info('Pausing bag playback...')
-                os.kill(self.bag_process.pid, signal.SIGSTOP)
-                self.bag_paused = True
-                self.bag_pause_time = time.time()
+            from rosbag2_interfaces.srv import Pause, Resume
+            ros2_interfaces_available = True
+        except ImportError:
+            ros2_interfaces_available = False
 
-            return True
-        except Exception as e:
-            self.get_logger().error(f'Failed to pause/resume bag: {str(e)}')
-            return False
+        if self.bag_paused:
+            # ── Resume ────────────────────────────────────────────────────────
+            self.get_logger().info('Resuming bag playback...')
+            success = False
+
+            if ros2_interfaces_available:
+                try:
+                    client = self.create_client(Resume, '/rosbag2_player/resume')
+                    if client.wait_for_service(timeout_sec=1.0):
+                        future = client.call_async(Resume.Request())
+                        start = time.time()
+                        while not future.done() and time.time() - start < 2.0:
+                            time.sleep(0.01)
+                        if future.done() and future.result() is not None:
+                            success = True
+                            self.get_logger().info('Resumed via /rosbag2_player/resume service')
+                except Exception as e:
+                    self.get_logger().warn(f'rosbag2 resume service failed: {e}')
+
+            if not success:
+                # SIGSTOP/SIGCONT fallback
+                self.get_logger().info('Resuming via SIGCONT (fallback)')
+                os.kill(self.bag_process.pid, signal.SIGCONT)
+
+            self.bag_paused = False
+            pause_duration = time.time() - self.bag_pause_time
+            self.bag_start_real_time += pause_duration
+        else:
+            # ── Pause ─────────────────────────────────────────────────────────
+            self.get_logger().info('Pausing bag playback...')
+            success = False
+
+            if ros2_interfaces_available:
+                try:
+                    client = self.create_client(Pause, '/rosbag2_player/pause')
+                    if client.wait_for_service(timeout_sec=1.0):
+                        future = client.call_async(Pause.Request())
+                        start = time.time()
+                        while not future.done() and time.time() - start < 2.0:
+                            time.sleep(0.01)
+                        if future.done() and future.result() is not None:
+                            success = True
+                            self.get_logger().info('Paused via /rosbag2_player/pause service')
+                except Exception as e:
+                    self.get_logger().warn(f'rosbag2 pause service failed: {e}')
+
+            if not success:
+                # SIGSTOP/SIGCONT fallback
+                self.get_logger().info('Pausing via SIGSTOP (fallback)')
+                os.kill(self.bag_process.pid, signal.SIGSTOP)
+
+            self.bag_paused = True
+            self.bag_pause_time = time.time()
+
+        return True
 
     def set_bag_position(self, position_ratio):
         """Set bag playback position (0.0 to 1.0). ROS1/ROS2 bag 모두 지원."""
@@ -5876,7 +6128,9 @@ class WebGUINode(Node):
 
             # Stop/Pause 시 즉시 중단 (inner loop 내부에서도 체크 — 배치 처리 중 반응)
             # 배치당 최대 프레임 수 제한으로 latency 스파이크 방지
-            _batch_limit = 20
+            # 모든 데이터셋 통일 8: 이전에 KAIST만 8 이었으나 KITTI/MulRan도 batch 20은
+            # 100ms 이상 main-thread를 점유해 HTTP ping 지연 → 레이턴시 스파이크 유발
+            _batch_limit = 8
             _batch_count = 0
 
             # 인덱스를 앞으로 전진하면서 target_stamp 이하의 스탬프만 발행 (O(k))
@@ -5911,6 +6165,7 @@ class WebGUINode(Node):
                         self.get_logger().warn(f'KITTI frame publish error: {e}')
                     # player_timestamp는 예외 여부와 무관하게 항상 갱신
                     self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
                     continue  # ConPR 분기 스킵
 
                 # ── KAIST direct play ──────────────────────────────────────
@@ -5924,6 +6179,7 @@ class WebGUINode(Node):
                     except Exception as e:
                         self.get_logger().warn(f'KAIST frame publish error: {e}')
                     self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드(ping 응답 등)에 CPU 양보
                     continue  # ConPR 분기 스킵
 
                 if getattr(self, 'player_is_mulran', False):
@@ -5933,6 +6189,7 @@ class WebGUINode(Node):
                     except Exception as e:
                         self.get_logger().warn(f'MulRan frame publish error: {e}')
                     self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
                     continue
 
                 if data_type == "pose" and stamp in self.pose_data:
@@ -6488,7 +6745,8 @@ class WebGUINode(Node):
             'save_bag_progress': self.save_bag_progress,
             'save_bag_message': self.save_bag_message,
             'save_bag_saving': self.save_bag_saving,
-            'save_bag_success': self.save_bag_success
+            'save_bag_success': self.save_bag_success,
+            'speed': round(self.player_speed, 2),
         }
 
     def kill_slam_processes(self):
@@ -6597,6 +6855,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response(self.node.get_slam_state())
         elif parsed_path.path == '/api/slam/save_map_status':
             self.send_json_response(self.node.get_save_map_status())
+        elif parsed_path.path == '/api/slam/optimization_status':
+            self.send_json_response(self.node.get_optimization_status())
         elif parsed_path.path == '/api/localization/state':
             self.send_json_response(self.node.get_localization_state())
         elif parsed_path.path == '/api/player/state':
@@ -6695,8 +6955,11 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.node.set_slam_output(data.get('path', ''))
             response = {'success': True, 'status': self.node.slam_status}
         elif parsed_path.path == '/api/slam/optimize':
-            success = self.node.run_slam_optimization()
-            response = {'success': success, 'status': self.node.slam_status}
+            success, message = self.node.run_slam_optimization()
+            response = {'success': success, 'message': message, 'status': self.node.slam_status}
+        elif parsed_path.path == '/api/slam/cancel_optimization':
+            success, message = self.node.cancel_optimization()
+            response = {'success': success, 'message': message}
         elif parsed_path.path == '/api/slam/start_mapping':
             success = self.node.start_slam_mapping()
             response = {'success': success, 'message': 'SLAM mapping started' if success else 'Failed to start SLAM mapping'}
@@ -7121,6 +7384,11 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/player/set_auto_start':
             self.node.player_auto_start = data.get('auto_start', False)
             response = {'success': True}
+        elif parsed_path.path == '/api/player/set_rate':
+            rate = float(data.get('rate', 1.0))
+            rate = max(0.1, min(2.0, rate))
+            self.node.player_speed = rate
+            response = {'success': True, 'rate': rate}
         elif parsed_path.path == '/api/player/set_slider':
             position = data.get('position', 0)
             self.node.reset_player_position(position)
