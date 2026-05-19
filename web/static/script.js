@@ -53,6 +53,13 @@ const domCache = {
     }
 };
 
+// Last active subtab state per main tab (persists across tab switches)
+const lastActiveSubtab = {
+    'slam-tab': 'lidar-slam-subtab',
+    'player-tab': 'bag-player-subtab',
+    'visualization-tab': 'plot-subtab'
+};
+
 // Tab Management
 function openTab(tabId) {
     // Hide all tabs
@@ -72,15 +79,10 @@ function openTab(tabId) {
     // Scroll to top
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
-    // Select default sub-tab based on main tab
-    if (tabId === 'slam-tab') {
-        // Default to LiDAR SLAM sub-tab
-        openSubTab('lidar-slam-subtab', true);
-    } else if (tabId === 'player-tab') {
-        // Default to Bag Player sub-tab
-        openSubTab('bag-player-subtab', true);
-    } else if (tabId === 'visualization-tab') {
-        openSubTab('plot-subtab', true);
+    // Restore last active sub-tab for this main tab (fallback to default)
+    const subtabToRestore = lastActiveSubtab[tabId];
+    if (subtabToRestore) {
+        openSubTab(subtabToRestore, true);
     }
 }
 
@@ -98,6 +100,12 @@ function openSubTab(subtabId, skipEvent = false) {
     const selectedSubtab = domCache.get(subtabId);
     if (selectedSubtab) {
         selectedSubtab.classList.add('active');
+
+        // Save last active subtab for the parent main tab
+        const parentTab = selectedSubtab.closest('.tab-content');
+        if (parentTab && parentTab.id && parentTab.id in lastActiveSubtab) {
+            lastActiveSubtab[parentTab.id] = subtabId;
+        }
     }
 
     // Activate corresponding button
@@ -358,13 +366,177 @@ async function setOutput() {
     }
 }
 
+let _optPollTimer = null;
+let _optComplete = false;
+
+function handleOptBtnClick() {
+    if (_optComplete) {
+        exitOptimization();
+    } else {
+        runOptimization();
+    }
+}
+
 async function runOptimization() {
+    const runBtn = domCache.get('slam-opt-run-btn');
+    runBtn.disabled = true;
     const result = await apiCall('/api/slam/optimize', {});
     if (result.success) {
-        updateSlamStatus(result.status);
+        updateSlamStatus(result.status || 'Running...');
+        _showOptStatus('Starting optimization...', true);
+        _startOptPolling();
     } else {
-        alert('Failed to start optimization: ' + result.status);
+        runBtn.disabled = false;
+        alert('Failed to start optimization: ' + (result.message || result.status || 'Unknown error'));
     }
+}
+
+function _setOptAreaState(state) {
+    const area = domCache.get('slam-opt-status-area');
+    area.classList.remove('success', 'warn', 'error');
+    if (state) area.classList.add(state);
+}
+
+function _showOptStatus(message, running) {
+    const area = domCache.get('slam-opt-status-area');
+    const msgEl = domCache.get('slam-opt-msg');
+    const spinner = domCache.get('slam-opt-spinner');
+    const cancelBtn = domCache.get('slam-opt-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = running ? 'inline-block' : 'none';
+    cancelBtn.style.display = running ? 'inline-block' : 'none';
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = 'Cancel';
+    area.style.display = 'block';
+    area.style.opacity = '1';
+    _setOptAreaState(null);
+}
+
+function _resetOptBtn() {
+    _optComplete = false;
+    const runBtn = domCache.get('slam-opt-run-btn');
+    runBtn.disabled = false;
+    runBtn.textContent = 'Multi Session Optimization';
+}
+
+function _showOptSuccess() {
+    const area = domCache.get('slam-opt-status-area');
+    const cancelBtn = domCache.get('slam-opt-cancel-btn');
+    const spinner = domCache.get('slam-opt-spinner');
+
+    spinner.style.display = 'none';
+    cancelBtn.style.display = 'none';
+
+    area.style.transition = 'opacity 0.6s ease';
+    area.style.opacity = '0';
+    setTimeout(() => {
+        area.style.display = 'none';
+        area.style.opacity = '1';
+        area.style.transition = '';
+    }, 620);
+
+    _optComplete = true;
+    const runBtn = domCache.get('slam-opt-run-btn');
+    runBtn.disabled = false;
+    runBtn.textContent = 'Exit';
+}
+
+function _showOptError(message, autoHide = false) {
+    const area = domCache.get('slam-opt-status-area');
+    const msgEl = domCache.get('slam-opt-msg');
+    const spinner = domCache.get('slam-opt-spinner');
+    const cancelBtn = domCache.get('slam-opt-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    area.style.display = 'block';
+    area.style.opacity = '1';
+    area.style.transition = '';
+    _setOptAreaState('error');
+    _resetOptBtn();
+
+    if (autoHide) {
+        setTimeout(() => {
+            area.style.transition = 'opacity 0.6s ease';
+            area.style.opacity = '0';
+            setTimeout(() => {
+                area.style.display = 'none';
+                area.style.opacity = '1';
+                area.style.transition = '';
+            }, 620);
+        }, 3000);
+    }
+}
+
+function _startOptPolling() {
+    if (_optPollTimer) clearTimeout(_optPollTimer);
+    _optPollTimer = null;
+    _scheduleOptPoll();
+}
+
+function _scheduleOptPoll() {
+    _optPollTimer = setTimeout(_pollOptStatus, 2000);
+}
+
+async function _pollOptStatus() {
+    _optPollTimer = null;
+    try {
+        const status = await apiCall('/api/slam/optimization_status');
+
+        if (status.done) {
+            if (status.success) {
+                updateSlamStatus('Optimization complete!');
+                _showOptSuccess();
+            } else if (status.message && status.message.includes('Cancelled')) {
+                updateSlamStatus('Optimization cancelled');
+                _showOptError('Cancelled: ' + status.message, true);
+            } else {
+                updateSlamStatus('Optimization failed');
+                _showOptError('✗ ' + (status.message || 'Optimization failed'));
+            }
+        } else if (status.running) {
+            _showOptStatus(status.message || 'Running...', true);
+            _scheduleOptPoll();
+        }
+    } catch (e) {
+        console.error('Failed to poll optimization status:', e);
+        _scheduleOptPoll();
+    }
+}
+
+async function cancelOptimization() {
+    const cancelBtn = domCache.get('slam-opt-cancel-btn');
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Cancelling...';
+
+    const result = await apiCall('/api/slam/cancel_optimization', {});
+
+    if (result.success) {
+        clearTimeout(_optPollTimer);
+        _optPollTimer = null;
+        updateSlamStatus('Optimization cancelled');
+        _showOptError('Cancelled by user', true);
+    } else {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Cancel';
+        console.warn('Cancel failed:', result.message);
+    }
+}
+
+async function exitOptimization() {
+    const runBtn = domCache.get('slam-opt-run-btn');
+    runBtn.disabled = true;
+    runBtn.textContent = 'Exiting...';
+
+    await apiCall('/api/slam/cancel_optimization', {});
+
+    clearTimeout(_optPollTimer);
+    _optPollTimer = null;
+
+    updateSlamStatus('Optimization exited');
+    _resetOptBtn();
 }
 
 function updateSlamStatus(status) {
@@ -1112,17 +1284,39 @@ async function loadKittiDirectory() {
 /** File Player load_data 성공 시 이전 백/뷰어 상태 전부 비우고 서버 PC2 목록만 다시 연결 */
 function applyPlayerLoadDataViewerSync(result) {
     if (!result || !result.success) return;
+
+    // 데이터 전환 전에 현재 이미지 구독 토픽 저장 (리셋 후 자동 재구독용)
+    const prevImageTopics = (typeof viewer3DState !== 'undefined' && viewer3DState.imageSubscriptions)
+        ? Array.from(viewer3DState.imageSubscriptions.keys())
+        : [];
+
     if (typeof resetViewerTopicSubscriptions === 'function') {
-        resetViewerTopicSubscriptions();
+        resetViewerTopicSubscriptions();  // _detachAllStreamWorkers → imageSubscriptions 초기화
     }
     if (typeof syncPlayerFilePointCloudSubscriptions === 'function') {
         syncPlayerFilePointCloudSubscriptions(result.player_pc2_topics);
     }
+
+    // 이전 이미지 구독 복원: 데이터 전환 후에도 이미지 패널이 자동으로 이어짐
+    if (prevImageTopics.length > 0 && typeof subscribeToImage === 'function') {
+        prevImageTopics.forEach(function(topicName) {
+            subscribeToImage(topicName);
+        });
+    }
+
     if (typeof resetBagFrameAndTFState === 'function') {
         resetBagFrameAndTFState();
     }
     if (typeof resetAll3DViewer === 'function') {
         resetAll3DViewer();
+    }
+
+    // 데이터 전환 후 /tf · /tf_static 백그라운드 구독 재시작:
+    // resetViewerTopicSubscriptions 내부의 restartBackgroundTfPipeline이
+    // rosConnected=false 타이밍 경쟁으로 실패했을 경우를 대비한 보강.
+    // TRANSIENT_LOCAL /tf_static 재수신 → MulRan·KAIST 좌표 변환 보장.
+    if (typeof window.startBackgroundFrameCollection === 'function') {
+        window.startBackgroundFrameCollection();
     }
 }
 
@@ -1806,6 +2000,7 @@ async function updatePlayerState() {
         } else {
             domCache.get('pause-button').textContent = 'Pause';
         }
+
     }
 }
 
@@ -2322,6 +2517,8 @@ function closeSaveMapModal() {
     domCache.get('save-map-modal').style.display = 'none';
 }
 
+let _saveMapPollTimer = null;
+
 async function confirmSaveMap() {
     const directoryName = domCache.get('save-map-directory').value.trim();
 
@@ -2330,19 +2527,124 @@ async function confirmSaveMap() {
         return;
     }
 
-    console.log('Saving map to directory:', directoryName);
-
-    // Close modal
     closeSaveMapModal();
 
-    // Call API to save map
     const result = await apiCall('/api/slam/save_map', { directory: directoryName });
 
     if (result.success) {
-        alert('Map save request sent successfully!\nDirectory: ' + directoryName + '\n' + (result.message || ''));
-        console.log('Map save result:', result.message);
+        _showSaveMapStatus('Saving map to "' + directoryName + '"...', true);
+        _startSaveMapPolling();
     } else {
-        alert('Failed to save map: ' + (result.message || 'Unknown error'));
+        alert('Failed to start map save: ' + (result.message || 'Unknown error'));
+    }
+}
+
+function _setSaveMapAreaState(state) {
+    const area = domCache.get('slam-save-map-status-area');
+    area.classList.remove('success', 'warn', 'error');
+    if (state) area.classList.add(state);
+}
+
+function _showSaveMapStatus(message, saving) {
+    const area = domCache.get('slam-save-map-status-area');
+    const msgEl = domCache.get('slam-save-map-msg');
+    const spinner = domCache.get('slam-save-map-spinner');
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = saving ? 'inline-block' : 'none';
+    cancelBtn.style.display = saving ? 'inline-block' : 'none';
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = 'Cancel';
+    area.style.display = 'block';
+    area.style.opacity = '1';
+    _setSaveMapAreaState(null);
+}
+
+function _showSaveMapSuccess(message) {
+    const area = domCache.get('slam-save-map-status-area');
+    const msgEl = domCache.get('slam-save-map-msg');
+    const spinner = domCache.get('slam-save-map-spinner');
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    area.style.display = 'block';
+    area.style.opacity = '1';
+    _setSaveMapAreaState('success');
+
+    // 3초 후 페이드 아웃 후 숨김 (저장 전 초기 상태로 복귀)
+    setTimeout(() => {
+        area.style.transition = 'opacity 0.6s ease';
+        area.style.opacity = '0';
+        setTimeout(() => {
+            area.style.display = 'none';
+            area.style.opacity = '1';
+            area.style.transition = '';
+        }, 620);
+    }, 3000);
+}
+
+function _showSaveMapError(message) {
+    const area = domCache.get('slam-save-map-status-area');
+    const msgEl = domCache.get('slam-save-map-msg');
+    const spinner = domCache.get('slam-save-map-spinner');
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+
+    msgEl.textContent = message;
+    spinner.style.display = 'none';
+    cancelBtn.style.display = 'none';
+    area.style.display = 'block';
+    area.style.opacity = '1';
+    _setSaveMapAreaState('error');
+}
+
+function _startSaveMapPolling() {
+    if (_saveMapPollTimer) {
+        clearInterval(_saveMapPollTimer);
+    }
+    _saveMapPollTimer = setInterval(_pollSaveMapStatus, 2000);
+}
+
+async function _pollSaveMapStatus() {
+    try {
+        const status = await apiCall('/api/slam/save_map_status');
+
+        if (status.done) {
+            clearInterval(_saveMapPollTimer);
+            _saveMapPollTimer = null;
+
+            if (status.success) {
+                _showSaveMapSuccess('✓ ' + (status.message || 'Map saved successfully'));
+            } else if (status.message && status.message.includes('Cancelled')) {
+                _showSaveMapError('Cancelled: ' + status.message);
+            } else {
+                _showSaveMapError('✗ ' + (status.message || 'Map save failed'));
+            }
+        } else if (status.saving) {
+            _showSaveMapStatus(status.message || 'Saving...', true);
+        }
+    } catch (e) {
+        console.error('Failed to poll save map status:', e);
+    }
+}
+
+async function cancelSaveMap() {
+    const cancelBtn = domCache.get('slam-save-map-cancel-btn');
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Cancelling...';
+
+    const result = await apiCall('/api/slam/cancel_save_map', {});
+
+    if (result.success) {
+        clearInterval(_saveMapPollTimer);
+        _saveMapPollTimer = null;
+        _showSaveMapError('Cancelled by user');
+    } else {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = 'Cancel';
+        console.warn('Cancel failed:', result.message);
     }
 }
 
@@ -2527,31 +2829,33 @@ function showYamlErrorModal() {
 // ==============================================================
 // Latency Measurement
 // ==============================================================
-const _LATENCY_PING_SAMPLES = 5;
+// 병렬 요청 방식은 동시에 여러 HTTP 스레드가 경쟁해 측정값 왜곡.
+// 순차 최소값 방식: 1회씩 차례로 보내고 가장 빠른 RTT를 표시한다.
+// → 큐잉 지연을 제외한 실제 서버 응답 시간에 가장 가까운 값.
+const _LATENCY_PING_SAMPLES = 3;
 
 async function measureLatency() {
     const latencyElement = document.getElementById('latency-indicator');
     if (!latencyElement) return;
 
     try {
-        const samples = await Promise.all(
-            Array.from({ length: _LATENCY_PING_SAMPLES }, async () => {
+        let minLatency = Infinity;
+        for (let i = 0; i < _LATENCY_PING_SAMPLES; i++) {
+            try {
                 const t0 = performance.now();
                 const response = await fetch('/api/ping', { cache: 'no-store' });
                 const dt = performance.now() - t0;
-                return response.ok ? dt : null;
-            })
-        );
-        const ok = samples.filter((s) => s !== null).sort((a, b) => a - b);
-        if (ok.length === 0) {
+                if (response.ok && dt < minLatency) minLatency = dt;
+            } catch (_) { /* 개별 실패는 무시하고 나머지 샘플 계속 */ }
+        }
+
+        if (!isFinite(minLatency)) {
             latencyElement.textContent = 'latency: N/A';
             latencyElement.style.color = '#888';
             return;
         }
-        const mid = Math.floor(ok.length / 2);
-        const latency = Math.round(
-            ok.length % 2 === 1 ? ok[mid] : (ok[mid - 1] + ok[mid]) / 2
-        );
+
+        const latency = Math.round(minLatency);
         latencyElement.textContent = `latency: ${latency}ms`;
 
         if (latency < 50) {
@@ -2561,6 +2865,7 @@ async function measureLatency() {
         } else {
             latencyElement.style.color = '#F44336';
         }
+
     } catch (error) {
         latencyElement.textContent = 'latency: N/A';
         latencyElement.style.color = '#888';
@@ -2598,8 +2903,9 @@ window.addEventListener('load', () => {
     loadDefaultLocalizationConfig();
 
     // Start latency measurement (병렬 ping N회 → 중앙값, 단일 RTT 스파이크 완화)
+    // KAIST 등 무거운 데이터셋 재생 시 서버 부하 완화를 위해 3초 간격 사용
     measureLatency();
-    setInterval(measureLatency, 2000);
+    setInterval(measureLatency, 3000);
 
     // Periodic state updates (every 500ms for smoother updates)
     setInterval(() => {

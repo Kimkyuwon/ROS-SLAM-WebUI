@@ -64,6 +64,14 @@
                         <button id="slam-stop-button" onclick="stopSlamMapping()">Stop SLAM</button>
                     </div>
 
+                    <div id="slam-save-map-status-area" class="status-banner" style="display:none; margin-bottom: 12px;">
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span id="slam-save-map-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>
+                            <span id="slam-save-map-msg" style="flex:1; font-size:13px; color:var(--text);"></span>
+                            <button id="slam-save-map-cancel-btn" onclick="cancelSaveMap()" style="display:none; padding:6px 14px; min-width:auto; background:rgba(255,95,109,0.15); border:1px solid rgba(255,95,109,0.5); color:var(--danger); border-radius:8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.2s;">Cancel</button>
+                        </div>
+                    </div>
+
                     <div class="separator"></div>
 
                     <div class="status">
@@ -139,7 +147,15 @@
                     <div class="separator"></div>
 
                     <div class="action-buttons center">
-                        <button class="primary-button" onclick="runOptimization()">Multi Session Optimization</button>
+                        <button id="slam-opt-run-btn" class="primary-button" onclick="handleOptBtnClick()">Multi Session Optimization</button>
+                    </div>
+
+                    <div id="slam-opt-status-area" class="status-banner" style="display:none; margin-top: 14px;">
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span id="slam-opt-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>
+                            <span id="slam-opt-msg" style="flex:1; font-size:13px; color:var(--text);"></span>
+                            <button id="slam-opt-cancel-btn" onclick="cancelOptimization()" style="display:none; padding:6px 14px; min-width:auto; background:rgba(255,95,109,0.15); border:1px solid rgba(255,95,109,0.5); color:var(--danger); border-radius:8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.2s;">Cancel</button>
+                        </div>
                     </div>
                 </div>
             </div>

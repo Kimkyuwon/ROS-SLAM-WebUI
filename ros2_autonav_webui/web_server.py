@@ -6,7 +6,7 @@ from rclpy.time import Time
 from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
-from geometry_msgs.msg import PointStamped, TransformStamped
+from geometry_msgs.msg import PointStamped, TransformStamped, TwistStamped
 from nav_msgs.msg import Odometry
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
@@ -28,6 +28,87 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     """HTTP 서버: 요청마다 새 스레드로 처리해 저장 작업 중 폴링 응답 지연 제거"""
     daemon_threads = True
+
+
+# 센서 워커가 한 프레임을 처리한 뒤 고정 sleep으로 CPU를 양보하는 시간(초).
+# 비율 기반(elapsed × ratio)은 무거운 작업(카메라×4, Ouster 등 80-120ms)에서
+# sleep이 40-60ms까지 늘어나 frame period(100ms)를 초과 → drop-frame 유발.
+# 3ms 고정으로: 무거운 작업(80ms + 3ms = 83ms) < 100ms → drop 없음,
+# 동시에 HTTP 핸들러가 3ms 창을 통해 GIL·CPU 획득 → 레이턴시 균일.
+_POST_PUBLISH_YIELD_S = 0.003
+
+
+class _SensorPublishWorker:
+    """중량 센서(LiDAR/Radar) 파일 I/O + publish 전담 백그라운드 스레드.
+
+    참고: file_player_mulran ROSThread.cpp OusterThread / RadarpolarThread 패턴.
+
+    - 재생 워커(playback_worker)가 파일 읽기에 블록되지 않도록 분리.
+    - maxsize=1 의 bounded queue 로 "drop-frame" backpressure 구현.
+      이전 프레임 처리가 끝나지 않았으면 새 프레임을 DROP 해 타이밍 누적 방지.
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue = queue.Queue(maxsize=1)
+        self._active = True
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name='sensor-pub-worker')
+        self._thread.start()
+
+    # ── public ──────────────────────────────────────────────────────────────
+
+    def push(self, fn, *args) -> bool:
+        """비블록 push.  큐가 가득 차면 프레임을 DROP하고 False 반환."""
+        try:
+            self._queue.put_nowait((fn, args))
+            return True
+        except queue.Full:
+            return False
+
+    def stop(self, timeout: float = 1.0):
+        """백그라운드 스레드 종료 (데이터셋 전환 시 호출)."""
+        self._active = False
+        try:
+            self._queue.put_nowait(None)   # sentinel
+        except queue.Full:
+            pass
+        self._thread.join(timeout=timeout)
+
+    def clear(self):
+        """큐에 적재된 미처리 항목을 모두 버린다.
+
+        정지/일시정지 직후 워커가 마지막 프레임을 publish해 발생하는
+        레이턴시 스파이크를 방지한다. 현재 처리 중인 항목은 중단할 수 없다.
+        """
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    # ── internal ─────────────────────────────────────────────────────────────
+
+    def _run(self):
+        while self._active:
+            try:
+                item = self._queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            fn, args = item
+            try:
+                t0 = time.monotonic()
+                fn(*args)
+                elapsed = time.monotonic() - t0
+                # 작업 후 고정 3ms sleep으로 GIL·CPU 양보.
+                # 비율 기반(elapsed×0.5)은 카메라×4(~80ms) 처리 시 40ms sleep →
+                # 합계 120ms > 10Hz 주기(100ms) → drop-frame 유발.
+                # 3ms 고정: 80ms 작업도 83ms < 100ms → drop 없음 + HTTP 핸들러 응답 가능.
+                if elapsed > 0.002:  # 2ms 미만 경량 작업은 sleep 불필요
+                    time.sleep(_POST_PUBLISH_YIELD_S)
+            except Exception:
+                pass
 from urllib.parse import parse_qs, urlparse
 import subprocess
 import signal
@@ -76,12 +157,25 @@ except ImportError:
     SAVEMAP_AVAILABLE = False
     print("Warning: pose_graph_optimization SaveMap service not available. Map saving will be disabled.")
 
+try:
+    from std_srvs.srv import Trigger as RosTrigger
+    TRIGGER_AVAILABLE = True
+except ImportError:
+    TRIGGER_AVAILABLE = False
+
 # Global variables for signal handling
 _web_server = None
 _ros_node = None
 
 # File Player PointCloud2 토픽 (create_publisher 이름과 반드시 동일 — API·UI 동기화의 단일 출처)
 KITTI_FILE_PLAYER_PC2_TOPIC = '/kitti/velo/pointcloud'
+# KITTI 카메라 ID → (이미지 디렉토리명, image 토픽, camera_info 토픽, 인코딩)
+_KITTI_CAM_ID_MAP = {
+    '00': ('image_00', '/kitti/camera_gray_left/image_raw',   '/kitti/camera_gray_left/camera_info',   'mono8'),
+    '01': ('image_01', '/kitti/camera_gray_right/image_raw',  '/kitti/camera_gray_right/camera_info',  'mono8'),
+    '02': ('image_02', '/kitti/camera_color_left/image_raw',  '/kitti/camera_color_left/camera_info',  'bgr8'),
+    '03': ('image_03', '/kitti/camera_color_right/image_raw', '/kitti/camera_color_right/camera_info', 'bgr8'),
+}
 KAIST_FILE_PLAYER_PC2_TOPICS = ['/ns2/velodyne_points', '/ns1/velodyne_points']
 MULRAN_FILE_PLAYER_PC2_TOPIC = '/os1_points'
 # MulRan /clock: ROSThread 기준 10ms 이상 간격 — direct play에서 과도한 publish 방지
@@ -1119,8 +1213,9 @@ class PC2WebSocketServer:
     } if NUMPY_AVAILABLE else {}
 
     # Image WebSocket 스트리밍 설정
-    IMG_THROTTLE_SEC = 0.033   # ~30Hz
-    IMG_JPEG_QUALITY = 80      # JPEG 품질 (0~100)
+    IMG_THROTTLE_SEC = 0.1     # 10Hz — stereo 10Hz에 맞추고 과부하 방지 (30Hz → 10Hz)
+    IMG_JPEG_QUALITY = 75      # JPEG 품질 (80 → 75, 화질 유지하며 전송량 절감)
+    IMG_MAX_DIM      = 800     # 최대 단변 길이(픽셀): 초과 시 비율 유지 리사이즈
 
     def __init__(self, ros_node, port: int = 8081):
         self._node = ros_node
@@ -1154,6 +1249,12 @@ class PC2WebSocketServer:
         self._img_last_sent: dict = {}
         # CvBridge 인스턴스 (Image → OpenCV 변환)
         self._cv_bridge = CvBridge()
+        # ── Backpressure 제어: in-flight 브로드캐스트 플래그 ────────────────────
+        # 이전 ws.send()가 완료되기 전에 새 태스크가 asyncio 큐에 쌓이는 것을 방지.
+        # 브라우저가 느릴 때 asyncio 태스크 누적 → latency 기하급수적 증가를 막는다.
+        self._pc2_sending: dict = {}    # topic_name → bool
+        self._img_sending: dict = {}    # topic_name → bool
+        self._livox_sending: dict = {}  # topic_name → bool
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -1247,21 +1348,30 @@ class PC2WebSocketServer:
 
     # ── 클라이언트 / 구독 관리 ────────────────────────────────────────────────
 
+    # topic → 타입 문자열 캐시 (DDS 반복 조회 방지)
+    _topic_type_cache: dict = {}
+
     def _get_topic_type(self, topic: str) -> str | None:
-        """토픽 타입 조회 (PointCloud2 또는 CustomMsg 등)."""
+        """토픽 타입 조회 (PointCloud2 또는 CustomMsg 등) — 결과를 캐시에 저장."""
+        if topic in self._topic_type_cache:
+            return self._topic_type_cache[topic]
         try:
             for name, types in self._node.get_topic_names_and_types():
                 if name == topic and types:
+                    self._topic_type_cache[topic] = types[0]
                     return types[0]
         except Exception:
             pass
         return None
 
     def _add_client(self, topic: str, ws):
-        with self._lock:
-            topic_type = self._get_topic_type(topic)
-            is_livox = (topic_type == 'livox_ros_driver2/msg/CustomMsg' and LIVOX_AVAILABLE)
+        # DDS 조회를 lock 외부에서 수행:
+        # get_topic_names_and_types()는 DDS 전체 토픽을 열거하므로
+        # publisher가 누적될수록 느려짐 — lock 내부 호출 시 _on_pc2/_on_image 콜백이 블로킹됨
+        topic_type = self._get_topic_type(topic)
+        is_livox = (topic_type == 'livox_ros_driver2/msg/CustomMsg' and LIVOX_AVAILABLE)
 
+        with self._lock:
             if is_livox:
                 if topic not in self._livox_clients:
                     self._livox_clients[topic] = set()
@@ -1294,12 +1404,9 @@ class PC2WebSocketServer:
             if s_livox:
                 s_livox.discard(ws)
                 if not s_livox:
-                    sub = self._livox_subs.pop(topic, None)
-                    if sub:
-                        self._node.destroy_subscription(sub)
                     self._livox_clients.pop(topic, None)
-                    self._livox_last_sent.pop(topic, None)
-                    self._node.get_logger().info(f'[PC2WS] unsubscribed (Livox) ← {topic}')
+                    # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
+                    self._node.get_logger().info(f'[PC2WS] all Livox clients gone, sub kept ← {topic}')
                 return
             # PointCloud2 클라이언트
             s = self._clients.get(topic)
@@ -1307,12 +1414,41 @@ class PC2WebSocketServer:
                 return
             s.discard(ws)
             if not s:
-                sub = self._subs.pop(topic, None)
-                if sub:
-                    self._node.destroy_subscription(sub)
                 self._clients.pop(topic, None)
-                self._last_sent.pop(topic, None)
-                self._node.get_logger().info(f'[PC2WS] unsubscribed ← {topic}')
+                # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
+                self._node.get_logger().info(f'[PC2WS] all PC2 clients gone, sub kept ← {topic}')
+
+    def _presubscribe_pc2(self, topic: str):
+        """Publisher 생성과 동시에 PointCloud2 ROS2 구독을 미리 생성해 DDS 발견을 워밍업한다.
+
+        브라우저가 subscribe 명령을 보내기 전에 구독을 생성해 두면, 이후 브라우저 구독 시
+        이미 DDS peer discovery가 완료되어 있어 첫 프레임 수신 즉시 visualization에 표시된다.
+        """
+        with self._lock:
+            if topic not in self._subs:
+                sub = self._node.create_subscription(
+                    PointCloud2, topic,
+                    lambda m, t=topic: self._on_pc2(m, t),
+                    10)
+                self._subs[topic] = sub
+                self._last_sent[topic] = 0.0
+                self._node.get_logger().info(f'[PC2WS] pre-subscribed (DDS warmup) → {topic}')
+
+    def _presubscribe_image(self, topic: str):
+        """Image 토픽을 미리 구독해 DDS 발견을 워밍업한다.
+
+        Stereo 이미지처럼 브라우저가 명시적으로 subscribe하기 전부터 구독을 생성해 두면
+        재생 시작 시 즉시 이미지를 수신할 수 있다.
+        """
+        with self._lock:
+            if topic not in self._img_subs:
+                sub = self._node.create_subscription(
+                    Image, topic,
+                    lambda m, t=topic: self._on_image(m, t),
+                    10)
+                self._img_subs[topic] = sub
+                self._img_last_sent[topic] = 0.0
+                self._node.get_logger().info(f'[ImgWS] pre-subscribed (DDS warmup) → {topic}')
 
     # ── Image 클라이언트 / 구독 관리 ─────────────────────────────────────────
 
@@ -1338,17 +1474,19 @@ class PC2WebSocketServer:
                 return
             s.discard(ws)
             if not s:
-                sub = self._img_subs.pop(topic, None)
-                if sub:
-                    self._node.destroy_subscription(sub)
                 self._img_clients.pop(topic, None)
-                self._img_last_sent.pop(topic, None)
-                self._node.get_logger().info(f'[ImgWS] unsubscribed ← {topic}')
+                # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 이미지 수신
+                self._node.get_logger().info(f'[ImgWS] all clients gone, sub kept ← {topic}')
 
     # ── rclpy 콜백 (Image) ────────────────────────────────────────────────────
 
     def _on_image(self, msg: Image, topic_name: str):
-        """Image 메시지 수신 → JPEG 압축 → binary 패킷 → asyncio 브로드캐스트.
+        """Image 메시지 수신 → 비동기 JPEG 인코딩 → binary 패킷 → asyncio 브로드캐스트.
+
+        ROS2 callback 스레드 블로킹 최소화:
+          - throttle 체크 후 즉시 리턴 (인코딩을 thread pool executor로 위임)
+          - Bayer 패턴(bayer_*): 디베이어링 없이 mono8 패스스루 (~10x 비용 절감)
+          - 대형 이미지: IMG_MAX_DIM 초과 시 비율 유지 리사이즈
 
         Binary 패킷 포맷 (little-endian):
           [3B]  magic = b'IMG'
@@ -1362,47 +1500,91 @@ class PC2WebSocketServer:
         with self._lock:
             if now - self._img_last_sent.get(topic_name, 0.0) < self.IMG_THROTTLE_SEC:
                 return
+            # 이전 인코딩/브로드캐스트가 완료되지 않았으면 skip (asyncio 큐 누적 방지)
+            if self._img_sending.get(topic_name, False):
+                return
             clients = self._img_clients.get(topic_name, set()).copy()
-        if not clients:
-            return
+            if not clients:
+                return
+            self._img_last_sent[topic_name] = now
+            self._img_sending[topic_name] = True
 
+        # 무거운 인코딩 작업을 thread pool로 위임 → ROS2 callback 스레드 즉시 해방
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._encode_and_broadcast_image(msg, topic_name, clients), loop)
+        else:
+            with self._lock:
+                self._img_sending[topic_name] = False
+
+    def _encode_image_to_payload(self, msg: Image, topic_name: str) -> bytes | None:
+        """JPEG 인코딩 (thread pool executor에서 실행 — ROS2 callback 스레드 외부).
+
+        최적화:
+          - bayer_* encoding: 디베이어링 없이 raw 데이터를 mono8로 직접 사용
+          - 대형 이미지: IMG_MAX_DIM 초과 시 비율 유지 축소
+        """
         try:
-            # sensor_msgs/Image → OpenCV BGR 이미지 → JPEG 압축
             encoding = msg.encoding.lower()
-            if encoding in ('rgb8', 'bgr8', 'mono8', 'rgba8', 'bgra8',
-                            '8uc1', '8uc3', '8uc4'):
+            if encoding.startswith('bayer_'):
+                # Bayer 패턴 → mono8 패스스루: cv2.cvtColor(Bayer→BGR) 비용 제거
+                raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+                cv_img = raw.reshape(msg.height, msg.width)
+            elif encoding in ('rgb8', 'bgr8', 'mono8', 'rgba8', 'bgra8',
+                              '8uc1', '8uc3', '8uc4'):
                 cv_img = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             else:
-                # 지원되지 않는 encoding은 bgr8로 강제 변환 시도
                 try:
                     cv_img = self._cv_bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
                 except Exception:
-                    return
+                    return None
+
+            # 대형 이미지 리사이즈 (IMG_MAX_DIM 초과 시)
+            h, w = cv_img.shape[:2]
+            if max(h, w) > self.IMG_MAX_DIM:
+                scale = self.IMG_MAX_DIM / max(h, w)
+                cv_img = cv2.resize(cv_img,
+                                    (int(w * scale), int(h * scale)),
+                                    interpolation=cv2.INTER_LINEAR)
 
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.IMG_JPEG_QUALITY]
             ret, jpeg_buf = cv2.imencode('.jpg', cv_img, encode_param)
             if not ret:
-                return
+                return None
             jpeg_bytes = jpeg_buf.tobytes()
+
+            topic_bytes = topic_name.encode('utf-8')
+            header = struct.pack('<3sBII',
+                                 b'IMG', 1,
+                                 len(topic_bytes),
+                                 len(jpeg_bytes))
+            return header + topic_bytes + jpeg_bytes
         except Exception as e:
             self._node.get_logger().warn(f'[ImgWS] encode error ({topic_name}): {e}')
-            return
+            return None
 
-        with self._lock:
-            self._img_last_sent[topic_name] = now
+    async def _encode_and_broadcast_image(self, msg: Image, topic_name: str, clients: set):
+        """인코딩(thread pool) → 브로드캐스트(asyncio) 파이프라인.
 
-        # 바이너리 패킷 조립: [IMG][version][topic_len][jpeg_len][topic_name][jpeg_data]
-        topic_bytes = topic_name.encode('utf-8')
-        header = struct.pack('<3sBII',
-                             b'IMG', 1,
-                             len(topic_bytes),
-                             len(jpeg_bytes))
-        payload = header + topic_bytes + jpeg_bytes
-
-        loop = self._loop
-        if loop and loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self._broadcast(clients, payload), loop)
+        완료 후 반드시 _img_sending 플래그를 해제하여 다음 콜백이 처리될 수 있도록 한다.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            payload = await loop.run_in_executor(
+                None,  # 기본 ThreadPoolExecutor
+                self._encode_image_to_payload,
+                msg,
+                topic_name,
+            )
+            if payload:
+                await self._broadcast(clients, payload)
+        except Exception as e:
+            self._node.get_logger().warn(
+                f'[ImgWS] async encode/broadcast error ({topic_name}): {e}')
+        finally:
+            with self._lock:
+                self._img_sending[topic_name] = False
 
     # ── rclpy 콜백 ───────────────────────────────────────────────────────────
 
@@ -1422,8 +1604,15 @@ class PC2WebSocketServer:
         with self._lock:
             if now - self._last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
                 return
+            # 이전 브로드캐스트가 완료되지 않았으면 skip (asyncio 큐 누적 방지)
+            if self._pc2_sending.get(topic_name, False):
+                return
+            self._last_sent[topic_name] = now
+            self._pc2_sending[topic_name] = True
             clients = self._clients.get(topic_name, set()).copy()
         if not clients:
+            with self._lock:
+                self._pc2_sending[topic_name] = False
             return
 
         # ── 1) JSON 메타데이터 패킷 (헤더 스탬프 등) ────────────────────────
@@ -1437,18 +1626,59 @@ class PC2WebSocketServer:
             'point_count':   msg.width * msg.height,
         }, separators=(',', ':'))
 
-        # ── 2) binary 패킷 (XYZ + color) ────────────────────────────────────
-        payload = self._build_payload(msg, topic_name)
-        if payload is None:
-            return
-
-        with self._lock:
-            self._last_sent[topic_name] = now
-
+        # ── 2) _build_payload + broadcast를 asyncio coroutine으로 위임 ────────
+        # _build_payload(numpy heavy)를 run_in_executor로 실행해
+        # rclpy 콜백 스레드 블로킹을 제거하고, 완료 후 _pc2_sending 플래그를 해제한다.
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._broadcast_both(clients, meta_json, payload), loop)
+                self._build_and_broadcast_pc2(msg, topic_name, clients, meta_json), loop)
+        else:
+            with self._lock:
+                self._pc2_sending[topic_name] = False
+
+    async def _build_and_broadcast_livox(
+            self, msg, topic_name: str, clients: set, meta_json: str):
+        """_build_livox_payload를 thread pool에서 실행 후 브로드캐스트."""
+        try:
+            loop = asyncio.get_running_loop()
+            payload = await loop.run_in_executor(
+                None, self._build_livox_payload, msg, topic_name)
+            if payload:
+                for ws in list(clients):
+                    try:
+                        await ws.send(meta_json)
+                        await ws.send(payload)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self._node.get_logger().warn(
+                f'[PC2WS] async build/broadcast Livox error ({topic_name}): {e}')
+        finally:
+            with self._lock:
+                self._livox_sending[topic_name] = False
+
+    async def _build_and_broadcast_pc2(
+            self, msg: 'PointCloud2', topic_name: str, clients: set, meta_json: str):
+        """_build_payload를 thread pool executor에서 실행 후 브로드캐스트.
+
+        완료 후 반드시 _pc2_sending 플래그를 해제하여 다음 콜백이 처리될 수 있도록 한다.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            payload = await loop.run_in_executor(None, self._build_payload, msg, topic_name)
+            if payload:
+                for ws in list(clients):
+                    try:
+                        await ws.send(meta_json)
+                        await ws.send(payload)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self._node.get_logger().warn(f'[PC2WS] async build/broadcast error ({topic_name}): {e}')
+        finally:
+            with self._lock:
+                self._pc2_sending[topic_name] = False
 
     async def _broadcast_both(self, clients, meta_json: str, binary_payload: bytes):
         """각 클라이언트에 JSON 메타데이터(text) + binary 데이터 순서로 전송."""
@@ -1807,9 +2037,14 @@ class PC2WebSocketServer:
         with self._lock:
             if now - self._livox_last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
                 return
+            # 이전 브로드캐스트가 완료되지 않았으면 skip (asyncio 큐 누적 방지)
+            if self._livox_sending.get(topic_name, False):
+                return
             clients = self._livox_clients.get(topic_name, set()).copy()
-        if not clients:
-            return
+            if not clients:
+                return
+            self._livox_last_sent[topic_name] = now
+            self._livox_sending[topic_name] = True
 
         stamp = msg.header.stamp if msg.header else None
         frame_id = msg.header.frame_id if msg.header else ''
@@ -1824,17 +2059,13 @@ class PC2WebSocketServer:
             'point_count': point_count,
         }, separators=(',', ':'))
 
-        payload = self._build_livox_payload(msg, topic_name)
-        if payload is None:
-            return
-
-        with self._lock:
-            self._livox_last_sent[topic_name] = now
-
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._broadcast_both(clients, meta_json, payload), loop)
+                self._build_and_broadcast_livox(msg, topic_name, clients, meta_json), loop)
+        else:
+            with self._lock:
+                self._livox_sending[topic_name] = False
 
 
 class WebGUINode(Node):
@@ -1847,6 +2078,16 @@ class WebGUINode(Node):
         self.slam_output = ""
         self.slam_status = "Ready"
         self.slam_process = None
+        self.slam_optimization_process = None
+
+        # Multi-Session Optimization async state
+        self.slam_opt_running = False
+        self.slam_opt_status = {'running': False, 'done': False, 'success': None, 'message': ''}
+
+        # Save map async state
+        self.slam_map_saving = False
+        self.slam_map_save_cancelled = False
+        self.slam_map_save_status = {'saving': False, 'done': False, 'success': None, 'message': ''}
 
         # Localization state
         self.localization_process = None
@@ -1911,7 +2152,12 @@ class WebGUINode(Node):
         self.stop_sub = None
         # KITTI 전용 publishers
         self.kitti_velo_pub = None
-        self.kitti_cam_pub = None
+        self.kitti_cam_pub = None          # 하위호환: /kitti/camera_color_left/image_raw
+        self.kitti_imu_pub = None          # /kitti/oxts/imu
+        self.kitti_gps_fix_pub = None      # /kitti/oxts/gps/fix
+        self.kitti_gps_vel_pub = None      # /kitti/oxts/gps/vel
+        self.kitti_cam_pubs = {}           # {cam_id: publisher} — 4채널 카메라
+        self.kitti_cam_info_pubs = {}      # {cam_id: publisher} — camera_info
         self.kitti_tf_static_pub = None    # /tf_static publisher
         self.kitti_tf_pub = None           # /tf publisher
         # KITTI calib / oxts / TF 관련 상태
@@ -1942,14 +2188,22 @@ class WebGUINode(Node):
         # SLAM Subscribers — lazy initialized on start_slam_mapping()
         self.slam_complete_sub = None
 
+        # KITTI 카메라 방향 감지 캐시 (로드 시 1회만 탐색)
+        self.kitti_cam_dir = ''            # 하위호환 (단일 카메라)
+        self.kitti_cam_encoding = ''       # 하위호환 (단일 카메라)
+        self.kitti_cam_dirs_map = {}       # {cam_id: dir_path} — 존재하는 카메라 dirs
+        self.kitti_calib_cam_to_cam = None  # camera_info 생성용 calib 데이터
+
         # File Player data structures
         self.data_stamp = {}
         self.pose_data = {}
         self.imu_data = {}
-        self.livox_file_list = []  # List of LiDAR .bin files
-        self.cam_file_list = []    # List of camera image files
-        self.livox_cache = {}      # Cache for loaded LiDAR data
-        self.cam_cache = {}        # Cache for loaded camera images
+        self.livox_file_list = []      # List of LiDAR .bin files
+        self.cam_file_list = []        # List of camera image files
+        self.livox_stamp_to_path = {}  # stamp → .bin 경로 맵 (O(1) 룩업, os.path.exists 제거)
+        self.cam_stamp_to_path = {}    # stamp → 이미지 경로 맵 (O(1) 룩업)
+        self.livox_cache = {}          # Cache for loaded LiDAR data
+        self.cam_cache = {}            # Cache for loaded camera images
 
         # Playback thread
         self.playback_thread = None
@@ -1958,7 +2212,7 @@ class WebGUINode(Node):
         self.player_seek_to_stamp  = 0      # seek 목표 타임스탬프 (HTTP 스레드→worker 전달용)
 
         # Timer for playback (matching C++ implementation)
-        self.create_timer(0.0001, self.timer_callback)  # 100us = 0.0001s
+        self.create_timer(0.01, self.timer_callback)  # 10ms = 100Hz (이전 100μs=10,000Hz는 GIL 과도 점유)
 
         # Timer for bag playback time tracking
         self.create_timer(0.1, self.bag_timer_callback)  # 100ms = 0.1s
@@ -1999,17 +2253,52 @@ class WebGUINode(Node):
         self._kaist_conv = None                 # KaistConverter 캐시 (프레임당 인스턴스 생성 방지)
         self.kaist_converter_running = False   # KAIST 변환 진행 중 여부
         self.kaist_convert_thread = None       # KAIST 변환 백그라운드 스레드
+        # 성능 최적화: 센서별 stamp 세트 (O(1) 룩업 — os.path.isfile() 대체)
+        self.kaist_vlp_left_stamps: set = set()
+        self.kaist_vlp_right_stamps: set = set()
+        self.kaist_sick_back_stamps: set = set()
+        self.kaist_sick_mid_stamps: set = set()
+        self.kaist_stereo_stamps: set = set()
+        self.kaist_imu_stamps: set = set()
+        self.kaist_gps_stamps: set = set()
+        self.kaist_vrs_stamps: set = set()
+        self.kaist_pose_stamp_set: set = set()    # global_pose 타임스탬프 세트
+        self.kaist_pose_stamps_sorted: list = []  # 정렬된 pose 타임스탬프 (bisect용)
+        self.kaist_static_tf_msg = None           # 로드 시 생성된 static TF (매 프레임 /tf에 포함용)
+        # 성능 최적화: 경로 캐시 (매 프레임 os.path.join 생략)
+        self.kaist_vlp_left_dir: str = ''
+        self.kaist_vlp_right_dir: str = ''
+        self.kaist_sick_back_dir: str = ''
+        self.kaist_sick_mid_dir: str = ''
+        self.kaist_stereo_left_dir: str = ''
+        self.kaist_stereo_right_dir: str = ''
 
         # ── MulRan direct play 모드 ─────────────────────────────────────────
         self.player_is_mulran = False
         self.mulran_dataset_path = None
         self.mulran_ctx = None                 # MulRanConverter._load_sequence_context 결과
         self.mulran_events_by_stamp = {}       # stamp_ns → [sensor_name, ...] (data_stamp.csv 순서 유지)
+        self.mulran_static_tf_msg = None       # 로드 시 생성된 static TF (매 프레임 /tf에 포함용)
         self._mulran_conv = None
         self._mulran_pubs_initialized = False
         self._mulran_last_clock_pub_ns = None
         self.mulran_converter_running = False
         self.mulran_convert_thread = None
+        # 레퍼런스 OusterThread/RadarpolarThread 패턴: 센서별 백그라운드 publish 워커
+        self._mulran_ouster_worker: '_SensorPublishWorker | None' = None
+        self._mulran_radar_worker: '_SensorPublishWorker | None' = None
+        # KAIST VLP/SICK/Stereo 백그라운드 publish 워커
+        self._kaist_vlp_left_worker: '_SensorPublishWorker | None' = None
+        self._kaist_vlp_right_worker: '_SensorPublishWorker | None' = None
+        self._kaist_sick_back_worker: '_SensorPublishWorker | None' = None
+        self._kaist_sick_mid_worker: '_SensorPublishWorker | None' = None
+        self._kaist_stereo_worker: '_SensorPublishWorker | None' = None
+        # KITTI Velodyne / Camera 백그라운드 publish 워커
+        self._kitti_velo_worker: '_SensorPublishWorker | None' = None
+        self._kitti_cam_worker: '_SensorPublishWorker | None' = None
+        # ConPR Livox / Camera 백그라운드 publish 워커
+        self._conpr_livox_worker: '_SensorPublishWorker | None' = None
+        self._conpr_cam_worker: '_SensorPublishWorker | None' = None
 
         self.get_logger().info('Web GUI Node initialized with full ROS2 integration')
 
@@ -2127,13 +2416,13 @@ class WebGUINode(Node):
         if self._conpr_pubs_initialized:
             return
 
-        self.pose_pub     = self.create_publisher(PointStamped, '/pose/position', 1000)
-        self.imu_pub      = self.create_publisher(Imu, '/imu', 1000)
-        self.cam_pub      = self.create_publisher(Image, '/camera/color/image', 1000)
-        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 1000)
+        self.pose_pub     = self.create_publisher(PointStamped, '/pose/position', 10)
+        self.imu_pub      = self.create_publisher(Imu, '/imu', 20)
+        self.cam_pub      = self.create_publisher(Image, '/camera/color/image', 5)
+        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 10)
 
         if LIVOX_AVAILABLE:
-            self.livox_pub = self.create_publisher(CustomMsg, '/livox/lidar', 1000)
+            self.livox_pub = self.create_publisher(CustomMsg, '/livox/lidar', 5)
 
         self._conpr_pubs_initialized = True
         self.get_logger().info('ConPR File Player publishers initialized')
@@ -2166,6 +2455,47 @@ class WebGUINode(Node):
         self._conpr_pubs_initialized = False
         self.get_logger().info('ConPR publishers destroyed (for bag playback)')
 
+    def _destroy_kaist_publishers(self):
+        """KAIST publishers 정리.
+
+        데이터셋 전환 시 DDS 큐를 비워 latency 누적을 방지한다.
+        다음 KAIST 로드 시 _init_kaist_ros_interfaces()가 새로 생성한다.
+        """
+        if not self._kaist_pubs_initialized:
+            return
+        _pubs = [
+            ('kaist_imu_pub', self.kaist_imu_pub),
+            ('kaist_gps_pub', self.kaist_gps_pub),
+            ('kaist_vrs_pub', self.kaist_vrs_pub),
+            ('kaist_vlp_left_pub', self.kaist_vlp_left_pub),
+            ('kaist_vlp_right_pub', self.kaist_vlp_right_pub),
+            ('kaist_sick_back_pub', self.kaist_sick_back_pub),
+            ('kaist_sick_mid_pub', self.kaist_sick_mid_pub),
+            ('kaist_stereo_left_pub', self.kaist_stereo_left_pub),
+            ('kaist_stereo_right_pub', self.kaist_stereo_right_pub),
+            ('kaist_tf_static_pub', self.kaist_tf_static_pub),
+            ('kaist_tf_pub', self.kaist_tf_pub),
+        ]
+        for name, pub in _pubs:
+            if pub is not None:
+                try:
+                    self.destroy_publisher(pub)
+                except Exception as e:
+                    self.get_logger().warn(f'[KAIST] destroy {name}: {e}')
+        self.kaist_imu_pub = None
+        self.kaist_gps_pub = None
+        self.kaist_vrs_pub = None
+        self.kaist_vlp_left_pub = None
+        self.kaist_vlp_right_pub = None
+        self.kaist_sick_back_pub = None
+        self.kaist_sick_mid_pub = None
+        self.kaist_stereo_left_pub = None
+        self.kaist_stereo_right_pub = None
+        self.kaist_tf_static_pub = None
+        self.kaist_tf_pub = None
+        self._kaist_pubs_initialized = False
+        self.get_logger().info('KAIST publishers destroyed (DDS queue cleared)')
+
     def _init_kitti_ros_interfaces(self):
         """KITTI 전용 publisher 초기화 (lazy).
 
@@ -2176,10 +2506,21 @@ class WebGUINode(Node):
         if self._kitti_pubs_initialized:
             return
 
+        # QoS: 대용량 메시지(PC2/Image)는 depth=5, 경량 메시지(IMU/GPS/TF)는 depth=10
         self.kitti_velo_pub = self.create_publisher(
-            PointCloud2, KITTI_FILE_PLAYER_PC2_TOPIC, 1000)
-        self.kitti_cam_pub  = self.create_publisher(
-            Image, '/kitti/camera_color_left/image_raw', 1000)
+            PointCloud2, KITTI_FILE_PLAYER_PC2_TOPIC, 5)
+
+        # 경량 센서 데이터 publishers (IMU, GPS)
+        self.kitti_imu_pub     = self.create_publisher(Imu, '/kitti/oxts/imu', 20)
+        self.kitti_gps_fix_pub = self.create_publisher(NavSatFix, '/kitti/oxts/gps/fix', 10)
+        self.kitti_gps_vel_pub = self.create_publisher(TwistStamped, '/kitti/oxts/gps/vel', 10)
+
+        # 카메라 publishers (4채널 × image + camera_info)
+        for cam_id, (_, img_topic, info_topic, _enc) in _KITTI_CAM_ID_MAP.items():
+            self.kitti_cam_pubs[cam_id]      = self.create_publisher(Image,      img_topic,  5)
+            self.kitti_cam_info_pubs[cam_id] = self.create_publisher(CameraInfo, info_topic, 5)
+        # 하위호환: kitti_cam_pub → color_left
+        self.kitti_cam_pub = self.kitti_cam_pubs.get('02')
 
         # /tf_static: transient_local QoS → 늦게 subscribe해도 최신 값 수신
         tf_static_qos = QoSProfile(
@@ -2193,6 +2534,9 @@ class WebGUINode(Node):
         self._kitti_pubs_initialized = True
         self.get_logger().info('KITTI File Player publishers initialized')
 
+        # DDS warmup: KITTI velodyne PC2 구독 미리 생성 (첫 프레임 즉시 수신 보장)
+        self.pc2_ws_server._presubscribe_pc2(KITTI_FILE_PLAYER_PC2_TOPIC)
+
     def _init_kaist_ros_interfaces(self):
         """KAIST 전용 publisher 초기화 (lazy).
 
@@ -2203,21 +2547,22 @@ class WebGUINode(Node):
         if self._kaist_pubs_initialized:
             return
 
-        self.kaist_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 1000)
-        self.kaist_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 1000)
-        self.kaist_vrs_pub = self.create_publisher(NavSatFix, '/vrs_gps/fix', 1000)
+        # QoS: 대용량 메시지(PC2/LaserScan/Image)는 depth=5, 경량 메시지(IMU/GPS)는 depth=10~20
+        self.kaist_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 20)
+        self.kaist_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 10)
+        self.kaist_vrs_pub = self.create_publisher(NavSatFix, '/vrs_gps/fix', 10)
         self.kaist_vlp_left_pub = self.create_publisher(
-            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[0], 1000)
+            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[0], 5)
         self.kaist_vlp_right_pub = self.create_publisher(
-            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[1], 1000)
+            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[1], 5)
         self.kaist_sick_back_pub = self.create_publisher(
-            LaserScan, '/lms511_back/scan', 1000)
+            LaserScan, '/lms511_back/scan', 5)
         self.kaist_sick_mid_pub = self.create_publisher(
-            LaserScan, '/lms511_middle/scan', 1000)
+            LaserScan, '/lms511_middle/scan', 5)
         self.kaist_stereo_left_pub = self.create_publisher(
-            Image, '/stereo/left/image_raw', 1000)
+            Image, '/stereo/left/image_raw', 5)
         self.kaist_stereo_right_pub = self.create_publisher(
-            Image, '/stereo/right/image_raw', 1000)
+            Image, '/stereo/right/image_raw', 5)
 
         tf_static_qos = QoSProfile(
             depth=1,
@@ -2231,19 +2576,96 @@ class WebGUINode(Node):
         self._kaist_pubs_initialized = True
         self.get_logger().info('KAIST File Player publishers initialized')
 
+        # DDS warmup: publisher 생성과 동시에 PC2 구독을 미리 생성해 첫 프레임 즉시 수신 보장
+        # (브라우저 subscribe 명령이 도달하기 전부터 DDS peer discovery 진행)
+        for _topic in KAIST_FILE_PLAYER_PC2_TOPICS:
+            self.pc2_ws_server._presubscribe_pc2(_topic)
+
+    # ── 센서 백그라운드 워커 관리 ────────────────────────────────────────────
+
+    def _stop_heavy_sensor_workers(self):
+        """모든 중량 센서 publish 워커를 정지한다 (데이터셋 전환 전 호출)."""
+        for attr in (
+            '_mulran_ouster_worker', '_mulran_radar_worker',
+            '_kaist_vlp_left_worker', '_kaist_vlp_right_worker',
+            '_kaist_sick_back_worker', '_kaist_sick_mid_worker',
+            '_kaist_stereo_worker',
+            '_kitti_velo_worker', '_kitti_cam_worker',
+            '_conpr_livox_worker', '_conpr_cam_worker',
+        ):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.stop(timeout=0.5)
+                setattr(self, attr, None)
+
+    def _start_mulran_workers(self):
+        """MulRan 전용 Ouster / Radar 백그라운드 워커를 (재)시작한다."""
+        self._mulran_ouster_worker = _SensorPublishWorker()
+        self._mulran_ouster_worker._thread.name = 'mulran-ouster'
+        self._mulran_radar_worker = _SensorPublishWorker()
+        self._mulran_radar_worker._thread.name = 'mulran-radar'
+
+    def _clear_all_sensor_workers(self):
+        """모든 센서 워커 큐를 비워 pending 프레임 publish를 취소한다.
+
+        정지/일시정지 직후 백그라운드 워커가 큐에 남은 대용량 프레임을
+        publish하면 ROS2/DDS 레이어가 수백 ms 동안 바빠져 HTTP ping 응답이
+        지연된다. clear()로 미처리 항목을 버려 이 현상을 방지한다.
+        모든 데이터셋(KAIST/KITTI/MulRan/ConPR) 워커를 포함한다.
+        """
+        for attr in (
+            '_kaist_vlp_left_worker', '_kaist_vlp_right_worker',
+            '_kaist_sick_back_worker', '_kaist_sick_mid_worker',
+            '_kaist_stereo_worker',
+            '_kitti_velo_worker', '_kitti_cam_worker',
+            '_mulran_ouster_worker', '_mulran_radar_worker',
+            '_conpr_livox_worker', '_conpr_cam_worker',
+        ):
+            worker = getattr(self, attr, None)
+            if worker is not None:
+                worker.clear()
+
+    def _start_kaist_workers(self):
+        """KAIST 전용 VLP / SICK / Stereo 백그라운드 워커를 (재)시작한다."""
+        self._kaist_vlp_left_worker = _SensorPublishWorker()
+        self._kaist_vlp_left_worker._thread.name = 'kaist-vlp-left'
+        self._kaist_vlp_right_worker = _SensorPublishWorker()
+        self._kaist_vlp_right_worker._thread.name = 'kaist-vlp-right'
+        self._kaist_sick_back_worker = _SensorPublishWorker()
+        self._kaist_sick_back_worker._thread.name = 'kaist-sick-back'
+        self._kaist_sick_mid_worker = _SensorPublishWorker()
+        self._kaist_sick_mid_worker._thread.name = 'kaist-sick-mid'
+        self._kaist_stereo_worker = _SensorPublishWorker()
+        self._kaist_stereo_worker._thread.name = 'kaist-stereo'
+
+    def _start_kitti_workers(self):
+        """KITTI 전용 Velodyne / Camera 백그라운드 워커를 (재)시작한다."""
+        self._kitti_velo_worker = _SensorPublishWorker()
+        self._kitti_velo_worker._thread.name = 'kitti-velo'
+        self._kitti_cam_worker = _SensorPublishWorker()
+        self._kitti_cam_worker._thread.name = 'kitti-cam'
+
+    def _start_conpr_workers(self):
+        """ConPR 전용 Livox / Camera 백그라운드 워커를 (재)시작한다."""
+        self._conpr_livox_worker = _SensorPublishWorker()
+        self._conpr_livox_worker._thread.name = 'conpr-livox'
+        self._conpr_cam_worker = _SensorPublishWorker()
+        self._conpr_cam_worker._thread.name = 'conpr-cam'
+
     def _init_mulran_ros_interfaces(self):
         """MulRan 전용 publisher 초기화 (lazy)."""
         self._init_common_ros_interfaces()
         if self._mulran_pubs_initialized:
             return
 
+        # QoS: 대용량 메시지(PC2/Image)는 depth=5, 경량 메시지(IMU/GPS)는 depth=10~20
         self.mulran_ouster_pub = self.create_publisher(
-            PointCloud2, MULRAN_FILE_PLAYER_PC2_TOPIC, 1000)
+            PointCloud2, MULRAN_FILE_PLAYER_PC2_TOPIC, 5)
         self.mulran_radar_pub = self.create_publisher(
-            Image, '/radar/polar', 1000)
-        self.mulran_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 1000)
-        self.mulran_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 1000)
-        self.mulran_gt_pub = self.create_publisher(Odometry, '/gt', 1000)
+            Image, '/radar/polar', 5)
+        self.mulran_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 20)
+        self.mulran_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 10)
+        self.mulran_gt_pub = self.create_publisher(Odometry, '/gt', 10)
         self.mulran_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
 
         mulran_tf_static_qos = QoSProfile(
@@ -2256,6 +2678,9 @@ class WebGUINode(Node):
 
         self._mulran_pubs_initialized = True
         self.get_logger().info('MulRan File Player publishers initialized')
+
+        # DDS warmup: MulRan Ouster PC2 구독 미리 생성 (첫 프레임 즉시 수신 보장)
+        self.pc2_ws_server._presubscribe_pc2(MULRAN_FILE_PLAYER_PC2_TOPIC)
 
     def _find_kitti_calib_dir(self, drive_path):
         """드라이브 경로에서 calib 디렉토리를 탐색하여 반환한다.
@@ -2536,52 +2961,101 @@ class WebGUINode(Node):
         return result
 
     def save_slam_map(self, directory):
-        """Save SLAM map to specified directory"""
+        """Start async SLAM map save, return immediately"""
+        if self.slam_map_saving:
+            return False, 'Map save already in progress'
+
+        self.slam_map_saving = True
+        self.slam_map_save_cancelled = False
+        self.slam_map_save_status = {'saving': True, 'done': False, 'success': None, 'message': 'Initializing...'}
+
+        t = threading.Thread(target=self._save_slam_map_worker, args=(directory,), daemon=True)
+        t.start()
+        return True, 'Map save started'
+
+    def _save_slam_map_worker(self, directory):
+        """Background worker: call save_trajectory service and wait for response"""
+        def _finish(success, message):
+            self.slam_map_saving = False
+            self.slam_map_save_status = {'saving': False, 'done': True, 'success': success, 'message': message}
+
         try:
             if not SAVEMAP_AVAILABLE:
-                self.get_logger().error('SaveMap service not available')
-                return False, 'SaveMap service not available'
+                _finish(False, 'SaveMap service not available')
+                return
 
             self.get_logger().info(f'Requesting to save SLAM map to directory: {directory}')
+            self.slam_map_save_status['message'] = 'Connecting to save_trajectory service...'
 
-            # Create service client
             client = self.create_client(SaveMap, 'save_trajectory')
-
             if not client.wait_for_service(timeout_sec=5.0):
-                self.get_logger().error('save_trajectory service not available')
-                return False, 'save_trajectory service not available. Is pose_graph_optimization node running?'
+                _finish(False, 'save_trajectory service not available. Is pose_graph_optimization node running?')
+                return
 
-            # Create request
             request = SaveMap.Request()
             request.directory_name = directory
-
-            # Call service
             future = client.call_async(request)
 
-            # Wait for response (with timeout)
-            timeout = 30.0  # 30 seconds
+            self.slam_map_save_status['message'] = 'Saving map (generating point cloud, removing dynamic objects)...'
+            self.get_logger().info('save_trajectory service called. Waiting for response...')
+
+            # spin_once 호출 금지: 메인 스레드의 rclpy.spin()이 이미 실행 중이므로
+            # time.sleep 폴링으로 대기. 취소 플래그 확인도 함께 수행.
             start_time = time.time()
+            log_interval = 10.0
+            last_log = start_time
             while not future.done():
-                if time.time() - start_time > timeout:
-                    self.get_logger().error('Service call timed out')
-                    return False, 'Service call timed out after 30 seconds'
-                rclpy.spin_once(self, timeout_sec=0.1)
+                if self.slam_map_save_cancelled:
+                    self.get_logger().info('Map save cancelled by user (C++ callback may still be running)')
+                    _finish(False, 'Cancelled by user')
+                    return
+                now = time.time()
+                elapsed = now - start_time
+                if now - last_log >= log_interval:
+                    msg = f'Saving map... ({elapsed:.0f}s elapsed)'
+                    self.get_logger().info(msg)
+                    self.slam_map_save_status['message'] = msg
+                    last_log = now
+                time.sleep(0.1)
 
-            # Get response
             response = future.result()
-
             if response.success:
                 self.get_logger().info(f'Map saved successfully: {response.message}')
-                return True, response.message
+                _finish(True, response.message)
             else:
                 self.get_logger().error(f'Map save failed: {response.message}')
-                return False, response.message
+                _finish(False, response.message)
 
         except Exception as e:
             self.get_logger().error(f'Failed to save map: {str(e)}')
             import traceback
             traceback.print_exc()
-            return False, str(e)
+            _finish(False, str(e))
+
+    def cancel_save_slam_map(self):
+        """Signal both Python worker and C++ callback to stop"""
+        if not self.slam_map_saving:
+            return False, 'No map save in progress'
+
+        # Python 워커 루프 종료
+        self.slam_map_save_cancelled = True
+
+        # C++ save_trajectory_callback 에도 취소 신호 전달
+        if TRIGGER_AVAILABLE:
+            try:
+                cancel_client = self.create_client(RosTrigger, 'cancel_save_trajectory')
+                if cancel_client.wait_for_service(timeout_sec=1.0):
+                    cancel_client.call_async(RosTrigger.Request())
+                else:
+                    self.get_logger().warn('cancel_save_trajectory service not available')
+            except Exception as e:
+                self.get_logger().warn(f'Failed to call cancel_save_trajectory: {e}')
+
+        return True, 'Cancel signal sent'
+
+    def get_save_map_status(self):
+        """Return current save map status"""
+        return dict(self.slam_map_save_status)
 
     def start_localization_mapping(self):
         """Start Localization mapping process"""
@@ -2648,63 +3122,202 @@ class WebGUINode(Node):
     def run_slam_optimization(self):
         if not self.slam_map1 or not self.slam_map2:
             self.slam_status = "Error: Please load both Map 1 and Map 2"
-            return False
+            return False, self.slam_status
 
         if not self.slam_output:
             self.slam_status = "Error: Please set output directory"
-            return False
+            return False, self.slam_status
 
+        if self.slam_opt_running:
+            return False, 'Optimization already in progress'
+
+        # 이미 실행 중인 optimization 프로세스가 있으면 종료
+        if self.slam_optimization_process and self.slam_optimization_process.poll() is None:
+            self.get_logger().info('Stopping existing optimization process before restart')
+            self._stop_process(self.slam_optimization_process, 'Long-term Mapping')
+            self.slam_optimization_process = None
+
+        self.slam_opt_running = True
+        self.slam_opt_status = {'running': True, 'done': False, 'success': None, 'message': 'Initializing...'}
         self.slam_status = "Running Multi-Session Optimization..."
         self.get_logger().info('=== Starting Multi-Session SLAM Optimization ===')
         self.get_logger().info(f'Map 1: {self.slam_map1}')
         self.get_logger().info(f'Map 2: {self.slam_map2}')
         self.get_logger().info(f'Output: {self.slam_output}')
 
-        # Kill any existing processes first
-        self.kill_slam_processes()
+        # 기존 lt_mapper 잔류 프로세스 정리
+        self._kill_processes_by_pattern(['lt_mapper.launch.py', 'long_term_mapping'])
         time.sleep(0.5)
 
-        # Update parameters
+        # params.yaml 업데이트
         self.update_slam_parameters()
-        time.sleep(0.1)  # Wait for file write to complete
+        time.sleep(0.1)
 
-        # Launch optimization in new terminal
         try:
-            # Create command to run in new terminal
             bash_cmd = (
                 'source /opt/ros/jazzy/setup.bash && '
                 'source /home/kkw/localization_ws/install/setup.bash && '
                 'ros2 launch long_term_mapping lt_mapper.launch.py'
             )
+            cmd = ['bash', '-c', bash_cmd]
 
-            # Open new terminal and run the command
-            cmd = [
-                'gnome-terminal',
-                '--title=Multi-Session SLAM Optimization',
-                '--',
-                'bash', '-c',
-                f'{bash_cmd}; echo ""; echo "Press Enter to close this window..."; read'
-            ]
+            # PYTHONUNBUFFERED=1: ros2 launch(Python) stdout 버퍼링 방지
+            popen_env = dict(self._ros_env)
+            popen_env['PYTHONUNBUFFERED'] = '1'
 
-            self.get_logger().info(f'Opening new terminal for optimization')
-
-            # Launch in new terminal - it's independent from web_gui
-            subprocess.Popen(
+            self.slam_optimization_process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True  # Create new process group
+                env=popen_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True
             )
 
-            self.get_logger().info('Optimization launched in new terminal')
-            self.slam_status = "Optimization launched in new terminal"
-            return True
+            self.get_logger().info(
+                f'Long-term mapping started (PID: {self.slam_optimization_process.pid})')
+            self.slam_opt_status['message'] = 'Running optimization...'
+
+            t = threading.Thread(
+                target=self._read_optimization_output,
+                args=(self.slam_optimization_process,),
+                daemon=True
+            )
+            t.start()
+            return True, 'Optimization started'
+
         except Exception as e:
             self.slam_status = f"Error: Failed to start optimization - {str(e)}"
+            self.slam_opt_running = False
+            self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
             self.get_logger().error(f'Failed to start optimization: {str(e)}')
             import traceback
             traceback.print_exc()
-            return False
+            return False, str(e)
+
+    # 메인 터미널 및 UI 상태에 표시할 LTmapping 메시지 화이트리스트
+    _OPT_MSG_WHITELIST = (
+        'Session Edge Loading Complete.',
+        'Place Recognition Complete.',
+        'Loop Edge Generation Complete.',
+        'Pose Factor loading Complete.',
+        'Graph Optimization Complete.',
+        'Map Merging Complete.',
+        'Map Update Complete.',
+        'Long Term SLAM Complete.',
+    )
+
+    def _set_opt_success(self, process):
+        """LTmapping 노드 완료 확정 (중복 호출 방지)"""
+        if self.slam_optimization_process is not process:
+            return
+        if self.slam_opt_status.get('done'):
+            return
+        self.slam_status = "Optimization complete!"
+        self.slam_opt_status = {'running': False, 'done': True, 'success': True,
+                                'message': 'Long Term SLAM Complete.'}
+        self.slam_opt_running = False
+        self.get_logger().info('=== Long-term mapping completed successfully ===')
+
+    def _read_optimization_output(self, process):
+        """long_term_mapping 프로세스 출력을 읽어 화이트리스트 메시지만 get_logger로 포워드.
+
+        완료 감지 우선순위:
+        1. ros2 launch가 출력하는 "LTmapping" + "finished cleanly" (노드 정상 종료 이벤트)
+        2. "[LTmapping]: Long Term SLAM Complete." 메시지 감지 (메시지 방식 fallback)
+        3. process.wait() returncode=0 (전체 launch 프로세스 종료)
+        """
+        try:
+            for line in iter(process.stdout.readline, ''):
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+
+                # ── 우선순위 1: LTmapping 노드 종료 이벤트 감지 ────────────────────────
+                # ros2 launch가 출력하는 형태: "[launch]: process[LTmapping-1]: process has finished cleanly"
+                if 'LTmapping' in line and 'finished cleanly' in line:
+                    self.get_logger().info(f'[launch] LTmapping node finished: {line.strip()}')
+                    self._set_opt_success(process)
+                    continue
+
+                # ── 우선순위 2: [LTmapping]: 메시지 파싱 ────────────────────────────────
+                if '[LTmapping]:' in line:
+                    msg_part = line.split('[LTmapping]:')[-1].strip()
+                    # 화이트리스트에 있는 메시지만 출력 및 UI 업데이트
+                    if any(msg_part.startswith(w) for w in self._OPT_MSG_WHITELIST):
+                        self.get_logger().info(f'[LTmapping] {msg_part}')
+                        if self.slam_optimization_process is process \
+                                and not self.slam_opt_status.get('done'):
+                            self.slam_opt_status['message'] = msg_part
+
+                        # "Long Term SLAM Complete." 메시지 fallback 감지
+                        if msg_part.startswith('Long Term SLAM Complete.'):
+                            self._set_opt_success(process)
+
+            # ── 우선순위 3: 전체 launch 프로세스 종료 시 ────────────────────────────────
+            process.wait()
+            if self.slam_optimization_process is not process:
+                return
+            if self.slam_opt_status.get('done'):
+                return
+            if process.returncode == 0:
+                self._set_opt_success(process)
+            else:
+                msg = f'Process exited with code {process.returncode}'
+                self.slam_status = f"Optimization failed (exit: {process.returncode})"
+                self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                        'message': msg}
+                self.get_logger().error(f'Long-term mapping exited with code: {process.returncode}')
+        except Exception as e:
+            if self.slam_optimization_process is process:
+                self.get_logger().error(f'Error reading optimization output: {str(e)}')
+                self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
+        finally:
+            self.slam_opt_running = False
+            if self.slam_optimization_process is process:
+                self.slam_optimization_process = None
+
+    def cancel_optimization(self):
+        """Multi-Session Optimization 프로세스 즉시 중단.
+
+        상태를 Cancelled/Exited로 바로 설정하고 HTTP 응답을 즉시 반환한 뒤,
+        실제 프로세스 킬은 백그라운드 스레드에서 SIGKILL로 처리한다.
+
+        slam_opt_running이 False여도 (계산 완료 후 RViz가 살아있는 상태)
+        slam_optimization_process가 살아있으면 프로세스 그룹을 킬한다.
+        """
+        proc = self.slam_optimization_process
+        if not proc or proc.poll() is not None:
+            return False, 'No optimization process running'
+
+        self.get_logger().info('Cancelling optimization by user request')
+
+        # 먼저 참조를 끊어 _read_optimization_output 스레드가 상태를 덮어쓰지 못하게 한다.
+        self.slam_optimization_process = None
+        self.slam_opt_running = False
+        self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                'message': 'Cancelled by user'}
+        self.slam_status = "Optimization cancelled"
+
+        # 프로세스 킬은 백그라운드에서 처리 (HTTP 응답 블로킹 방지)
+        def _kill_proc():
+            try:
+                if proc and proc.poll() is None:
+                    pgid = os.getpgid(proc.pid)
+                    os.killpg(pgid, signal.SIGKILL)
+                    proc.wait(timeout=5)
+                    self.get_logger().info('Optimization process killed (SIGKILL)')
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                self.get_logger().error(f'Error killing optimization process: {str(e)}')
+
+        threading.Thread(target=_kill_proc, daemon=True).start()
+        return True, 'Cancelled'
+
+    def get_optimization_status(self):
+        """현재 optimization 상태 반환"""
+        return dict(self.slam_opt_status)
 
     def update_slam_parameters(self):
         param_file = "/home/kkw/localization_ws/src/long_term_mapping/config/params.yaml"
@@ -2996,6 +3609,9 @@ class WebGUINode(Node):
             if old_thread and old_thread.is_alive():
                 old_thread.join(timeout=1.0)
 
+        # 이전 데이터셋의 중량 센서 워커 정지
+        self._stop_heavy_sensor_workers()
+
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
@@ -3043,8 +3659,28 @@ class WebGUINode(Node):
         self.livox_cache = {}
         self.cam_cache   = {}
 
+        # 카메라 방향 로드 시 1회 감지 → 재생 중 os.path.isfile() 제거
+        self.kitti_cam_dirs_map = {}
+        self.kitti_calib_cam_to_cam = None
+        for cam_id, (img_dir_name, _, _, _enc) in _KITTI_CAM_ID_MAP.items():
+            _cam_data_dir = os.path.join(path, img_dir_name, 'data')
+            if os.path.isdir(_cam_data_dir):
+                self.kitti_cam_dirs_map[cam_id] = _cam_data_dir
+        # 하위호환 단일 카메라 필드
+        if '02' in self.kitti_cam_dirs_map:
+            self.kitti_cam_dir = self.kitti_cam_dirs_map['02']
+            self.kitti_cam_encoding = 'bgr8'
+        elif '00' in self.kitti_cam_dirs_map:
+            self.kitti_cam_dir = self.kitti_cam_dirs_map['00']
+            self.kitti_cam_encoding = 'mono8'
+        else:
+            self.kitti_cam_dir = ''
+            self.kitti_cam_encoding = ''
+
         # KITTI 전용 publisher만 초기화 (ConPR 토픽 오염 방지)
         self._init_kitti_ros_interfaces()
+        # KITTI Velodyne / Camera 백그라운드 워커 시작
+        self._start_kitti_workers()
 
         # ── calib 디렉토리 탐색 → Static TF 1회 publish ──────────────────────
         # kitti_calib_dir / oxts 상태 초기화 (재로드 대비)
@@ -3064,6 +3700,7 @@ class WebGUINode(Node):
                     os.path.join(calib_dir, 'calib_velo_to_cam.txt'))
                 calib_cam_to_cam = conv._parse_calib_file(
                     os.path.join(calib_dir, 'calib_cam_to_cam.txt'))
+                self.kitti_calib_cam_to_cam = calib_cam_to_cam  # camera_info 발행용 저장
                 # stamp: ROS2 tf_static 구독자 호환을 위해 현재 시각 사용
                 now = self.get_clock().now()
                 from builtin_interfaces.msg import Time as TimeMsg
@@ -3135,8 +3772,47 @@ class WebGUINode(Node):
         return self._player_load_result(
             True, 'KITTI loaded', 'kitti', [KITTI_FILE_PLAYER_PC2_TOPIC])
 
+    # ── KITTI 백그라운드 워커 헬퍼 ────────────────────────────────────────────
+
+    def _kitti_do_velo(self, bin_path: str, stamp_msg, pub, conv):
+        """백그라운드: KITTI Velodyne 바이너리 파일 읽기 + publish."""
+        try:
+            pc2_msg = conv._make_pointcloud2_msg(bin_path, stamp_msg)
+            if pc2_msg and pub:
+                pub.publish(pc2_msg)
+        except Exception:
+            pass
+
+    def _kitti_do_cam(self, cam_dirs_map: dict, cam_pubs: dict, cam_info_pubs: dict,
+                      calib_cam_to_cam, frame_idx: int, stamp_msg, conv):
+        """백그라운드: KITTI 카메라 이미지(최대 4채널) 읽기 + publish."""
+        for cam_id, cam_dir in cam_dirs_map.items():
+            img_pub = cam_pubs.get(cam_id)
+            if not img_pub:
+                continue
+            _, _, _, encoding = _KITTI_CAM_ID_MAP[cam_id]
+            img_path = os.path.join(cam_dir, f'{frame_idx:010d}.png')
+            try:
+                img_msg = conv._make_image_msg(img_path, encoding, stamp_msg)
+                if img_msg:
+                    img_pub.publish(img_msg)
+            except Exception:
+                pass
+            info_pub = cam_info_pubs.get(cam_id)
+            if info_pub and calib_cam_to_cam:
+                try:
+                    info_msg = conv._make_camera_info_msg(calib_cam_to_cam, cam_id, stamp_msg)
+                    if info_msg:
+                        info_pub.publish(info_msg)
+                except Exception:
+                    pass
+
     def _publish_kitti_frame(self, frame_idx: int, stamp_ns: int):
-        """KITTI 프레임(velodyne + camera)을 ROS2 토픽으로 publish한다."""
+        """KITTI 프레임(velodyne + IMU/GPS + camera + TF)을 ROS2 토픽으로 publish한다.
+
+        Velodyne PC2 읽기(~4MB)와 Camera PNG 읽기(최대 4채널)는 백그라운드 워커로
+        비블로킹 처리 (OusterThread 패턴). OXTS(경량 텍스트)와 TF는 동기 처리.
+        """
         from builtin_interfaces.msg import Time as TimeMsg
 
         drive_path = self.kitti_drive_path
@@ -3152,48 +3828,68 @@ class WebGUINode(Node):
         stamp_msg.sec      = int(stamp_ns // 1_000_000_000)
         stamp_msg.nanosec  = int(stamp_ns %  1_000_000_000)
 
-        # ── Velodyne PointCloud2 ─────────────────────────────────────
+        # ── Velodyne PointCloud2 → 백그라운드 워커 ──────────────────────────
         bin_path = os.path.join(
             drive_path, 'velodyne_points', 'data', f'{frame_idx:010d}.bin')
-        if os.path.isfile(bin_path):
+        if self._kitti_velo_worker:
+            self._kitti_velo_worker.push(
+                self._kitti_do_velo, bin_path, stamp_msg, self.kitti_velo_pub, conv)
+        else:
+            self._kitti_do_velo(bin_path, stamp_msg, self.kitti_velo_pub, conv)
+
+        # ── OXTS: IMU + GPS fix + GPS vel (경량 텍스트, 동기 처리) ──────────
+        # current_oxts는 아래 TF에서도 재사용
+        current_oxts = None
+        if self.kitti_oxts_files and frame_idx < len(self.kitti_oxts_files):
             try:
-                pc2_msg = conv._make_pointcloud2_msg(bin_path, stamp_msg)
-                if pc2_msg and self.kitti_velo_pub:
-                    self.kitti_velo_pub.publish(pc2_msg)
-            except Exception as e:
-                self.get_logger().warn(f'KITTI velodyne publish failed (frame {frame_idx}): {e}')
+                current_oxts = conv._load_oxts_file(self.kitti_oxts_files[frame_idx])
+            except Exception:
+                pass
 
-        # ── Camera image (image_02 우선, 없으면 image_00) ─────────────
-        for cam_dir, encoding in [('image_02', 'bgr8'), ('image_00', 'mono8')]:
-            img_path = os.path.join(
-                drive_path, cam_dir, 'data', f'{frame_idx:010d}.png')
-            if os.path.isfile(img_path):
-                try:
-                    img_msg = conv._make_image_msg(img_path, encoding, stamp_msg)
-                    if img_msg and self.kitti_cam_pub:
-                        self.kitti_cam_pub.publish(img_msg)
-                except Exception as e:
-                    self.get_logger().warn(f'KITTI image publish failed (frame {frame_idx}): {e}')
-                break
+        if current_oxts:
+            try:
+                if self.kitti_imu_pub:
+                    self.kitti_imu_pub.publish(conv._make_imu_msg(current_oxts, stamp_msg))
+                if self.kitti_gps_fix_pub:
+                    self.kitti_gps_fix_pub.publish(
+                        conv._make_navsatfix_msg(current_oxts, stamp_msg))
+                if self.kitti_gps_vel_pub:
+                    self.kitti_gps_vel_pub.publish(
+                        conv._make_twist_stamped_msg(current_oxts, stamp_msg))
+            except Exception:
+                pass
 
-        # ── TF: /tf에 dynamic + static 통합 발행 (rosbridge는 /tf_static QoS 호환 안 됨) ─
+        # ── Camera images + camera_info → 백그라운드 워커 ───────────────────
+        if self.kitti_cam_dirs_map:
+            if self._kitti_cam_worker:
+                self._kitti_cam_worker.push(
+                    self._kitti_do_cam,
+                    dict(self.kitti_cam_dirs_map),
+                    self.kitti_cam_pubs,
+                    self.kitti_cam_info_pubs,
+                    self.kitti_calib_cam_to_cam,
+                    frame_idx,
+                    stamp_msg,
+                    conv,
+                )
+            else:
+                self._kitti_do_cam(
+                    self.kitti_cam_dirs_map, self.kitti_cam_pubs,
+                    self.kitti_cam_info_pubs, self.kitti_calib_cam_to_cam,
+                    frame_idx, stamp_msg, conv)
+
+        # ── TF: /tf에 dynamic + static 통합 발행 (동기, 경량) ───────────────
         if self.kitti_tf_pub:
             all_transforms = []
-            # 1) Dynamic: world → base_link
-            if (self.kitti_oxts_files and self.kitti_origin_oxts and self.kitti_mercator_scale
-                    and frame_idx < len(self.kitti_oxts_files)):
+            if (current_oxts and self.kitti_origin_oxts and self.kitti_mercator_scale):
                 try:
-                    oxts = conv._load_oxts_file(self.kitti_oxts_files[frame_idx])
-                    if oxts:
-                        dyn_msg = conv._make_dynamic_tf(
-                            oxts, self.kitti_origin_oxts,
-                            self.kitti_mercator_scale, stamp_msg
-                        )
-                        all_transforms.extend(dyn_msg.transforms)
-                except Exception as e:
-                    self.get_logger().debug(
-                        f'KITTI dynamic TF failed (frame {frame_idx}): {e}')
-            # 2) Static: base_link → imu → velo → camera (매 프레임 /tf에 포함)
+                    dyn_msg = conv._make_dynamic_tf(
+                        current_oxts, self.kitti_origin_oxts,
+                        self.kitti_mercator_scale, stamp_msg
+                    )
+                    all_transforms.extend(dyn_msg.transforms)
+                except Exception:
+                    pass
             if self.kitti_static_tf_msg and self.kitti_static_tf_msg.transforms:
                 for t in self.kitti_static_tf_msg.transforms:
                     t_copy = TransformStamped()
@@ -3228,6 +3924,9 @@ class WebGUINode(Node):
             if old_thread and old_thread.is_alive():
                 old_thread.join(timeout=1.0)
 
+        # 이전 데이터셋의 중량 센서 워커 정지
+        self._stop_heavy_sensor_workers()
+
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
@@ -3245,98 +3944,144 @@ class WebGUINode(Node):
 
         # 마스터 타임라인: 모든 센서의 stamp 병합 (VLP Left/Right, IMU, GPS, SICK, global_pose 등)
         all_stamps = set()
+
+        # ── VLP Left ─────────────────────────────────────────────────────────
         vlp_left_stamps = conv._load_stamp_csv(
             os.path.join(sensor_dir, 'VLP_left_stamp.csv'))
         if not vlp_left_stamps:
             vlp_left_stamps = conv._load_stamp_csv(
                 os.path.join(sensor_dir, 'data_stamp.csv'))
-        for ts in vlp_left_stamps:
-            if ts > 0:
-                all_stamps.add(ts)
+        _vlp_left_set = set(ts for ts in vlp_left_stamps if ts > 0)
+        all_stamps.update(_vlp_left_set)
+        self.kaist_vlp_left_stamps = _vlp_left_set
+        self.kaist_vlp_left_dir = os.path.join(sensor_dir, 'VLP_left')
 
-        vlp_right_dir = os.path.join(sensor_dir, 'VLP_right')
+        # ── VLP Right ────────────────────────────────────────────────────────
+        _vlp_right_found_dir = ''
+        for _sub in ('VLP_right', 'vlp_right'):
+            _d = os.path.join(sensor_dir, _sub)
+            if os.path.isdir(_d):
+                _vlp_right_found_dir = _d
+                break
         vlp_right_stamps = conv._load_stamp_csv(
             os.path.join(sensor_dir, 'VLP_right_stamp.csv'))
-        if not vlp_right_stamps and os.path.isdir(vlp_right_dir):
+        if not vlp_right_stamps and _vlp_right_found_dir:
             from pathlib import Path
-            for f in sorted(Path(vlp_right_dir).glob('*.bin')):
-                try:
-                    all_stamps.add(int(f.stem))
-                except ValueError:
-                    pass
-        else:
-            for ts in vlp_right_stamps:
-                if ts > 0:
-                    all_stamps.add(ts)
+            vlp_right_stamps = [
+                int(f.stem) for f in sorted(Path(_vlp_right_found_dir).glob('*.bin'))
+                if f.stem.isdigit()
+            ]
+        _vlp_right_set = set(ts for ts in vlp_right_stamps if ts > 0)
+        all_stamps.update(_vlp_right_set)
+        self.kaist_vlp_right_stamps = _vlp_right_set
+        self.kaist_vlp_right_dir = _vlp_right_found_dir
 
+        # ── SICK Back ────────────────────────────────────────────────────────
+        _sick_back_found_dir = ''
+        _sick_back_stamps_list: list = []
         for sick_sub in ('SICK_back', 'lms511_back'):
             sick_back_dir = os.path.join(sensor_dir, sick_sub)
             stamp_file = os.path.join(sensor_dir, f'{sick_sub.replace("lms511", "SICK")}_stamp.csv')
             sick_back_stamps = conv._load_stamp_csv(stamp_file)
             if not sick_back_stamps and os.path.isdir(sick_back_dir):
                 from pathlib import Path
-                for f in sorted(Path(sick_back_dir).glob('*.bin')):
-                    try:
-                        all_stamps.add(int(f.stem))
-                    except ValueError:
-                        pass
+                sick_back_stamps = [
+                    int(f.stem) for f in sorted(Path(sick_back_dir).glob('*.bin'))
+                    if f.stem.isdigit()
+                ]
+                _sick_back_found_dir = sick_back_dir
+                _sick_back_stamps_list = sick_back_stamps
                 break
-            for ts in sick_back_stamps:
-                if ts > 0:
-                    all_stamps.add(ts)
             if sick_back_stamps:
+                _sick_back_found_dir = sick_back_dir
+                _sick_back_stamps_list = sick_back_stamps
                 break
+        _sick_back_set = set(ts for ts in _sick_back_stamps_list if ts > 0)
+        all_stamps.update(_sick_back_set)
+        self.kaist_sick_back_stamps = _sick_back_set
+        self.kaist_sick_back_dir = _sick_back_found_dir
 
+        # ── SICK Middle ──────────────────────────────────────────────────────
+        _sick_mid_found_dir = ''
+        _sick_mid_stamps_list: list = []
         for sick_sub in ('SICK_middle', 'lms511_middle'):
             sick_mid_dir = os.path.join(sensor_dir, sick_sub)
             stamp_file = os.path.join(sensor_dir, f'{sick_sub.replace("lms511", "SICK")}_stamp.csv')
             sick_mid_stamps = conv._load_stamp_csv(stamp_file)
             if not sick_mid_stamps and os.path.isdir(sick_mid_dir):
                 from pathlib import Path
-                for f in sorted(Path(sick_mid_dir).glob('*.bin')):
-                    try:
-                        all_stamps.add(int(f.stem))
-                    except ValueError:
-                        pass
+                sick_mid_stamps = [
+                    int(f.stem) for f in sorted(Path(sick_mid_dir).glob('*.bin'))
+                    if f.stem.isdigit()
+                ]
+                _sick_mid_found_dir = sick_mid_dir
+                _sick_mid_stamps_list = sick_mid_stamps
                 break
-            for ts in sick_mid_stamps:
-                if ts > 0:
-                    all_stamps.add(ts)
             if sick_mid_stamps:
+                _sick_mid_found_dir = sick_mid_dir
+                _sick_mid_stamps_list = sick_mid_stamps
                 break
+        _sick_mid_set = set(ts for ts in _sick_mid_stamps_list if ts > 0)
+        all_stamps.update(_sick_mid_set)
+        self.kaist_sick_mid_stamps = _sick_mid_set
+        self.kaist_sick_mid_dir = _sick_mid_found_dir
 
+        # ── Global Pose ──────────────────────────────────────────────────────
         self.kaist_global_poses = conv._parse_global_pose(pose_csv)
-        for p in self.kaist_global_poses:
-            if p[0] > 0:
-                all_stamps.add(p[0])
+        _pose_set = set(p[0] for p in self.kaist_global_poses if p[0] > 0)
+        all_stamps.update(_pose_set)
+        self.kaist_pose_stamp_set = _pose_set
+        self.kaist_pose_stamps_sorted = sorted(_pose_set)
 
+        # ── IMU ──────────────────────────────────────────────────────────────
         imu_file = os.path.join(sensor_dir, 'xsens_imu.csv')
         if not os.path.exists(imu_file):
             imu_file = os.path.join(sensor_dir, 'imu.csv')
         imu_rows = conv._load_kaist_imu_csv(imu_file)
         imu_rows.sort(key=lambda r: r.get('stamp', 0))
         self.kaist_imu_data = ([r['stamp'] for r in imu_rows], imu_rows)
-        for s in self.kaist_imu_data[0]:
-            all_stamps.add(s)
+        _imu_set = set(self.kaist_imu_data[0])
+        all_stamps.update(_imu_set)
+        self.kaist_imu_stamps = _imu_set
 
+        # ── GPS ──────────────────────────────────────────────────────────────
         gps_rows = conv._load_kaist_gps_csv(os.path.join(sensor_dir, 'gps.csv'))
         gps_rows.sort(key=lambda r: r.get('stamp', 0))
         self.kaist_gps_data = ([r['stamp'] for r in gps_rows], gps_rows)
-        for s in self.kaist_gps_data[0]:
-            all_stamps.add(s)
+        _gps_set = set(self.kaist_gps_data[0])
+        all_stamps.update(_gps_set)
+        self.kaist_gps_stamps = _gps_set
 
+        # ── VRS GPS ──────────────────────────────────────────────────────────
         vrs_file = os.path.join(sensor_dir, 'vrs_gps.csv')
         vrs_rows = conv._load_kaist_gps_csv(vrs_file) if os.path.exists(vrs_file) else []
         vrs_rows.sort(key=lambda r: r.get('stamp', 0))
         self.kaist_vrs_data = ([r['stamp'] for r in vrs_rows], vrs_rows)
-        for s in self.kaist_vrs_data[0]:
-            all_stamps.add(s)
+        _vrs_set = set(self.kaist_vrs_data[0])
+        all_stamps.update(_vrs_set)
+        self.kaist_vrs_stamps = _vrs_set
 
-        # stereo_stamp.csv 사용 (디렉토리 glob보다 훨씬 빠름)
-        stereo_stamps = conv._load_stamp_csv(os.path.join(sensor_dir, 'stereo_stamp.csv'))
-        for ts in stereo_stamps:
-            if ts > 0:
-                all_stamps.add(ts)
+        # ── Stereo ───────────────────────────────────────────────────────────
+        # image/stereo_left/ 디렉토리가 실제로 존재할 때만 로드 (CSV만 있고 이미지 없는 경우 스킵)
+        _stereo_left_dir = os.path.join(sensor_dir, 'image', 'stereo_left')
+        _stereo_right_dir = os.path.join(sensor_dir, 'image', 'stereo_right')
+        if os.path.isdir(_stereo_left_dir):
+            stereo_stamps = conv._load_stamp_csv(os.path.join(sensor_dir, 'stereo_stamp.csv'))
+            if not stereo_stamps:
+                from pathlib import Path
+                stereo_stamps = [
+                    int(f.stem) for f in sorted(Path(_stereo_left_dir).glob('*.png'))
+                    if f.stem.isdigit()
+                ]
+        else:
+            stereo_stamps = []
+            self.get_logger().debug(
+                f'KAIST stereo: image/stereo_left/ not found in {sensor_dir}, skipping stereo stamps')
+        _stereo_set = set(ts for ts in stereo_stamps if ts > 0)
+        all_stamps.update(_stereo_set)
+        self.kaist_stereo_stamps = _stereo_set
+        self.kaist_stereo_left_dir = _stereo_left_dir
+        self.kaist_stereo_right_dir = _stereo_right_dir
 
         if not all_stamps:
             self.get_logger().error('KAIST: No valid timestamps from any sensor')
@@ -3370,6 +4115,14 @@ class WebGUINode(Node):
         self.cam_cache = {}
 
         self._init_kaist_ros_interfaces()
+        # 중량 센서 백그라운드 워커 (재)시작 (VLP/SICK/Stereo 파일 I/O 비동기화)
+        self._start_kaist_workers()
+
+        # Stereo image DDS warmup: 브라우저 subscribe 전에 미리 구독 생성
+        # (_init_kaist_ros_interfaces 내부의 _kaist_pubs_initialized 체크와 무관하게 매 로드마다 실행)
+        if self.kaist_stereo_stamps:
+            for _stereo_topic in ('/stereo/left/image_raw', '/stereo/right/image_raw'):
+                self.pc2_ws_server._presubscribe_image(_stereo_topic)
 
         # global_pose, imu, gps, vrs는 위 마스터 타임라인 구축 시 이미 로드됨
 
@@ -3380,6 +4133,7 @@ class WebGUINode(Node):
                 static_tf_msg = conv._build_static_tf(calib_dir, stamp_time)
                 if static_tf_msg and self.kaist_tf_static_pub:
                     self.kaist_tf_static_pub.publish(static_tf_msg)
+                    self.kaist_static_tf_msg = static_tf_msg  # 매 프레임 /tf 재발행용 저장
                     self.get_logger().info(f'KAIST static TF published from: {calib_dir}')
             except Exception as e:
                 self.get_logger().warn(f'KAIST static TF publish failed: {e}')
@@ -3408,6 +4162,9 @@ class WebGUINode(Node):
             self.playback_thread = None
             if old_thread and old_thread.is_alive():
                 old_thread.join(timeout=1.0)
+
+        # 이전 데이터셋의 중량 센서 워커 정지
+        self._stop_heavy_sensor_workers()
 
         try:
             conv = MulRanConverter()
@@ -3450,6 +4207,8 @@ class WebGUINode(Node):
         self._mulran_last_clock_pub_ns = None
 
         self._init_mulran_ros_interfaces()
+        # 중량 센서 백그라운드 워커 (재)시작 (Ouster/Radar 파일 I/O 비동기화)
+        self._start_mulran_workers()
 
         stamp0 = conv._ns_to_time_msg(sorted_stamps[0])
         tf_static_msg = conv.build_mulran_tf_static_message(
@@ -3459,6 +4218,7 @@ class WebGUINode(Node):
         )
         if tf_static_msg and getattr(self, 'mulran_tf_static_pub', None):
             self.mulran_tf_static_pub.publish(tf_static_msg)
+            self.mulran_static_tf_msg = tf_static_msg   # 매 프레임 /tf 재발행용 저장
             self.get_logger().info(
                 'MulRan /tf_static published: base_link → ouster, radar_polar (고정 외장 상수)')
 
@@ -3470,8 +4230,26 @@ class WebGUINode(Node):
         return self._player_load_result(
             True, 'MulRan loaded', 'mulran', pc2_topics if pc2_topics else None)
 
+    def _mulran_do_ouster(self, bin_path: str, stamp_time, ouster_pub, conv):
+        """백그라운드 스레드: Ouster 바이너리 파일 읽기 + publish."""
+        msg = conv._make_ouster_pc2(bin_path, stamp_time)
+        if msg and ouster_pub:
+            ouster_pub.publish(msg)
+
+    def _mulran_do_radar(self, png_path: str, stamp_time, radar_pub, conv):
+        """백그라운드 스레드: Radar PNG 파일 읽기 + publish."""
+        msg = conv._make_radar_image(png_path, stamp_time)
+        if msg and radar_pub:
+            radar_pub.publish(msg)
+
     def _publish_mulran_frame(self, stamp_ns: int):
-        """MulRan data_stamp 한 시각의 센서 이벤트를 publish (bag 변환과 동일 정책)."""
+        """MulRan data_stamp 한 시각의 센서 이벤트를 publish.
+
+        레퍼런스 ROSThread.cpp 패턴:
+        - Ouster / Radar: 백그라운드 워커(_SensorPublishWorker)에 위임 (파일 I/O 비블록)
+        - IMU / GPS: 비트맵 조회만 하므로 인라인으로 즉시 publish
+        - TF: 루프 밖에서 한 번만 publish (이전 코드에서 매 센서 이벤트마다 반복 발행하던 비효율 제거)
+        """
         ctx = self.mulran_ctx
         if not ctx:
             return
@@ -3481,18 +4259,28 @@ class WebGUINode(Node):
         conv = self._mulran_conv
         stamp_time = conv._ns_to_time_msg(stamp_ns)
 
+        has_gt_event = False  # GT/Ouster 이벤트가 있을 때만 TF publish
+
         for sensor_name in self.mulran_events_by_stamp.get(stamp_ns, []):
             sn = sensor_name.lower()
             if sn == 'ouster' and ctx['ouster_dir'] and self.mulran_ouster_pub:
                 bin_path = os.path.join(ctx['ouster_dir'], f'{stamp_ns}.bin')
-                msg = conv._make_ouster_pc2(bin_path, stamp_time)
-                if msg:
-                    self.mulran_ouster_pub.publish(msg)
+                if self._mulran_ouster_worker:
+                    self._mulran_ouster_worker.push(
+                        self._mulran_do_ouster, bin_path, stamp_time,
+                        self.mulran_ouster_pub, conv)
+                else:
+                    # fallback: 워커 없으면 동기 처리
+                    self._mulran_do_ouster(bin_path, stamp_time, self.mulran_ouster_pub, conv)
+                has_gt_event = True
             elif sn == 'radar' and ctx['radar_dir'] and self.mulran_radar_pub:
                 png_path = os.path.join(ctx['radar_dir'], f'{stamp_ns}.png')
-                msg = conv._make_radar_image(png_path, stamp_time)
-                if msg:
-                    self.mulran_radar_pub.publish(msg)
+                if self._mulran_radar_worker:
+                    self._mulran_radar_worker.push(
+                        self._mulran_do_radar, png_path, stamp_time,
+                        self.mulran_radar_pub, conv)
+                else:
+                    self._mulran_do_radar(png_path, stamp_time, self.mulran_radar_pub, conv)
             elif sn == 'imu' and ctx['imu_bisect'][0] and self.mulran_imu_pub:
                 row = conv._find_nearest(ctx['imu_bisect'], stamp_ns)
                 if row:
@@ -3503,18 +4291,37 @@ class WebGUINode(Node):
                 if row:
                     gps_msg = conv._make_navsatfix_msg(row, stamp_time)
                     self.mulran_gps_pub.publish(gps_msg)
+                has_gt_event = True
 
-            if ctx['global_poses'] and self.mulran_gt_pub and self.mulran_tf_pub:
+        # TF: 루프 밖에서 한 번만 publish (이전에는 매 센서 이벤트마다 반복 → 100Hz TF 발행 낭비)
+        # Ouster(10Hz) 또는 GPS(10Hz) 이벤트 시에만 발행해 최대 20Hz로 제한
+        if has_gt_event and self.mulran_tf_pub:
+            all_tfs = []
+            if ctx['global_poses']:
                 pose = conv._find_nearest_pose(
                     ctx['pose_stamps'], ctx['global_poses'], stamp_ns)
                 if pose:
                     _, R, T = pose
-                    odom_msg = conv._make_gt_odometry(R, T, stamp_time)
-                    tf_msg = conv._make_dynamic_tf(R, T, stamp_time)
-                    if odom_msg:
-                        self.mulran_gt_pub.publish(odom_msg)
-                    if tf_msg:
-                        self.mulran_tf_pub.publish(tf_msg)
+                    if self.mulran_gt_pub:
+                        odom_msg = conv._make_gt_odometry(R, T, stamp_time)
+                        if odom_msg:
+                            self.mulran_gt_pub.publish(odom_msg)
+                    dyn_tf = conv._make_dynamic_tf(R, T, stamp_time)
+                    if dyn_tf:
+                        all_tfs.extend(dyn_tf.transforms)
+            # Static TF — 매 프레임 /tf에 포함 (rosbridge TRANSIENT_LOCAL 수신 불안정 대응)
+            if self.mulran_static_tf_msg:
+                for t in self.mulran_static_tf_msg.transforms:
+                    t_copy = TransformStamped()
+                    t_copy.header.stamp = stamp_time
+                    t_copy.header.frame_id = t.header.frame_id
+                    t_copy.child_frame_id = t.child_frame_id
+                    t_copy.transform = t.transform
+                    all_tfs.append(t_copy)
+            if all_tfs:
+                combined_tf = TFMessage()
+                combined_tf.transforms = all_tfs
+                self.mulran_tf_pub.publish(combined_tf)
 
         if self.clock_pub:
             last = self._mulran_last_clock_pub_ns
@@ -3524,103 +4331,158 @@ class WebGUINode(Node):
                 clock_msg.clock = Time(nanoseconds=stamp_ns).to_msg()
                 self.clock_pub.publish(clock_msg)
 
-    def _publish_kaist_frame(self, stamp_ns: int):
-        """KAIST 프레임(VLP, SICK, Stereo, IMU, GPS, VRS, Dynamic TF)을 ROS2 토픽으로 publish한다."""
-        from builtin_interfaces.msg import Time as TimeMsg
+    # ── KAIST 백그라운드 워커 함수 ─────────────────────────────────────────────
 
-        path = self.kaist_dataset_path
-        if not path:
+    def _kaist_do_vlp(self, bin_path: str, frame_id: str, stamp_time, pub, conv):
+        """백그라운드: VLP 바이너리 파일 읽기 + publish."""
+        msg = conv._make_vlp_msg(bin_path, frame_id, stamp_time)
+        if msg and pub:
+            pub.publish(msg)
+
+    def _kaist_do_sick(self, bin_path: str, frame_id: str, stamp_time, pub, conv):
+        """백그라운드: SICK 바이너리 파일 읽기 + publish."""
+        msg = conv._make_laserscan_msg(bin_path, frame_id, stamp_time)
+        if msg and pub:
+            pub.publish(msg)
+
+    def _kaist_do_stereo(self, left_path: str, right_path: str, stamp_time,
+                         left_pub, right_pub, conv):
+        """백그라운드: Stereo 양쪽 PNG 읽기 + publish."""
+        if left_path and left_pub:
+            msg = conv._make_stereo_msg(left_path, stamp_time, 'stereo_left')
+            if msg:
+                left_pub.publish(msg)
+        if right_path and right_pub:
+            msg = conv._make_stereo_msg(right_path, stamp_time, 'stereo_right')
+            if msg:
+                right_pub.publish(msg)
+
+    def _publish_kaist_frame(self, stamp_ns: int):
+        """KAIST 프레임(VLP, SICK, Stereo, IMU, GPS, VRS, Dynamic TF)을 ROS2 토픽으로 publish한다.
+
+        최적화:
+        - 센서별 stamp 세트 O(1) 룩업으로 os.path.isfile() syscall 제거
+        - global_pose 탐색: O(n) 선형 스캔 → bisect O(log n)
+        - 각 센서를 해당 센서 stamp에서만 publish (불필요한 nearest-stamp 조회 제거)
+        - 경로 캐시: 매 프레임 os.path.join 생략
+        - VLP/SICK/Stereo: 백그라운드 워커로 파일 I/O 비블록화 (레퍼런스 패턴)
+        """
+        import bisect
+
+        if not self.kaist_dataset_path:
             return
 
         if self._kaist_conv is None:
             from ros2_autonav_webui.kaist_converter import KaistConverter
             self._kaist_conv = KaistConverter()
         conv = self._kaist_conv
-        sensor_dir = os.path.join(path, 'sensor_data')
         stamp_time = conv._ns_to_time_msg(stamp_ns)
 
-        # Dynamic TF (world → base_link)
-        pose = conv._find_nearest_pose(self.kaist_global_poses, stamp_ns)
-        if pose and self.kaist_tf_pub:
-            _, R, T = pose
-            tf_msg = conv._make_dynamic_tf(R, T, stamp_time)
-            if tf_msg:
-                self.kaist_tf_pub.publish(tf_msg)
+        # TF — dynamic(pose stamp에서만) + static(매 프레임, rosbridge TRANSIENT_LOCAL 수신 불안정 대응)
+        if self.kaist_tf_pub:
+            all_tfs = []
+            # Dynamic TF (world → base_link) — pose stamp에서만 추가
+            if stamp_ns in self.kaist_pose_stamp_set and self.kaist_pose_stamps_sorted:
+                idx = bisect.bisect_left(self.kaist_pose_stamps_sorted, stamp_ns)
+                if idx < len(self.kaist_global_poses):
+                    _, R, T = self.kaist_global_poses[idx]
+                    dyn_tf = conv._make_dynamic_tf(R, T, stamp_time)
+                    if dyn_tf:
+                        all_tfs.extend(dyn_tf.transforms)
+            # Static TF — 매 프레임 /tf에 포함
+            if self.kaist_static_tf_msg:
+                for t in self.kaist_static_tf_msg.transforms:
+                    t_copy = TransformStamped()
+                    t_copy.header.stamp = stamp_time
+                    t_copy.header.frame_id = t.header.frame_id
+                    t_copy.child_frame_id = t.child_frame_id
+                    t_copy.transform = t.transform
+                    all_tfs.append(t_copy)
+            if all_tfs:
+                combined_tf = TFMessage()
+                combined_tf.transforms = all_tfs
+                self.kaist_tf_pub.publish(combined_tf)
 
-        # IMU
-        if self.kaist_imu_data and self.kaist_imu_pub:
+        # IMU — IMU stamp에서만 publish (경량, 동기 처리)
+        if stamp_ns in self.kaist_imu_stamps and self.kaist_imu_data and self.kaist_imu_pub:
             imu_row = conv._find_nearest_by_stamp(self.kaist_imu_data, stamp_ns)
             if imu_row:
                 imu_msg = conv._make_imu_msg(imu_row, stamp_time)
                 self.kaist_imu_pub.publish(imu_msg)
 
-        # GPS
-        if self.kaist_gps_data and self.kaist_gps_pub:
+        # GPS — GPS stamp에서만 publish (경량, 동기 처리)
+        if stamp_ns in self.kaist_gps_stamps and self.kaist_gps_data and self.kaist_gps_pub:
             gps_row = conv._find_nearest_by_stamp(self.kaist_gps_data, stamp_ns)
             if gps_row:
                 gps_msg = conv._make_navsatfix_msg(gps_row, stamp_time)
                 self.kaist_gps_pub.publish(gps_msg)
 
-        # VRS GPS
-        if self.kaist_vrs_data and self.kaist_vrs_pub:
+        # VRS GPS — VRS stamp에서만 publish (경량, 동기 처리)
+        if stamp_ns in self.kaist_vrs_stamps and self.kaist_vrs_data and self.kaist_vrs_pub:
             vrs_row = conv._find_nearest_by_stamp(self.kaist_vrs_data, stamp_ns)
             if vrs_row:
                 vrs_msg = conv._make_navsatfix_msg(vrs_row, stamp_time)
                 self.kaist_vrs_pub.publish(vrs_msg)
 
-        # VLP Left
-        vlp_left_dir = os.path.join(sensor_dir, 'VLP_left')
-        bin_path = os.path.join(vlp_left_dir, f'{stamp_ns}.bin')
-        if os.path.isfile(bin_path) and self.kaist_vlp_left_pub:
-            vlp_msg = conv._make_vlp_msg(bin_path, 'left_velodyne', stamp_time)
-            if vlp_msg:
-                self.kaist_vlp_left_pub.publish(vlp_msg)
+        # VLP Left — 백그라운드 워커로 파일 I/O 비블록화
+        if stamp_ns in self.kaist_vlp_left_stamps and self.kaist_vlp_left_pub:
+            bin_path = f'{self.kaist_vlp_left_dir}/{stamp_ns}.bin'
+            if self._kaist_vlp_left_worker:
+                self._kaist_vlp_left_worker.push(
+                    self._kaist_do_vlp, bin_path, 'left_velodyne',
+                    stamp_time, self.kaist_vlp_left_pub, conv)
+            else:
+                self._kaist_do_vlp(bin_path, 'left_velodyne', stamp_time,
+                                   self.kaist_vlp_left_pub, conv)
 
-        # VLP Right (VLP_right 또는 vlp_right 디렉토리)
-        for vlp_right_sub in ('VLP_right', 'vlp_right'):
-            vlp_right_dir = os.path.join(sensor_dir, vlp_right_sub)
-            bin_path = os.path.join(vlp_right_dir, f'{stamp_ns}.bin')
-            if os.path.isfile(bin_path) and self.kaist_vlp_right_pub:
-                vlp_msg = conv._make_vlp_msg(bin_path, 'right_velodyne', stamp_time)
-                if vlp_msg:
-                    self.kaist_vlp_right_pub.publish(vlp_msg)
-                break
+        # VLP Right — 백그라운드 워커로 파일 I/O 비블록화
+        if stamp_ns in self.kaist_vlp_right_stamps and self.kaist_vlp_right_dir and self.kaist_vlp_right_pub:
+            bin_path = f'{self.kaist_vlp_right_dir}/{stamp_ns}.bin'
+            if self._kaist_vlp_right_worker:
+                self._kaist_vlp_right_worker.push(
+                    self._kaist_do_vlp, bin_path, 'right_velodyne',
+                    stamp_time, self.kaist_vlp_right_pub, conv)
+            else:
+                self._kaist_do_vlp(bin_path, 'right_velodyne', stamp_time,
+                                   self.kaist_vlp_right_pub, conv)
 
-        # SICK Back (SICK_back 또는 lms511_back 디렉토리)
-        for subdir in ('SICK_back', 'lms511_back'):
-            sick_back_dir = os.path.join(sensor_dir, subdir)
-            bin_path = os.path.join(sick_back_dir, f'{stamp_ns}.bin')
-            if os.path.isfile(bin_path) and self.kaist_sick_back_pub:
-                scan_msg = conv._make_laserscan_msg(bin_path, 'back_sick', stamp_time)
-                if scan_msg:
-                    self.kaist_sick_back_pub.publish(scan_msg)
-                break
+        # SICK Back — 백그라운드 워커로 파일 I/O 비블록화
+        if stamp_ns in self.kaist_sick_back_stamps and self.kaist_sick_back_dir and self.kaist_sick_back_pub:
+            bin_path = f'{self.kaist_sick_back_dir}/{stamp_ns}.bin'
+            if self._kaist_sick_back_worker:
+                self._kaist_sick_back_worker.push(
+                    self._kaist_do_sick, bin_path, 'back_sick',
+                    stamp_time, self.kaist_sick_back_pub, conv)
+            else:
+                self._kaist_do_sick(bin_path, 'back_sick', stamp_time,
+                                    self.kaist_sick_back_pub, conv)
 
-        # SICK Middle (SICK_middle 또는 lms511_middle 디렉토리)
-        for subdir in ('SICK_middle', 'lms511_middle'):
-            sick_mid_dir = os.path.join(sensor_dir, subdir)
-            bin_path = os.path.join(sick_mid_dir, f'{stamp_ns}.bin')
-            if os.path.isfile(bin_path) and self.kaist_sick_mid_pub:
-                scan_msg = conv._make_laserscan_msg(bin_path, 'middle_sick', stamp_time)
-                if scan_msg:
-                    self.kaist_sick_mid_pub.publish(scan_msg)
-                break
+        # SICK Middle — 백그라운드 워커로 파일 I/O 비블록화
+        if stamp_ns in self.kaist_sick_mid_stamps and self.kaist_sick_mid_dir and self.kaist_sick_mid_pub:
+            bin_path = f'{self.kaist_sick_mid_dir}/{stamp_ns}.bin'
+            if self._kaist_sick_mid_worker:
+                self._kaist_sick_mid_worker.push(
+                    self._kaist_do_sick, bin_path, 'middle_sick',
+                    stamp_time, self.kaist_sick_mid_pub, conv)
+            else:
+                self._kaist_do_sick(bin_path, 'middle_sick', stamp_time,
+                                    self.kaist_sick_mid_pub, conv)
 
-        # Stereo Left (데이터 없으면 스킵 — urban27-dongtan 등)
-        stereo_left_dir = os.path.join(sensor_dir, 'image', 'stereo_left')
-        img_path = os.path.join(stereo_left_dir, f'{stamp_ns}.png')
-        if os.path.isfile(img_path) and self.kaist_stereo_left_pub:
-            img_msg = conv._make_stereo_msg(img_path, stamp_time, 'stereo_left')
-            if img_msg:
-                self.kaist_stereo_left_pub.publish(img_msg)
-
-        # Stereo Right
-        stereo_right_dir = os.path.join(sensor_dir, 'image', 'stereo_right')
-        img_path = os.path.join(stereo_right_dir, f'{stamp_ns}.png')
-        if os.path.isfile(img_path) and self.kaist_stereo_right_pub:
-            img_msg = conv._make_stereo_msg(img_path, stamp_time, 'stereo_right')
-            if img_msg:
-                self.kaist_stereo_right_pub.publish(img_msg)
+        # Stereo Left + Right — 한 워커에서 두 이미지 동시 처리
+        if stamp_ns in self.kaist_stereo_stamps:
+            left_path = (f'{self.kaist_stereo_left_dir}/{stamp_ns}.png'
+                         if self.kaist_stereo_left_dir and self.kaist_stereo_left_pub else '')
+            right_path = (f'{self.kaist_stereo_right_dir}/{stamp_ns}.png'
+                          if self.kaist_stereo_right_dir and self.kaist_stereo_right_pub else '')
+            if left_path or right_path:
+                if self._kaist_stereo_worker:
+                    self._kaist_stereo_worker.push(
+                        self._kaist_do_stereo, left_path, right_path, stamp_time,
+                        self.kaist_stereo_left_pub, self.kaist_stereo_right_pub, conv)
+                else:
+                    self._kaist_do_stereo(left_path, right_path, stamp_time,
+                                          self.kaist_stereo_left_pub,
+                                          self.kaist_stereo_right_pub, conv)
 
     def _is_ros2_bag_path(self, path: str) -> bool:
         """경로가 ROS2 bag (.db3 파일 또는 bag 디렉토리)인지 확인한다."""
@@ -3793,6 +4655,9 @@ class WebGUINode(Node):
             if thread and thread.is_alive():
                 thread.join(timeout=1.0)
 
+        # 이전 데이터셋의 중량 센서 워커 정지
+        self._stop_heavy_sensor_workers()
+
         # 캐시 초기화 (이전 데이터 완전 제거)
         self.livox_cache = {}
         self.cam_cache = {}
@@ -3869,32 +4734,47 @@ class WebGUINode(Node):
                             continue
                 self.get_logger().info(f'Loaded {len(self.imu_data)} IMU data points')
 
-            # Load LiDAR file list
+            # Load LiDAR file list + stamp→path 맵 (O(1) 룩업, os.path.exists 제거)
             lidar_dir = os.path.join(path, 'LiDAR')
             if os.path.exists(lidar_dir):
                 self.livox_file_list = sorted(glob.glob(os.path.join(lidar_dir, '*.bin')))
+                self.livox_stamp_to_path = {}
+                for _fpath in self.livox_file_list:
+                    try:
+                        self.livox_stamp_to_path[int(os.path.splitext(os.path.basename(_fpath))[0])] = _fpath
+                    except ValueError:
+                        pass
                 self.get_logger().info(f'Found {len(self.livox_file_list)} LiDAR files')
             else:
                 self.livox_file_list = []
+                self.livox_stamp_to_path = {}
                 self.get_logger().warn('LiDAR directory not found')
 
-            # Load Camera file list (directory name: 'Camera')
+            # Load Camera file list + stamp→path 맵 (O(1) 룩업)
             cam_dir = os.path.join(path, 'Camera')
             if os.path.exists(cam_dir):
-                # Support multiple image formats
                 patterns = ['*.jpg', '*.png', '*.jpeg', '*.JPG', '*.PNG']
                 self.cam_file_list = []
                 for pattern in patterns:
                     self.cam_file_list.extend(glob.glob(os.path.join(cam_dir, pattern)))
                 self.cam_file_list = sorted(self.cam_file_list)
+                self.cam_stamp_to_path = {}
+                for _fpath in self.cam_file_list:
+                    try:
+                        self.cam_stamp_to_path[int(os.path.splitext(os.path.basename(_fpath))[0])] = _fpath
+                    except ValueError:
+                        pass
                 self.get_logger().info(f'Found {len(self.cam_file_list)} camera images in Camera/')
             else:
                 self.cam_file_list = []
+                self.cam_stamp_to_path = {}
                 self.get_logger().warn('Camera directory not found (expected: {}/Camera/)'.format(path))
 
             self.player_data_loaded = True
             # Lazy-initialize File Player ROS2 publishers/subscribers on first load
             self._init_file_player_ros_interfaces()
+            # ConPR Livox / Camera 백그라운드 워커 시작
+            self._start_conpr_workers()
             return self._player_load_result(
                 True, 'ConPR data loaded', 'conpr', [])
 
@@ -4205,6 +5085,24 @@ class WebGUINode(Node):
         self.mulran_convert_thread.start()
         return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
 
+    # ── ConPR 백그라운드 워커 헬퍼 ───────────────────────────────────────────
+
+    def _conpr_do_livox(self, stamp: int):
+        """백그라운드: ConPR Livox 바이너리 파일 읽기(또는 캐시) + publish."""
+        msg = self.load_livox_data(stamp)
+        if msg and self.livox_pub:
+            self.livox_pub.publish(msg)
+
+    def _conpr_do_cam(self, stamp: int):
+        """백그라운드: ConPR 카메라 이미지 파일 읽기(또는 캐시) + publish."""
+        cam_data = self.load_camera_data(stamp)
+        if cam_data:
+            img_msg, cam_info_msg = cam_data
+            if self.cam_pub:
+                self.cam_pub.publish(img_msg)
+            if self.cam_info_pub:
+                self.cam_info_pub.publish(cam_info_msg)
+
     def load_livox_data(self, stamp):
         """Load LiDAR data from .bin file for given timestamp"""
         if not LIVOX_AVAILABLE or not self.livox_pub:
@@ -4214,11 +5112,9 @@ class WebGUINode(Node):
         if stamp in self.livox_cache:
             return self.livox_cache[stamp]
 
-        # Find matching .bin file
-        bin_filename = f"{stamp}.bin"
-        bin_path = os.path.join(self.player_path, 'LiDAR', bin_filename)
-
-        if not os.path.exists(bin_path):
+        # stamp→path 맵에서 O(1) 룩업 (os.path.exists() syscall 제거)
+        bin_path = self.livox_stamp_to_path.get(stamp)
+        if not bin_path:
             return None
 
         try:
@@ -4278,15 +5174,8 @@ class WebGUINode(Node):
         if stamp in self.cam_cache:
             return self.cam_cache[stamp]
 
-        # Find matching image file in 'Camera' directory
-        # Image files might be named as: stamp.jpg or stamp.png
-        img_path = None
-        for ext in ['.jpg', '.png', '.jpeg', '.JPG', '.PNG']:
-            test_path = os.path.join(self.player_path, 'Camera', f'{stamp}{ext}')
-            if os.path.exists(test_path):
-                img_path = test_path
-                break
-
+        # stamp→path 맵에서 O(1) 룩업 (확장자별 os.path.exists() 루프 제거)
+        img_path = self.cam_stamp_to_path.get(stamp)
         if not img_path:
             return None
 
@@ -4317,18 +5206,18 @@ class WebGUINode(Node):
             return None
 
     def timer_callback(self):
-        """Timer callback (100μs 주기).
+        """Timer callback (10ms 주기 = 100Hz).
 
         - 정지 상태: processed_stamp 를 0 으로 리셋
-        - KITTI 재생 중: 100μs 마다 /clock 을 publish 하여 시각화 끊김 최소화
-          (KITTI 데이터는 10Hz 이지만 clock 은 더 자주 갱신해야 RViz2 가 부드러움)
+        - KITTI 재생 중: 10ms 마다 /clock 을 publish 하여 시각화 업데이트
+          (이전 100μs=10,000Hz는 GIL을 초당 200ms+ 점유 → latency 스파이크 원인)
         """
         if not self.player_playing:
             self.player_processed_stamp = 0
             return
 
-        # KITTI 재생 중: 매 timer tick 마다 /clock 갱신 (100μs → 10000Hz)
-        # player_processed_stamp 는 playback_worker 가 관리하므로 읽기만 한다.
+        # KITTI 재생 중: 10ms마다 /clock 갱신 (100Hz로도 RViz2 시각화 충분히 부드러움)
+        # playback_worker가 VLP 프레임마다(10Hz) 이미 clock 발행하므로 보조 역할
         if getattr(self, 'player_is_kitti', False) and self.clock_pub:
             try:
                 clock_ns = self.player_initial_stamp + self.player_processed_stamp
@@ -4412,6 +5301,8 @@ class WebGUINode(Node):
                 self.playback_thread = None
                 if old_thread and old_thread.is_alive():
                     old_thread.join(timeout=0.5)
+            # 워커 큐 클리어: 정지 직후 대용량 publish로 인한 레이턴시 스파이크 방지
+            self._clear_all_sensor_workers()
             self.player_processed_stamp = 0
             self.player_timestamp = self.player_initial_stamp
             self.player_slider_pos = 0
@@ -4425,6 +5316,9 @@ class WebGUINode(Node):
             self.player_paused = not self.player_paused
             status = "Paused" if self.player_paused else "Resumed"
             self.get_logger().info(f'Playback {status}')
+            if self.player_paused:
+                # 일시정지 시 워커 큐 클리어: 잔여 대용량 프레임 publish 방지
+                self._clear_all_sensor_workers()
             return True
         return False
 
@@ -4832,6 +5726,12 @@ class WebGUINode(Node):
         if self.bag_playing:
             # Stop playback
             self.get_logger().info('Stopping bag playback...')
+            # SIGSTOP 상태로 멈춰 있는 경우 먼저 재개해야 terminate가 즉시 동작함
+            if self.bag_paused and self.bag_process:
+                try:
+                    os.kill(self.bag_process.pid, signal.SIGCONT)
+                except Exception:
+                    pass
             if self.bag_process:
                 self.bag_process.terminate()
                 try:
@@ -4918,31 +5818,80 @@ class WebGUINode(Node):
         return True
 
     def bag_pause_toggle(self):
-        """Toggle bag playback pause/resume"""
+        """Toggle bag playback pause/resume.
+
+        rosbag2_interfaces 서비스(/rosbag2_player/pause, /rosbag2_player/resume)를 우선
+        사용한다. 서비스가 없을 때만 SIGSTOP/SIGCONT fallback을 사용한다.
+
+        ROS2 서비스 방식은 DDS 하트비트 스레드를 그대로 유지하므로, SIGSTOP 방식에서
+        발생하는 재개 후 메시지 재전송(old timestamp) → FAST_LIO imu_buffer clear →
+        궤적 점프 문제를 방지한다.
+        """
         if not self.bag_playing or not self.bag_process:
             self.get_logger().warn('No bag playback in progress')
             return False
 
         try:
-            if self.bag_paused:
-                # Resume playback
-                self.get_logger().info('Resuming bag playback...')
-                os.kill(self.bag_process.pid, signal.SIGCONT)
-                self.bag_paused = False
-                # Adjust start time to account for pause duration
-                pause_duration = time.time() - self.bag_pause_time
-                self.bag_start_real_time += pause_duration
-            else:
-                # Pause playback
-                self.get_logger().info('Pausing bag playback...')
-                os.kill(self.bag_process.pid, signal.SIGSTOP)
-                self.bag_paused = True
-                self.bag_pause_time = time.time()
+            from rosbag2_interfaces.srv import Pause, Resume
+            ros2_interfaces_available = True
+        except ImportError:
+            ros2_interfaces_available = False
 
-            return True
-        except Exception as e:
-            self.get_logger().error(f'Failed to pause/resume bag: {str(e)}')
-            return False
+        if self.bag_paused:
+            # ── Resume ────────────────────────────────────────────────────────
+            self.get_logger().info('Resuming bag playback...')
+            success = False
+
+            if ros2_interfaces_available:
+                try:
+                    client = self.create_client(Resume, '/rosbag2_player/resume')
+                    if client.wait_for_service(timeout_sec=1.0):
+                        future = client.call_async(Resume.Request())
+                        start = time.time()
+                        while not future.done() and time.time() - start < 2.0:
+                            time.sleep(0.01)
+                        if future.done() and future.result() is not None:
+                            success = True
+                            self.get_logger().info('Resumed via /rosbag2_player/resume service')
+                except Exception as e:
+                    self.get_logger().warn(f'rosbag2 resume service failed: {e}')
+
+            if not success:
+                # SIGSTOP/SIGCONT fallback
+                self.get_logger().info('Resuming via SIGCONT (fallback)')
+                os.kill(self.bag_process.pid, signal.SIGCONT)
+
+            self.bag_paused = False
+            pause_duration = time.time() - self.bag_pause_time
+            self.bag_start_real_time += pause_duration
+        else:
+            # ── Pause ─────────────────────────────────────────────────────────
+            self.get_logger().info('Pausing bag playback...')
+            success = False
+
+            if ros2_interfaces_available:
+                try:
+                    client = self.create_client(Pause, '/rosbag2_player/pause')
+                    if client.wait_for_service(timeout_sec=1.0):
+                        future = client.call_async(Pause.Request())
+                        start = time.time()
+                        while not future.done() and time.time() - start < 2.0:
+                            time.sleep(0.01)
+                        if future.done() and future.result() is not None:
+                            success = True
+                            self.get_logger().info('Paused via /rosbag2_player/pause service')
+                except Exception as e:
+                    self.get_logger().warn(f'rosbag2 pause service failed: {e}')
+
+            if not success:
+                # SIGSTOP/SIGCONT fallback
+                self.get_logger().info('Pausing via SIGSTOP (fallback)')
+                os.kill(self.bag_process.pid, signal.SIGSTOP)
+
+            self.bag_paused = True
+            self.bag_pause_time = time.time()
+
+        return True
 
     def set_bag_position(self, position_ratio):
         """Set bag playback position (0.0 to 1.0). ROS1/ROS2 bag 모두 지원."""
@@ -5179,7 +6128,9 @@ class WebGUINode(Node):
 
             # Stop/Pause 시 즉시 중단 (inner loop 내부에서도 체크 — 배치 처리 중 반응)
             # 배치당 최대 프레임 수 제한으로 latency 스파이크 방지
-            _batch_limit = 20
+            # 모든 데이터셋 통일 8: 이전에 KAIST만 8 이었으나 KITTI/MulRan도 batch 20은
+            # 100ms 이상 main-thread를 점유해 HTTP ping 지연 → 레이턴시 스파이크 유발
+            _batch_limit = 8
             _batch_count = 0
 
             # 인덱스를 앞으로 전진하면서 target_stamp 이하의 스탬프만 발행 (O(k))
@@ -5214,6 +6165,7 @@ class WebGUINode(Node):
                         self.get_logger().warn(f'KITTI frame publish error: {e}')
                     # player_timestamp는 예외 여부와 무관하게 항상 갱신
                     self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
                     continue  # ConPR 분기 스킵
 
                 # ── KAIST direct play ──────────────────────────────────────
@@ -5227,6 +6179,7 @@ class WebGUINode(Node):
                     except Exception as e:
                         self.get_logger().warn(f'KAIST frame publish error: {e}')
                     self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드(ping 응답 등)에 CPU 양보
                     continue  # ConPR 분기 스킵
 
                 if getattr(self, 'player_is_mulran', False):
@@ -5236,6 +6189,7 @@ class WebGUINode(Node):
                     except Exception as e:
                         self.get_logger().warn(f'MulRan frame publish error: {e}')
                     self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
                     continue
 
                 if data_type == "pose" and stamp in self.pose_data:
@@ -5267,26 +6221,18 @@ class WebGUINode(Node):
                     self.imu_pub.publish(msg)
 
                 elif data_type == "livox":
-                    livox_msg = self.load_livox_data(stamp)
-                    if livox_msg and self.livox_pub:
-                        self.livox_pub.publish(livox_msg)
+                    # 백그라운드 워커로 비블로킹 처리 (ConPR Livox .bin 파싱이 무거움)
+                    if self._conpr_livox_worker:
+                        self._conpr_livox_worker.push(self._conpr_do_livox, stamp)
                     else:
-                        self.get_logger().warn(
-                            f'Failed to load LiDAR data for stamp {stamp}',
-                            throttle_duration_sec=5.0
-                        )
+                        self._conpr_do_livox(stamp)
 
                 elif data_type == "cam":
-                    cam_data = self.load_camera_data(stamp)
-                    if cam_data:
-                        img_msg, cam_info_msg = cam_data
-                        self.cam_pub.publish(img_msg)
-                        self.cam_info_pub.publish(cam_info_msg)
+                    # 백그라운드 워커로 비블로킹 처리
+                    if self._conpr_cam_worker:
+                        self._conpr_cam_worker.push(self._conpr_do_cam, stamp)
                     else:
-                        self.get_logger().warn(
-                            f'Failed to load camera data for stamp {stamp}',
-                            throttle_duration_sec=5.0
-                        )
+                        self._conpr_do_cam(stamp)
 
                 # 클락 메시지 발행
                 if self.clock_pub:
@@ -5799,7 +6745,8 @@ class WebGUINode(Node):
             'save_bag_progress': self.save_bag_progress,
             'save_bag_message': self.save_bag_message,
             'save_bag_saving': self.save_bag_saving,
-            'save_bag_success': self.save_bag_success
+            'save_bag_success': self.save_bag_success,
+            'speed': round(self.player_speed, 2),
         }
 
     def kill_slam_processes(self):
@@ -5906,6 +6853,10 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
 
         if parsed_path.path == '/api/slam/state':
             self.send_json_response(self.node.get_slam_state())
+        elif parsed_path.path == '/api/slam/save_map_status':
+            self.send_json_response(self.node.get_save_map_status())
+        elif parsed_path.path == '/api/slam/optimization_status':
+            self.send_json_response(self.node.get_optimization_status())
         elif parsed_path.path == '/api/localization/state':
             self.send_json_response(self.node.get_localization_state())
         elif parsed_path.path == '/api/player/state':
@@ -6004,8 +6955,11 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.node.set_slam_output(data.get('path', ''))
             response = {'success': True, 'status': self.node.slam_status}
         elif parsed_path.path == '/api/slam/optimize':
-            success = self.node.run_slam_optimization()
-            response = {'success': success, 'status': self.node.slam_status}
+            success, message = self.node.run_slam_optimization()
+            response = {'success': success, 'message': message, 'status': self.node.slam_status}
+        elif parsed_path.path == '/api/slam/cancel_optimization':
+            success, message = self.node.cancel_optimization()
+            response = {'success': success, 'message': message}
         elif parsed_path.path == '/api/slam/start_mapping':
             success = self.node.start_slam_mapping()
             response = {'success': success, 'message': 'SLAM mapping started' if success else 'Failed to start SLAM mapping'}
@@ -6015,6 +6969,9 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/slam/save_map':
             directory = data.get('directory', 'map')
             success, message = self.node.save_slam_map(directory)
+            response = {'success': success, 'message': message}
+        elif parsed_path.path == '/api/slam/cancel_save_map':
+            success, message = self.node.cancel_save_slam_map()
             response = {'success': success, 'message': message}
 
         # Localization API endpoints
@@ -6427,6 +7384,11 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/player/set_auto_start':
             self.node.player_auto_start = data.get('auto_start', False)
             response = {'success': True}
+        elif parsed_path.path == '/api/player/set_rate':
+            rate = float(data.get('rate', 1.0))
+            rate = max(0.1, min(2.0, rate))
+            self.node.player_speed = rate
+            response = {'success': True, 'rate': rate}
         elif parsed_path.path == '/api/player/set_slider':
             position = data.get('position', 0)
             self.node.reset_player_position(position)
