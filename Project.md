@@ -139,7 +139,7 @@ cd /home/kkw/localization_ws
 **SLAM Configuration 관리:**
 
 1. **Config Load** (파일 브라우저)
-   - 기본 경로: `/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/mapping_config.yaml`
+   - 기본 경로: 같은 ROS 워크스페이스의 `FAST_LIO_Localization_and_Mapping/config/mapping_config.yaml` 자동 탐색
    - 파일 선택 후 파라미터 표시 및 편집 가능
    - 카테고리별 그룹화: General, common, preprocess, mapping, publish, pcd_save, posegraph
    - 페이지 로드 시 자동 로드
@@ -158,7 +158,7 @@ cd /home/kkw/localization_ws
    - 동적 파라미터 로딩 (YAML 구조에 맞게 자동 생성)
 
 3. **Set Config File**
-   - 항상 `/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/mapping_config.yaml`에 저장
+   - 자동 탐색된 FAST-LIO mapping config 또는 사용자가 선택한 YAML 파일에 저장
    - ruamel.yaml 사용으로 주석 및 포맷 유지
    - 3x3 매트릭스 자동 포맷팅 (extrinsic_R, extrinsic_g2o_R)
 
@@ -277,7 +277,7 @@ os.killpg(pgid, signal.SIGINT)  # Ctrl+C
 **Localization Configuration 관리:**
 
 1. **Config Load** (파일 브라우저)
-   - 기본 경로: `/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/localization_config.yaml`
+   - 기본 경로: 같은 ROS 워크스페이스의 `FAST_LIO_Localization_and_Mapping/config/localization_config.yaml` 자동 탐색
    - 파일 선택 후 파라미터 표시 및 편집 가능
    - 페이지 로드 시 자동 로드
    - LiDAR SLAM과 동일한 ConfigManager 클래스 사용
@@ -288,7 +288,7 @@ os.killpg(pgid, signal.SIGINT)  # Ctrl+C
    - ruamel.yaml 사용으로 주석 및 포맷 유지
 
 3. **Set Config File**
-   - 항상 `/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/localization_config.yaml`에 저장
+   - 자동 탐색된 FAST-LIO localization config 또는 사용자가 선택한 YAML 파일에 저장
 
 **Localization 실행/중지:**
 

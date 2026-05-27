@@ -6790,6 +6790,100 @@ class WebGUINode(Node):
 
 
 # File browser functions
+FAST_LIO_PACKAGE_CANDIDATES = (
+    'FAST_LIO_Localization_and_Mapping',
+    'FAST_LIO_ROS2',
+    'fast_lio',
+)
+
+
+def _workspace_src_candidates():
+    """Return likely ROS workspace src directories for sibling package discovery."""
+    candidates = []
+
+    def add_candidate(path):
+        path = PathLib(path).expanduser()
+        if path.exists() and path.is_dir() and path not in candidates:
+            candidates.append(path)
+
+    # Source-tree execution: .../localization_ws/src/ros_slam_webui/ros_slam_webui/web_server.py
+    for parent in PathLib(__file__).resolve().parents:
+        if parent.name == 'src':
+            add_candidate(parent)
+            break
+
+    # Installed execution: use colcon/ament prefixes to infer .../localization_ws/src.
+    prefix_env = os.environ.get('COLCON_PREFIX_PATH', '') + os.pathsep + os.environ.get('AMENT_PREFIX_PATH', '')
+    for prefix in [p for p in prefix_env.split(os.pathsep) if p]:
+        prefix_path = PathLib(prefix).expanduser()
+        for parent in (prefix_path, *prefix_path.parents):
+            if parent.name == 'install':
+                add_candidate(parent.parent / 'src')
+                break
+
+    cwd = PathLib.cwd()
+    for parent in (cwd, *cwd.parents):
+        if (parent / 'src').is_dir():
+            add_candidate(parent / 'src')
+            break
+
+    add_candidate(PathLib.home() / 'localization_ws' / 'src')
+    return candidates
+
+
+def _find_fast_lio_config_dir():
+    """Find FAST-LIO config directory in the same workspace when available."""
+    env_dir = os.environ.get('FAST_LIO_CONFIG_DIR')
+    if env_dir:
+        config_dir = PathLib(env_dir).expanduser()
+        if config_dir.is_dir():
+            return config_dir
+
+    for src_dir in _workspace_src_candidates():
+        for package_name in FAST_LIO_PACKAGE_CANDIDATES:
+            config_dir = src_dir / package_name / 'config'
+            if (config_dir / 'mapping_config.yaml').is_file() and (config_dir / 'localization_config.yaml').is_file():
+                return config_dir
+    return None
+
+
+def get_fast_lio_config_paths():
+    config_dir = _find_fast_lio_config_dir()
+    if not config_dir:
+        return {
+            'success': False,
+            'message': 'FAST-LIO config directory not found in the current workspace',
+            'searched_src_dirs': [str(p) for p in _workspace_src_candidates()],
+        }
+
+    return {
+        'success': True,
+        'config_dir': str(config_dir),
+        'mapping_config': str(config_dir / 'mapping_config.yaml'),
+        'localization_config': str(config_dir / 'localization_config.yaml'),
+    }
+
+
+def resolve_fast_lio_config_path(config_path):
+    """Resolve legacy/default FAST_LIO_ROS2 paths to the discovered FAST-LIO config directory."""
+    if not config_path:
+        return config_path
+
+    path = PathLib(config_path).expanduser()
+    if path.exists():
+        return str(path)
+
+    if path.name not in ('mapping_config.yaml', 'localization_config.yaml'):
+        return str(path)
+
+    config_dir = _find_fast_lio_config_dir()
+    if not config_dir:
+        return str(path)
+
+    resolved = config_dir / path.name
+    return str(resolved) if resolved.is_file() else str(path)
+
+
 def browse_directory(start_path="/home"):
     """Get list of directories and files in the given path"""
     try:
@@ -6857,6 +6951,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response(self.node.get_save_map_status())
         elif parsed_path.path == '/api/slam/optimization_status':
             self.send_json_response(self.node.get_optimization_status())
+        elif parsed_path.path == '/api/slam/default_config_paths':
+            self.send_json_response(get_fast_lio_config_paths())
         elif parsed_path.path == '/api/localization/state':
             self.send_json_response(self.node.get_localization_state())
         elif parsed_path.path == '/api/player/state':
@@ -7074,7 +7170,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
 
         # SLAM Config API endpoints
         elif parsed_path.path == '/api/slam/load_config_file':
-            config_path = data.get('path', '')
+            config_path = resolve_fast_lio_config_path(data.get('path', ''))
             try:
                 with open(config_path, 'r') as f:
                     config_data = yaml.safe_load(f)
@@ -7093,7 +7189,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 response = {'success': False, 'message': str(e)}
 
         elif parsed_path.path == '/api/slam/save_config_file':
-            config_path = data.get('path', '')
+            config_path = resolve_fast_lio_config_path(data.get('path', ''))
             config_params = data.get('config', {})
             try:
                 if RUAMEL_AVAILABLE:

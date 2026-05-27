@@ -13,12 +13,12 @@ Web-based graphical user interface providing intuitive control, data playback, a
 ## 🌟 Key Features
 
 ### 🗺️ SLAM & Localization
+
+> **Important:** To use these features, clone the linked repositories and build them in your ROS2 workspace first.
+
 - **LiDAR SLAM** is based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
 - **Real-time Localization** is based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
 - **Multi-Session SLAM** is based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
-  - Async optimization with real-time log streaming
-  - Cancel button during running optimization
-  - Progress/status indicator with spinner
 - Live YAML configuration editing with instant apply
 - Real-time terminal output monitoring
 - One-click start/stop control
@@ -145,7 +145,7 @@ Open the URL in your web browser.
 
 1. **Load Configuration**
    - Click "Config Load" to browse for your SLAM config file
-   - Default location: `/path/to/FAST_LIO_ROS2/config/mapping_config.yaml`
+   - Default location is auto-detected from `FAST_LIO_Localization_and_Mapping/config/mapping_config.yaml` in the same ROS workspace
    - Edit parameters in real-time using the web interface
 
 2. **Start SLAM**
@@ -557,7 +557,7 @@ colcon build --packages-select ros_slam_webui
 
 ### SLAM & Localization
 - [FAST-LIO](https://github.com/hku-mars/FAST_LIO) - Fast LiDAR-Inertial Odometry
-- [FAST_LIO_ROS2](https://github.com/Ericsii/FAST_LIO_ROS2) - ROS2 port of FAST-LIO
+- [FAST-LIO Mapping & Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) - ROS2 FAST-LIO mapping/localization package used by this Web UI
 
 ### Dataset & Tools
 - [ConPR](https://github.com/dongjae0107/ConPR) - ConPR dataset format
@@ -581,17 +581,6 @@ This project is licensed under the **Apache License 2.0** - see the [LICENSE](LI
 - **Three.js**: MIT License
 - **Plotly.js**: MIT License
 - **rosbridge_suite**: BSD License
-
----
-
-## 🙏 Acknowledgments
-
-Special thanks to:
-- **FAST-LIO developers** for robust SLAM algorithms
-- **ConPR team** for the dataset format
-- **PlotJuggler** for UI inspiration
-- **ROS2 community** for excellent documentation
-- All contributors and users of this project
 
 ---
 

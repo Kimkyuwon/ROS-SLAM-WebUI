@@ -2194,11 +2194,31 @@ class ConfigManager {
         this.apiEndpoints = apiEndpoints; // {loadConfig, saveConfig, updateConfig}
     }
 
+    setDefaultPath(defaultPath) {
+        this.defaultPath = defaultPath;
+        if (!this.currentPath) {
+            this.currentPath = defaultPath;
+        }
+    }
+
+    getDefaultDirectory() {
+        if (!this.defaultPath) {
+            return '/home';
+        }
+        const lastSlash = this.defaultPath.lastIndexOf('/');
+        return lastSlash >= 0 ? this.defaultPath.slice(0, lastSlash) : '/home';
+    }
+
     async loadDefault() {
+        if (!this.defaultPath) {
+            console.error(`Default ${this.name} config path is not available`);
+            return;
+        }
+
         this.currentPath = this.defaultPath;
 
         try {
-            const result = await apiCall('/api/slam/load_config_file', { path: this.defaultPath });
+            const result = await apiCall(this.apiEndpoints.loadConfig, { path: this.defaultPath });
 
             if (result.success && result.config) {
                 console.log(`Default ${this.name} config loaded successfully`);
@@ -2249,11 +2269,17 @@ class ConfigManager {
         }, startPath);
     }
 
-    async save(targetPath) {
+    async save(targetPath = null) {
+        targetPath = targetPath || this.currentPath || this.defaultPath;
+        if (!targetPath) {
+            alert(`No ${this.name} config file path is available.`);
+            return;
+        }
+
         console.log(`Saving ${this.name} config to:`, targetPath);
         console.log('Config data:', this.data);
 
-        const result = await apiCall('/api/slam/save_config_file', {
+        const result = await apiCall(this.apiEndpoints.saveConfig, {
             path: targetPath,
             config: this.data
         });
@@ -2440,7 +2466,7 @@ class ConfigManager {
 // ==============================================================
 const slamConfig = new ConfigManager(
     'slam',
-    '/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/mapping_config.yaml',
+    '',
     {
         parameters: 'slam-config-parameters',
         container: 'slam-config-container',
@@ -2455,7 +2481,7 @@ const slamConfig = new ConfigManager(
 
 const localizationConfig = new ConfigManager(
     'localization',
-    '/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/localization_config.yaml',
+    '',
     {
         parameters: 'localization-config-parameters',
         container: 'localization-config-container',
@@ -2468,6 +2494,17 @@ const localizationConfig = new ConfigManager(
     }
 );
 
+async function initializeFastLioConfigPaths() {
+    const result = await apiCall('/api/slam/default_config_paths');
+    if (result.success) {
+        slamConfig.setDefaultPath(result.mapping_config);
+        localizationConfig.setDefaultPath(result.localization_config);
+        console.log('FAST-LIO config directory:', result.config_dir);
+    } else {
+        console.error('Failed to resolve FAST-LIO config directory:', result.message || result.error);
+    }
+}
+
 // ==============================================================
 // Config Function Wrappers (for backwards compatibility with HTML)
 // ==============================================================
@@ -2476,11 +2513,11 @@ async function loadDefaultSlamConfig() {
 }
 
 async function loadSlamConfig() {
-    await slamConfig.load('/home/kkw/localization_ws/src/FAST_LIO_ROS2/config');
+    await slamConfig.load(slamConfig.getDefaultDirectory());
 }
 
 async function saveSlamConfig() {
-    await slamConfig.save('/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/mapping_config.yaml');
+    await slamConfig.save();
 }
 
 function toggleSlamConfig() {
@@ -2492,11 +2529,11 @@ async function loadDefaultLocalizationConfig() {
 }
 
 async function loadLocalizationConfig() {
-    await localizationConfig.load('/home/kkw/localization_ws/src/FAST_LIO_ROS2/config');
+    await localizationConfig.load(localizationConfig.getDefaultDirectory());
 }
 
 async function saveLocalizationConfig() {
-    await localizationConfig.save('/home/kkw/localization_ws/src/FAST_LIO_ROS2/config/localization_config.yaml');
+    await localizationConfig.save();
 }
 
 function toggleLocalizationConfig() {
@@ -2890,7 +2927,7 @@ async function updateRosDomainId() {
     }
 }
 
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
     // Initial state update
     updateSlamState();
     updateLocalizationState();
@@ -2898,7 +2935,8 @@ window.addEventListener('load', () => {
     updateBagState();
     updateRosDomainId(); // Update ROS DOMAIN ID display
 
-    // Load default configs on startup
+    // Resolve FAST-LIO config paths from the current ROS workspace, then load defaults.
+    await initializeFastLioConfigPaths();
     loadDefaultSlamConfig();
     loadDefaultLocalizationConfig();
 
