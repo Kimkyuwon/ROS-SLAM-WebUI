@@ -1,4 +1,4 @@
-# ROS2 AUTONAV WEBUI
+# ROS SLAM WEBUI
 
 > **A modern, browser-based control center for autonomous robot navigation with ROS2**
 
@@ -103,13 +103,13 @@ Web-based graphical user interface providing intuitive control and real-time vis
 2. **Clone the repository**
    ```bash
    cd ~/your_workspace/src
-   git clone https://github.com/Kimkyuwon/Web-based-GUI-for-ROS2-SLAM-and-File-Player.git ros2_autonav_webui
+   git clone https://github.com/Kimkyuwon/Web-based-GUI-for-ROS2-SLAM-and-File-Player.git ros_slam_webui
    ```
 
 3. **Build the package**
    ```bash
    cd ~/your_workspace
-   colcon build --packages-select ros2_autonav_webui
+   colcon build --packages-select ros_slam_webui
    source install/setup.bash
    ```
 
@@ -121,18 +121,18 @@ source /opt/ros/jazzy/setup.bash
 source ~/your_workspace/install/setup.bash
 
 # Launch the web server
-ros2 launch ros2_autonav_webui ros2_autonav_webui.launch.py
+ros2 launch ros_slam_webui ros_slam_webui.launch.py
 ```
 
 ### Access Web Interface
 
 Once the server starts, you'll see:
 ```
-[INFO] [ros2_autonav_webui_node]: ======================================
-[INFO] [ros2_autonav_webui_node]: Web server started on port 8080
-[INFO] [ros2_autonav_webui_node]: Local access:   http://localhost:8080
-[INFO] [ros2_autonav_webui_node]: Network access: http://YOUR_IP:8080
-[INFO] [ros2_autonav_webui_node]: ======================================
+[INFO] [ros_slam_webui_node]: ======================================
+[INFO] [ros_slam_webui_node]: Web server started on port 8080
+[INFO] [ros_slam_webui_node]: Local access:   http://localhost:8080
+[INFO] [ros_slam_webui_node]: Network access: http://YOUR_IP:8080
+[INFO] [ros_slam_webui_node]: ======================================
 ```
 
 Open the URL in your web browser.
@@ -351,7 +351,7 @@ sudo ufw reload
 
 ### Change Server Port
 
-Edit `ros2_autonav_webui/web_server.py`:
+Edit `ros_slam_webui/web_server.py`:
 ```python
 # Change port number (default: 8080)
 web_thread = threading.Thread(target=run_web_server, args=(node, 9090), daemon=True)
@@ -359,7 +359,7 @@ web_thread = threading.Thread(target=run_web_server, args=(node, 9090), daemon=T
 
 Then rebuild:
 ```bash
-colcon build --packages-select ros2_autonav_webui
+colcon build --packages-select ros_slam_webui
 ```
 
 ---
@@ -413,8 +413,8 @@ pip install opencv-python
 ## 🏗️ Project Structure
 
 ```
-ros2_autonav_webui/
-├── ros2_autonav_webui/
+ros_slam_webui/
+├── ros_slam_webui/
 │   ├── web_server.py              # Main HTTP server, ROS2 node & binary WebSocket (port 8081)
 │   ├── kitti_converter.py         # KITTI Raw dataset → ROS2 message converter
 │   ├── kaist_converter.py         # KAIST Complex Urban dataset → ROS2 message converter
@@ -432,7 +432,7 @@ ros2_autonav_webui/
 │       ├── img_stream_worker.js   # Web Worker for binary Image streaming (JPEG/GPU decode)
 │       └── style.css              # UI styling
 ├── launch/
-│   └── ros2_autonav_webui.launch.py  # ROS2 launch configuration
+│   └── ros_slam_webui.launch.py  # ROS2 launch configuration
 ├── package.xml                    # ROS2 package manifest
 ├── setup.py                       # Python package setup
 ├── README.md                      # This file
@@ -447,8 +447,8 @@ ros2_autonav_webui/
 
 1. **For Python backend changes:**
    ```bash
-   # Edit files in ros2_autonav_webui/
-   colcon build --packages-select ros2_autonav_webui
+   # Edit files in ros_slam_webui/
+   colcon build --packages-select ros_slam_webui
    source install/setup.bash
    # Restart the server
    ```
@@ -456,20 +456,20 @@ ros2_autonav_webui/
 2. **For web frontend changes:**
    ```bash
    # Edit files in web/static/
-   colcon build --packages-select ros2_autonav_webui
+   colcon build --packages-select ros_slam_webui
    # Hard refresh browser (Ctrl + F5)
    ```
 
 3. **For faster iteration (one-time setup):**
    ```bash
-   colcon build --symlink-install --packages-select ros2_autonav_webui
+   colcon build --symlink-install --packages-select ros_slam_webui
    # Now Python and web file changes don't require rebuild
    ```
 
 ### Code Organization
 
 **Backend (Python):**
-- Add API endpoints in `ros2_autonav_webui/web_server.py`
+- Add API endpoints in `ros_slam_webui/web_server.py`
 - Use `do_GET()` for GET requests, `do_POST()` for POST requests
 - Follow existing patterns for error handling and responses
 - Dataset converters (`kitti_converter.py`, `kaist_converter.py`, `mulran_converter.py`) handle all format-specific parsing
@@ -548,7 +548,7 @@ ros2 topic list
 rm -rf build/ install/ log/
 
 # Rebuild from scratch
-colcon build --packages-select ros2_autonav_webui
+colcon build --packages-select ros_slam_webui
 ```
 
 ---

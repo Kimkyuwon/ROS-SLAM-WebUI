@@ -27,9 +27,9 @@ def generate_launch_description():
 
     # Web GUI node
     web_gui_node = Node(
-        package='ros2_autonav_webui',
+        package='ros_slam_webui',
         executable='web_server',
-        name='ros2_autonav_webui_node',
+        name='ros_slam_webui_node',
         output='screen',
         emulate_tty=True,
     )

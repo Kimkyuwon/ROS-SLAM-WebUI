@@ -2,10 +2,10 @@ from setuptools import setup
 import os
 from glob import glob
 
-package_name = 'ros2_autonav_webui'
+package_name = 'ros_slam_webui'
 
 setup(
-    name='ros2-autonav-webui',  # Python 패키지 이름은 하이픈 사용 (entry point와 일치)
+    name=package_name,
     version='0.0.1',
     packages=[package_name],
     data_files=[
@@ -20,7 +20,7 @@ setup(
     zip_safe=True,
     maintainer='kkw',
     maintainer_email='user@todo.todo',
-    description='ROS2 Autonomous Navigation Web UI - Web-based control interface for autonomous robot navigation, SLAM, localization, and visualization',
+    description='ROS SLAM Web UI - Web-based control interface for autonomous robot navigation, SLAM, localization, and visualization',
     license='Apache-2.0',
     tests_require=['pytest'],
     # scripts 방식 사용 (ROS2 표준)

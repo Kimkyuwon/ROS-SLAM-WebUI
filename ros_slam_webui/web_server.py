@@ -3575,7 +3575,7 @@ class WebGUINode(Node):
         if not path or not os.path.isdir(path):
             return False
         try:
-            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            from ros_slam_webui.mulran_converter import MulRanConverter
             conv = MulRanConverter()
             sd = conv._find_sensor_data_dir(path)
             if sd is None:
@@ -3597,7 +3597,7 @@ class WebGUINode(Node):
         기존 data_stamp 구조(timestamp_ns → frame_idx_str)를 구축한다.
         playback_worker 에서 player_is_kitti 플래그를 보고 KITTI 파일을 직접 읽어 publish.
         """
-        from ros2_autonav_webui.kitti_converter import KittiConverter
+        from ros_slam_webui.kitti_converter import KittiConverter
 
         # 기존 재생 정지
         self.player_playing = False
@@ -3820,7 +3820,7 @@ class WebGUINode(Node):
             return
 
         if self._kitti_conv is None:
-            from ros2_autonav_webui.kitti_converter import KittiConverter
+            from ros_slam_webui.kitti_converter import KittiConverter
             self._kitti_conv = KittiConverter()
         conv = self._kitti_conv
 
@@ -3912,7 +3912,7 @@ class WebGUINode(Node):
         global_pose.csv, xsens_imu.csv, gps.csv, vrs_gps.csv 사전 로드.
         /tf_static 1회 publish.
         """
-        from ros2_autonav_webui.kaist_converter import KaistConverter
+        from ros_slam_webui.kaist_converter import KaistConverter
 
         # 기존 재생 정지
         self.player_playing = False
@@ -4152,7 +4152,7 @@ class WebGUINode(Node):
 
     def _load_mulran_direct(self, path: str) -> dict:
         """MulRan 시퀀스를 File Player로 직접 로드한다 (data_stamp.csv 타임라인)."""
-        from ros2_autonav_webui.mulran_converter import MulRanConverter
+        from ros_slam_webui.mulran_converter import MulRanConverter
 
         self.player_playing = False
         self.player_paused = False
@@ -4254,7 +4254,7 @@ class WebGUINode(Node):
         if not ctx:
             return
         if self._mulran_conv is None:
-            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            from ros_slam_webui.mulran_converter import MulRanConverter
             self._mulran_conv = MulRanConverter()
         conv = self._mulran_conv
         stamp_time = conv._ns_to_time_msg(stamp_ns)
@@ -4373,7 +4373,7 @@ class WebGUINode(Node):
             return
 
         if self._kaist_conv is None:
-            from ros2_autonav_webui.kaist_converter import KaistConverter
+            from ros_slam_webui.kaist_converter import KaistConverter
             self._kaist_conv = KaistConverter()
         conv = self._kaist_conv
         stamp_time = conv._ns_to_time_msg(stamp_ns)
@@ -4796,7 +4796,7 @@ class WebGUINode(Node):
             {'success': True, 'scan_result': {...}} or {'success': False, 'error': '...'}
         """
         try:
-            from ros2_autonav_webui.kitti_converter import KittiConverter
+            from ros_slam_webui.kitti_converter import KittiConverter
             converter = KittiConverter()
             result = converter.scan_directory(path)
             self.get_logger().info(
@@ -4840,7 +4840,7 @@ class WebGUINode(Node):
         def _run():
             self.kitti_converter_running = True
             try:
-                from ros2_autonav_webui.kitti_converter import KittiConverter
+                from ros_slam_webui.kitti_converter import KittiConverter
                 converter = KittiConverter()
 
                 def _progress_cb(pct: int, msg: str):
@@ -4904,7 +4904,7 @@ class WebGUINode(Node):
             {'success': True, 'sequences': [{name, path}, ...]} or {'success': False, 'error': '...'}
         """
         try:
-            from ros2_autonav_webui.kaist_converter import KaistConverter
+            from ros_slam_webui.kaist_converter import KaistConverter
             converter = KaistConverter()
             result = converter.scan_directory(path)
             self.get_logger().info(
@@ -4950,7 +4950,7 @@ class WebGUINode(Node):
         def _run():
             self.kaist_converter_running = True
             try:
-                from ros2_autonav_webui.kaist_converter import KaistConverter
+                from ros_slam_webui.kaist_converter import KaistConverter
                 converter = KaistConverter()
 
                 def _progress_cb(pct: int, msg: str):
@@ -5002,7 +5002,7 @@ class WebGUINode(Node):
     def scan_mulran_directory(self, path: str) -> dict:
         """MulRan 데이터셋 베이스 디렉토리를 탐색하여 시퀀스 목록을 반환한다."""
         try:
-            from ros2_autonav_webui.mulran_converter import MulRanConverter
+            from ros_slam_webui.mulran_converter import MulRanConverter
             converter = MulRanConverter()
             result = converter.scan_directory(path)
             self.get_logger().info(
@@ -5036,7 +5036,7 @@ class WebGUINode(Node):
         def _run():
             self.mulran_converter_running = True
             try:
-                from ros2_autonav_webui.mulran_converter import MulRanConverter
+                from ros_slam_webui.mulran_converter import MulRanConverter
                 converter = MulRanConverter()
 
                 def _progress_cb(pct: int, msg: str):
@@ -7427,7 +7427,7 @@ def run_web_server(node, port=8080):
     web_dir = None
     try:
         from ament_index_python.packages import get_package_share_directory
-        share_dir = get_package_share_directory('ros2_autonav_webui')
+        share_dir = get_package_share_directory('ros_slam_webui')
         web_dir = os.path.join(share_dir, 'web')
         node.get_logger().info(f'Using web directory: {web_dir}')
     except Exception as e:

@@ -1,4 +1,4 @@
-# ROS2 AUTONAV WEBUI Project
+# ROS SLAM WEBUI Project
 
 ## 프로젝트 개요
 ROS2 Jazzy 기반의 자율주행 웹 UI 패키지로, SLAM, Localization, Navigation, 데이터 플레이어, 데이터 레코더, 시각화 등의 기능을 웹 브라우저에서 제어할 수 있습니다.
@@ -20,8 +20,8 @@ ROS2 Jazzy 기반의 자율주행 웹 UI 패키지로, SLAM, Localization, Navig
 
 ## 디렉토리 구조
 ```
-/home/kkw/localization_ws/src/ros2_autonav_webui/
-├── ros2_autonav_webui/
+/home/kkw/localization_ws/src/ros_slam_webui/
+├── ros_slam_webui/
 │   ├── web_server.py          # 메인 Python 백엔드 (HTTP 서버 + ROS2 노드)
 │   └── __init__.py
 ├── web/
@@ -32,7 +32,7 @@ ROS2 Jazzy 기반의 자율주행 웹 UI 패키지로, SLAM, Localization, Navig
 │       ├── plot_tree.js       # PlotJuggler 스타일 트리 시각화
 │       └── threejs_display.js # Three.js 3D 시각화
 ├── launch/
-│   └── ros2_autonav_webui.launch.py # ROS2 launch 파일
+│   └── ros_slam_webui.launch.py # ROS2 launch 파일
 ├── resource/
 ├── package.xml
 ├── setup.py
@@ -44,11 +44,11 @@ ROS2 Jazzy 기반의 자율주행 웹 UI 패키지로, SLAM, Localization, Navig
 ### 빌드
 ```bash
 cd /home/kkw/localization_ws
-colcon build --packages-select ros2_autonav_webui
+colcon build --packages-select ros_slam_webui
 ```
 
-**중요:** 소스 파일(`src/ros2_autonav_webui/`)을 수정한 후에는 반드시 `colcon build`를 실행해야 합니다.
-웹 서버는 `install/ros2_autonav_webui/` 디렉토리의 파일을 서빙하기 때문입니다.
+**중요:** 소스 파일(`src/ros_slam_webui/`)을 수정한 후에는 반드시 `colcon build`를 실행해야 합니다.
+웹 서버는 `install/ros_slam_webui/` 디렉토리의 파일을 서빙하기 때문입니다.
 
 ### 실행 (권장 방법)
 
@@ -66,7 +66,7 @@ cd /home/kkw/localization_ws
 ```bash
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 launch ros2_autonav_webui ros2_autonav_webui.launch.py
+ros2 launch ros_slam_webui ros_slam_webui.launch.py
 ```
 
 ### 종료
@@ -86,11 +86,11 @@ cd /home/kkw/localization_ws
 
 웹 서버가 시작되면 콘솔에 접속 주소가 표시됩니다:
 ```
-[INFO] [ros2_autonav_webui_node]: ======================================
-[INFO] [ros2_autonav_webui_node]: Web server started on port 8080
-[INFO] [ros2_autonav_webui_node]: Local access:   http://localhost:8080
-[INFO] [ros2_autonav_webui_node]: Network access: http://172.30.1.63:8080
-[INFO] [ros2_autonav_webui_node]: ======================================
+[INFO] [ros_slam_webui_node]: ======================================
+[INFO] [ros_slam_webui_node]: Web server started on port 8080
+[INFO] [ros_slam_webui_node]: Local access:   http://localhost:8080
+[INFO] [ros_slam_webui_node]: Network access: http://172.30.1.63:8080
+[INFO] [ros_slam_webui_node]: ======================================
 ```
 
 **접속 방법:**
