@@ -2253,7 +2253,7 @@ class ConfigManager {
             }
 
             // Load the selected yaml file
-            const result = await apiCall('/api/slam/load_config_file', { path });
+            const result = await apiCall(this.apiEndpoints.loadConfig, { path });
 
             if (result.success && result.config) {
                 console.log(`${this.name} config loaded successfully from:`, path);
@@ -2269,8 +2269,17 @@ class ConfigManager {
         }, startPath);
     }
 
-    async save(targetPath = null) {
-        targetPath = targetPath || this.currentPath || this.defaultPath;
+    async save(targetPath = null, allowCurrentPathFallback = true) {
+        try {
+            this.syncFromInputs();
+        } catch (error) {
+            alert(error.message);
+            return;
+        }
+
+        if (targetPath === null) {
+            targetPath = allowCurrentPathFallback ? (this.currentPath || this.defaultPath) : this.defaultPath;
+        }
         if (!targetPath) {
             alert(`No ${this.name} config file path is available.`);
             return;
@@ -2285,11 +2294,48 @@ class ConfigManager {
         });
 
         if (result.success) {
-            alert('Config file saved successfully to:\n' + targetPath);
-            console.log(`${this.name} config saved to:`, targetPath);
+            const savedPath = result.path || targetPath;
+            alert('Config file saved successfully to:\n' + savedPath);
+            console.log(`${this.name} config saved to:`, savedPath);
         } else {
             alert('Failed to save config file: ' + (result.message || 'Unknown error'));
         }
+    }
+
+    syncFromInputs() {
+        const container = domCache.get(this.containerIds.parameters);
+        const inputs = container.querySelectorAll('[data-config-key]');
+
+        inputs.forEach(input => {
+            const key = input.dataset.configKey;
+            const valueType = input.dataset.valueType;
+            const value = this.parseInputValue(input, valueType);
+            this.updateValue(key, value, false);
+        });
+    }
+
+    parseInputValue(input, valueType) {
+        if (valueType === 'boolean') {
+            return input.checked;
+        }
+
+        if (valueType === 'array') {
+            try {
+                return JSON.parse(input.value.replace(/\s/g, ''));
+            } catch (error) {
+                throw new Error('Invalid array format. Use format: [1.0, 0.0, 0.0]');
+            }
+        }
+
+        if (valueType === 'number') {
+            const numValue = parseFloat(input.value);
+            if (Number.isNaN(numValue)) {
+                throw new Error(`Invalid number value for ${input.dataset.configKey}`);
+            }
+            return numValue;
+        }
+
+        return input.value;
     }
 
     display() {
@@ -2371,6 +2417,8 @@ class ConfigManager {
             inputElement.type = 'checkbox';
             inputElement.checked = value;
             inputElement.id = `${this.name}-param-${fullKey}`;
+            inputElement.dataset.configKey = fullKey;
+            inputElement.dataset.valueType = 'boolean';
             inputElement.onchange = () => this.updateValue(fullKey, inputElement.checked);
 
             checkboxContainer.appendChild(inputElement);
@@ -2384,6 +2432,8 @@ class ConfigManager {
             const formattedValue = value.map(v => String(v));
             inputElement.value = '[' + formattedValue.join(', ') + ']';
             inputElement.id = `${this.name}-param-${fullKey}`;
+            inputElement.dataset.configKey = fullKey;
+            inputElement.dataset.valueType = 'array';
             inputElement.style.width = '100%';
             inputElement.onchange = () => {
                 try {
@@ -2401,6 +2451,8 @@ class ConfigManager {
             inputElement.value = value;
             inputElement.id = `${this.name}-param-${fullKey}`;
             inputElement.step = 'any';  // Allow any decimal precision
+            inputElement.dataset.configKey = fullKey;
+            inputElement.dataset.valueType = 'number';
             inputElement.style.width = '100%';
             inputElement.onchange = () => {
                 const numValue = parseFloat(inputElement.value);
@@ -2411,6 +2463,8 @@ class ConfigManager {
             inputElement.type = 'text';
             inputElement.value = value;
             inputElement.id = `${this.name}-param-${fullKey}`;
+            inputElement.dataset.configKey = fullKey;
+            inputElement.dataset.valueType = 'string';
             inputElement.style.width = '100%';
             inputElement.onchange = () => this.updateValue(fullKey, inputElement.value);
         } else {
@@ -2422,7 +2476,7 @@ class ConfigManager {
         container.appendChild(formGroup);
     }
 
-    updateValue(key, value) {
+    updateValue(key, value, notifyBackend = true) {
         console.log(`Updated ${this.name} config: ${key} = ${value}`);
 
         // Update local config data
@@ -2437,7 +2491,9 @@ class ConfigManager {
         obj[keys[keys.length - 1]] = value;
 
         // Send update to backend
-        apiCall('/api/slam/update_config', { key, value });
+        if (notifyBackend) {
+            apiCall(this.apiEndpoints.updateConfig, { key, value });
+        }
     }
 
     toggle() {
@@ -2517,7 +2573,7 @@ async function loadSlamConfig() {
 }
 
 async function saveSlamConfig() {
-    await slamConfig.save();
+    await slamConfig.save(slamConfig.defaultPath, false);
 }
 
 function toggleSlamConfig() {
@@ -2533,7 +2589,7 @@ async function loadLocalizationConfig() {
 }
 
 async function saveLocalizationConfig() {
-    await localizationConfig.save();
+    await localizationConfig.save(localizationConfig.defaultPath, false);
 }
 
 function toggleLocalizationConfig() {

@@ -7351,7 +7351,11 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                         )
 
                 self.node.get_logger().info(f'Saved config to: {config_path}')
-                response = {'success': True, 'message': 'Config saved successfully'}
+                response = {
+                    'success': True,
+                    'message': 'Config saved successfully',
+                    'path': config_path,
+                }
             except Exception as e:
                 self.node.get_logger().error(f'Failed to save config: {str(e)}')
                 import traceback
