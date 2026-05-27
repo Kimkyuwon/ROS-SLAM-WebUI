@@ -8,7 +8,7 @@ Web-based graphical user interface providing intuitive control, data playback, a
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](LICENSE)
 
-[![ROS SLAM WEBUI](doc/ROS%20SLAM%20WEBUI.gif)
+![ROS SLAM WEBUI](doc/ROS%20SLAM%20WEBUI.gif)
 ---
 
 ## 🌟 Key Features
