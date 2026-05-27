@@ -36,6 +36,8 @@ Web-based graphical user interface providing intuitive control, data playback, a
   - XY Plot support
   - Filter (Low-pass, High-pass, Band-pass)
 
+  ![plot](doc/plot.gif)
+
 - **3D Visualization**
   - Real-time PointCloud2 rendering (Ouster, Velodyne, Hesai, Livox)
   - Path and odometry display
@@ -47,6 +49,8 @@ Web-based graphical user interface providing intuitive control, data playback, a
     - GPU-accelerated JPEG decoding via `createImageBitmap()`
     - Subscribe/unsubscribe image topics live
   - Snapshot export
+
+  ![plot](doc/visualization.gif)
 
 ### 💾 Data Management
 - **Bag Player**
