@@ -1,8 +1,8 @@
 # ROS SLAM WEBUI
 
-> **A modern, browser-based control center for autonomous robot navigation with ROS2**
+> **A modern, browser-based control center for LiDAR SLAM, localization, data playback, and visualization with ROS2**
 
-Web-based graphical user interface providing intuitive control and real-time visualization of SLAM, localization, navigation, and data management for ROS2-based autonomous robots. Access everything from any device with a web browser.
+Web-based graphical user interface providing intuitive control, data playback, and real-time visualization of LiDAR SLAM, localization, multi-session map optimization, and dataset/bag data management for ROS2-based mapping workflows. Access everything from any device with a web browser.
 
 [![ROS2](https://img.shields.io/badge/ROS2-Jazzy-blue.svg)](https://docs.ros.org/en/jazzy/)
 [![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
