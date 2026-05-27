@@ -4,9 +4,11 @@
 
 Web-based graphical user interface providing intuitive control, data playback, and real-time visualization of LiDAR SLAM, localization, multi-session map optimization, and dataset/bag data management for ROS2-based mapping workflows. Access everything from any device with a web browser.
 
-[![ROS2](https://img.shields.io/badge/ROS2-Jazzy-blue.svg)](https://docs.ros.org/en/jazzy/)
-[![Python](https://img.shields.io/badge/Python-3.10+-green.svg)](https://www.python.org/)
-[![License](https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg)](LICENSE)
+<p align="center">
+  <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-blue.svg" alt="ROS2 Jazzy" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-green.svg" alt="Python 3.10+" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg" alt="License Apache 2.0" /></a>
+</p>
 
 ![ROS SLAM WEBUI](doc/ROS%20SLAM%20WEBUI.gif)
 ---
