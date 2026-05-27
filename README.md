@@ -13,12 +13,16 @@ Web-based graphical user interface providing intuitive control and real-time vis
 ## 🌟 Key Features
 
 ### 🗺️ SLAM & Localization
-- **LiDAR SLAM** with FAST-LIO integration
-- **Real-time Localization** with live parameter tuning
-- **Multi-Session SLAM** for map merging and optimization
+- **LiDAR SLAM** is based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
+- **Real-time Localization** is based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
+- **Multi-Session SLAM** is based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
+  - Async optimization with real-time log streaming
+  - Cancel button during running optimization
+  - Progress/status indicator with spinner
 - Live YAML configuration editing with instant apply
 - Real-time terminal output monitoring
 - One-click start/stop control
+- Async Save Map with cancel support
 
 ### 📊 Advanced Data Visualization
 - **PlotJuggler-style Real-time Plotting**
@@ -30,7 +34,7 @@ Web-based graphical user interface providing intuitive control and real-time vis
   - Export plots (PNG)
   - XY Plot support
   - Filter (Low-pass, High-pass, Band-pass)
-  
+
 - **3D Visualization**
   - Real-time PointCloud2 rendering (Ouster, Velodyne, Hesai, Livox)
   - Path and odometry display
@@ -38,15 +42,20 @@ Web-based graphical user interface providing intuitive control and real-time vis
   - Interactive camera controls
   - Python backend binary WebSocket for low-latency updates (port 8081)
   - Point Size / Alpha / Decay Time settings
+  - **Image topic streaming** via binary WebSocket Web Worker (`img_stream_worker.js`)
+    - GPU-accelerated JPEG decoding via `createImageBitmap()`
+    - Subscribe/unsubscribe image topics live
   - Snapshot export
 
 ### 💾 Data Management
 - **Bag Player**
   - Play ROS2 bag files with topic filtering
   - Timeline control with play/pause/seek
-  - Variable playback speed
+  - Variable playback speed (slider)
+  - **Loop mode** for continuous replay
   - Integration with 3D visualization and Plot
   - **ROS1 bag support**: Auto-detect `.bag` files, offline convert to ROS2, or direct real-time playback via `rosbags`
+  - Convert ROS2 bag → ROS1 `.bag` format
 
 - **Bag Recorder**
   - Record live ROS2 topics to bag files
@@ -54,15 +63,24 @@ Web-based graphical user interface providing intuitive control and real-time vis
   - Real-time recording status
   - Auto-saved configurations
 
-- **File Player** (ConPR Format)
-  - Play CSV-based trajectory data (pose, IMU, LiDAR)
-  - Variable playback speed (0.01x ~ 20.0x)
-  - Convert to ROS2 bag format
-  - Support for Livox LiDAR and camera data
+- **File Player** — Multi-dataset direct playback
+  - Supports 4 dataset formats selectable via dropdown:
+    - **ConPR**: CSV-based trajectory/LiDAR/camera data
+    - **KITTI Raw**: Velodyne HDL-64E, 4 cameras (color/gray), IMU/GPS (OXTS), TF
+    - **KAIST Complex Urban**: VLP-16 (left/right), SICK LiDAR (back/mid), stereo camera, IMU, GPS, VRS
+    - **MulRan**: Ouster OS1-64 LiDAR, radar polar image, IMU, GPS
+  - **Drive/Sequence selection** per dataset (scanned from directory)
+  - **Save Bag** in ROS2 or ROS1 format with progress bar
+  - Playback controls: Loop / Skip stop section / Auto start
+  - Timeline slider for frame-accurate seeking
+  - Background worker threads for heavy I/O (non-blocking sensor publish)
+  - Low-latency design: 3ms CPU yield per worker frame, batch limit 8 frames, 100 Hz timer
 
 ### 🌐 Network Tools
-- **Latency Monitor** for real-time network performance tracking
-- **Remote Access** via web browser from any device on network
+- **Latency Monitor** — real-time HTTP round-trip measurement
+  - Sequential 3-ping minimum strategy (avoids self-induced contention)
+  - Color-coded indicator: 🟢 Green < 50ms / 🟡 Yellow < 150ms / 🔴 Red ≥ 150ms
+  - Measures every 3 seconds
 
 ---
 
@@ -137,11 +155,28 @@ Open the URL in your web browser.
 
 3. **Save Map**
    - Click "Save Map" to trigger pose graph optimization
-   - Map is automatically saved to configured output directory
+   - Async operation — progress status shown while saving
+   - Click "Cancel Save Map" to abort if needed
+   - Map is saved to configured output directory
 
 4. **Stop SLAM**
    - Click "Stop SLAM" button
    - Process terminates gracefully (SIGINT → SIGTERM → SIGKILL)
+
+### 🔗 Multi-Session SLAM
+
+1. **Set Inputs**
+   - Click "Set Map 1" and "Set Map 2" to select two map directories
+   - Click "Set Output" to set output path
+
+2. **Run Optimization**
+   - Click "Multi Session Optimization"
+   - Real-time log stream appears in the status area with spinner
+   - Click "Cancel" to stop at any time
+
+3. **Completion**
+   - Status banner turns green on success, red on failure
+   - Button label changes to "Exit" after completion — click to reset UI
 
 ### 📊 Real-time Plotting
 
@@ -210,18 +245,64 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 3. **Playback**
    - Click "Play" to start playback
    - Use timeline slider for seeking
+   - Use the speed slider to adjust playback rate
+   - Toggle **Loop** checkbox to replay automatically when finished
    - Click "Stop" to stop playback
 
 4. **ROS1 Bag Support**
    - `.bag` files are auto-detected as ROS1 format ("ROS1 Bag" badge shown)
    - Click "Convert to ROS2" for offline conversion using `rosbags-convert`
    - Click "Play" to stream directly as ROS2 messages without conversion
+   - Click "Convert to ROS1" to convert a loaded ROS2 bag back to `.bag` format
+
+### 📂 File Player
+
+The File Player supports direct playback of four dataset formats without conversion.
+
+1. **Select Dataset Format**
+   - Use the "Dataset" dropdown to choose: ConPR / KITTI Raw / KAIST Complex Urban / MulRan
+
+2. **Load Directory**
+   - Click "Load" and browse to the dataset root directory
+   - For KITTI: select the base directory containing drive folders (`2011_09_26_drive_*`)
+   - For KAIST: select the directory containing sequence folders (`urban00`, `urban01`, …)
+   - For MulRan: select the directory containing sequence folders (`Riverside01`, `KAIST01`, …)
+
+3. **Select Drive/Sequence** *(KITTI / KAIST / MulRan only)*
+   - A dropdown is populated with detected drives or sequences
+   - Select the desired entry to load it
+
+4. **Play**
+   - Click "▶ Play" to start publishing sensor data to ROS2 topics
+   - Click "⏸ Pause" to pause; click again to resume
+   - Use the **timeline slider** to seek to any position
+
+5. **Playback Options**
+   | Option | Description |
+   |---|---|
+   | **Loop** | Restart from beginning when playback reaches the end |
+   | **Skip stop section** | Skip long gaps between sensor events (on by default) |
+   | **Auto start** | Begin playback automatically after loading |
+
+6. **Save Bag**
+   - Choose output format (ROS2 or ROS1) from the dropdown next to the "Save Bag" button
+   - Click "Save Bag" to convert the current dataset to a bag file
+   - Progress bar shows conversion progress
+
+#### Published Topics by Dataset
+
+| Dataset | Topics |
+|---|---|
+| **ConPR** | `/livox/lidar`, `/camera/image_raw`, `/imu/data`, `/gps/fix`, `/pose` |
+| **KITTI Raw** | `/kitti/velo/pointcloud`, `/kitti/camera_*/image_raw`, `/kitti/imu`, `/kitti/gps/fix`, `/tf` |
+| **KAIST Complex Urban** | `/velodyne_left/points`, `/velodyne_right/points`, `/sick_back/points`, `/sick_mid/points`, `/stereo/left/image_raw`, `/imu/data`, `/gps/fix`, `/vrs_gps/fix`, `/tf` |
+| **MulRan** | `/os1_points`, `/radar/polar`, `/imu/data_raw`, `/gps/fix`, `/tf` |
 
 ### 🌐 3D Visualization
 
 1. **Select Display Topics**
    - Click "Select PointCloud2 Topics" button
-   - Choose PointCloud2, Path, or Odometry topics
+   - Choose PointCloud2, Path, Odometry, or Image topics
    - Click "Confirm" to start visualization
 
 2. **Camera Controls**
@@ -232,6 +313,10 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 3. **Fixed Frame**
    - Select the reference coordinate frame from the dropdown
    - TF transformations are applied automatically
+
+4. **Image Viewer**
+   - Select an `Image` topic in the topic selection dialog
+   - Image frames stream via binary WebSocket (port 8081) with GPU-accelerated JPEG decoding
 
 ---
 
@@ -285,7 +370,7 @@ colcon build --packages-select ros2_autonav_webui
 
 - **ROS2 Jazzy** (Desktop Full)
   - `rclpy` - ROS2 Python library
-  - `std_msgs`, `sensor_msgs`, `geometry_msgs` - Standard message types
+  - `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, `tf2_msgs` - Standard message types
   - `rosbag2_py` - Bag file handling
 
 - **rosbridge_server** - WebSocket bridge for browser communication
@@ -318,6 +403,11 @@ colcon build --packages-select livox_ros_driver2
 pip install rosbags
 ```
 
+**opencv-python** (for camera image processing in File Player):
+```bash
+pip install opencv-python
+```
+
 ---
 
 ## 🏗️ Project Structure
@@ -325,7 +415,10 @@ pip install rosbags
 ```
 ros2_autonav_webui/
 ├── ros2_autonav_webui/
-│   ├── web_server.py              # Main HTTP server, ROS2 node & backend WebSocket (port 8081)
+│   ├── web_server.py              # Main HTTP server, ROS2 node & binary WebSocket (port 8081)
+│   ├── kitti_converter.py         # KITTI Raw dataset → ROS2 message converter
+│   ├── kaist_converter.py         # KAIST Complex Urban dataset → ROS2 message converter
+│   ├── mulran_converter.py        # MulRan dataset → ROS2 message converter
 │   └── __init__.py
 ├── web/
 │   ├── index.html                 # Main web interface
@@ -336,6 +429,7 @@ ros2_autonav_webui/
 │       ├── plot_tree.js           # PlotJuggler-style tree view
 │       ├── threejs_display.js     # Three.js 3D visualization
 │       ├── pc2_stream_worker.js   # Web Worker for binary PointCloud2 streaming
+│       ├── img_stream_worker.js   # Web Worker for binary Image streaming (JPEG/GPU decode)
 │       └── style.css              # UI styling
 ├── launch/
 │   └── ros2_autonav_webui.launch.py  # ROS2 launch configuration
@@ -378,6 +472,7 @@ ros2_autonav_webui/
 - Add API endpoints in `ros2_autonav_webui/web_server.py`
 - Use `do_GET()` for GET requests, `do_POST()` for POST requests
 - Follow existing patterns for error handling and responses
+- Dataset converters (`kitti_converter.py`, `kaist_converter.py`, `mulran_converter.py`) handle all format-specific parsing
 
 **Frontend (JavaScript):**
 - Main UI logic: `web/static/script.js`
@@ -438,6 +533,13 @@ ros2 topic list
   location.reload();
   ```
 
+### File Player Latency Spikes
+
+**Issue**: `latency` indicator turns red during dataset playback
+- Ensure the server is rebuilt and restarted after the latest update
+- KITTI/MulRan use background worker threads; first playback may take 1-2 s to warm up
+- Reducing the number of active rviz2 subscribers lowers DDS load
+
 ### Build Errors
 
 **Issue**: `colcon build` fails
@@ -459,6 +561,9 @@ colcon build --packages-select ros2_autonav_webui
 
 ### Dataset & Tools
 - [ConPR](https://github.com/dongjae0107/ConPR) - ConPR dataset format
+- [KITTI](https://www.cvlibs.net/datasets/kitti/) - KITTI Raw dataset
+- [KAIST Complex Urban](https://irap.kaist.ac.kr/dataset/) - KAIST Urban dataset
+- [MulRan](https://sites.google.com/view/mulran-pr) - MulRan dataset
 - [PlotJuggler](https://github.com/facontidavide/PlotJuggler) - Inspiration for plot UI
 
 ### Visualization
