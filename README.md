@@ -13,9 +13,9 @@ Web-based graphical user interface providing intuitive control and real-time vis
 ## 🌟 Key Features
 
 ### 🗺️ SLAM & Localization
-- **LiDAR SLAM** with [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
-- **Real-time Localization** with live parameter tuning via [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
-- **Multi-Session SLAM** for [map merging and optimization](https://github.com/Kimkyuwon/long_term_mapping)
+- **LiDAR SLAM** is based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
+- **Real-time Localization** is based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
+- **Multi-Session SLAM** is based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
   - Async optimization with real-time log streaming
   - Cancel button during running optimization
   - Progress/status indicator with spinner
