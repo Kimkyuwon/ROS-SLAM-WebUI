@@ -241,8 +241,7 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 ### 🎥 Bag Recorder
 
 1. **Enter Bag Name**
-   - Click "Enter Bag Name" to open a file browser dialog (Save As style)
-   - Navigate to the desired save directory
+   - Click "Enter Bag Name" to open a file browser dialog 
    - Type the bag name in the filename field at the bottom
    - Click "Save" to confirm — the "Bag Name" field displays the full path (read-only)
 
@@ -330,23 +329,74 @@ The File Player supports direct playback of four dataset formats without convers
 
 ### 🌐 3D Visualization
 
-1. **Select Display Topics**
-   - Click "Select PointCloud2 Topics" button
-   - Choose PointCloud2, Path, Odometry, or Image topics
-   - Click "Confirm" to start visualization
+#### Layout
 
-2. **Camera Controls**
-   - **Rotate**: Left mouse drag
-   - **Zoom**: Mouse scroll wheel
-   - **Pan**: Right mouse drag
+The 3D Viewer is divided into three panels:
+- **Displays** (left): manage active topic subscriptions and Fixed Frame
+- **3D View** (center): Three.js canvas
+- **Views** (right): camera type and view controls
 
-3. **Fixed Frame**
-   - Select the reference coordinate frame from the dropdown
-   - TF transformations are applied automatically
+Each side panel can be collapsed with the **▶** button.
 
-4. **Image Viewer**
-   - Select an `Image` topic in the topic selection dialog
-   - Image frames stream via binary WebSocket (port 8081) with GPU-accelerated JPEG decoding
+#### 1. Add Display
+
+Click **"+ Add"** in the Displays panel to open the Add Display dialog.  
+Select a display type and choose a topic to start visualizing:
+
+| Display Type | ROS Message Type | Description |
+|---|---|---|
+| **PointCloud2** | `sensor_msgs/PointCloud2` | Colored point cloud |
+| **Path** | `nav_msgs/Path` | Connected line segments |
+| **Odometry** | `nav_msgs/Odometry` | Arrow + optional trajectory trail |
+| **TF** | `tf2_msgs/TFMessage` | Coordinate frame axes |
+| **LivoxLidar** | `livox_ros_driver2/CustomMsg` | Livox custom point cloud (By Line / Tag Filter) |
+| **Image** | `sensor_msgs/Image` | Live video panels below the 3D view |
+| **LaserScan** | `sensor_msgs/LaserScan` | 2D scan points in 3D space |
+
+#### 2. Display Settings
+
+Click a display item in the Displays panel to expand its settings:
+
+- **PointCloud2 / LivoxLidar**
+  - **Color Mode**: `Rainbow` (field value → gradient), `By Line` (Livox only), `Solid` (single color), `RGB`
+  - **Color Field**: `intensity`, `x`, `y`, `z`, `reflectivity`, …
+  - **Point Size**: point rendering size
+  - **Decay Time**: seconds before old points are removed (0 = keep latest frame only)
+- **Odometry**
+  - **Trajectory**: toggle trail on/off, set max trail length
+- **TF**
+  - Show/hide individual coordinate frames
+
+#### 3. Fixed Frame
+
+- Type or select the reference TF frame in the **Fixed Frame** combo box (default: `map`)
+- Click **▾** to show available TF frames detected at runtime
+- TF transformations are applied automatically to all displays
+
+#### 4. Camera Controls (3D View)
+
+| Action | Control |
+|---|---|
+| Rotate | Left mouse drag |
+| Zoom | Mouse scroll wheel |
+| Pan | Right mouse drag |
+
+#### 5. Views Panel
+
+- **Type**: `Orbit` (free rotation around center) or `TopDown` (bird's-eye view)
+- **Zero**: reset camera to default position
+
+#### 6. Image Viewer
+
+- Select an `Image` topic via **+ Add → Image**
+- Image panels appear below the 3D canvas; multiple topics can be displayed simultaneously
+- Frames stream via binary WebSocket (port 8081) with GPU-accelerated JPEG decoding
+- Resize the image panel by dragging the separator bar
+
+#### 7. Snapshot & Reset
+
+- **Snapshot**: saves the current 3D view as a PNG file
+- **Reset**: removes all active displays and clears the scene
 
 ---
 
