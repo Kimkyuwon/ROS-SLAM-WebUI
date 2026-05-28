@@ -114,7 +114,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
    ```bash
    cd ~/your_workspace/src
    git clone https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization.git
-   git clone https://github.com/Kimkyuwon/Pose_Graph_Optimization.git pose_graph_optimization
+   git clone https://github.com/Kimkyuwon/Pose_Graph_Optimization.git
    git clone https://github.com/Kimkyuwon/long_term_mapping.git
    ```
 
