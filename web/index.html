@@ -250,11 +250,12 @@
                     </div>
 
                     <div class="form-group">
-                        <label></label>
-                        <label style="cursor:pointer;">
-                            <input type="checkbox" id="recorder-save-ros1-toggle">
-                            Save as ROS1 .bag (direct recording)
-                        </label>
+                        <label>Format:</label>
+                        <select id="recorder-format-select" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                            <option value="ros2_mcap">ROS2 (mcap)</option>
+                            <option value="ros2_db3">ROS2 (db3)</option>
+                            <option value="ros1">ROS1 (.bag)</option>
+                        </select>
                     </div>
 
                     <div class="form-group">

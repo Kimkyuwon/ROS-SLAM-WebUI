@@ -2098,8 +2098,8 @@ function updateRecorderBagNameDisplay() {
     if (!bagRecorderState.bagName) {
         return;
     }
-    const isRos1 = domCache.get('recorder-save-ros1-toggle').checked;
-    const displayPath = isRos1 ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
+    const format = domCache.get('recorder-format-select').value;
+    const displayPath = format === 'ros1' ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
     domCache.get('recorder-bag-name').value = displayPath;
 }
 
@@ -2212,10 +2212,10 @@ async function recordBag() {
         return;
     }
 
-    const saveAsRos1 = domCache.get('recorder-save-ros1-toggle').checked;
+    const format = domCache.get('recorder-format-select').value;
     const result = await apiCall('/api/recorder/record', {
         topics: bagRecorderState.selectedTopics,
-        save_as_ros1: saveAsRos1,
+        bag_format: format,
     });
     if (result.success) {
         const button = domCache.get('recorder-record-button');
@@ -2225,11 +2225,11 @@ async function recordBag() {
         // 녹화 중 모드 배지 표시
         const badge = domCache.get('recorder-mode-badge');
         badge.style.display = result.recording ? 'inline' : 'none';
-        badge.textContent = result.mode === 'ros1' ? 'ROS1 .bag' : 'ROS2 bag';
+        const modeLabels = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
+        badge.textContent = modeLabels[result.mode] || 'ROS2 mcap';
 
         if (result.recording) {
-            const isRos1 = domCache.get('recorder-save-ros1-toggle').checked;
-            const displayPath = isRos1 ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
+            const displayPath = format === 'ros1' ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
             alert(`Recording started:\n${displayPath}`);
         } else {
             alert('Recording stopped');
@@ -2254,7 +2254,8 @@ async function updateRecorderState() {
         const badge = domCache.get('recorder-mode-badge');
         if (badge) {
             badge.style.display = state.recording ? 'inline' : 'none';
-            badge.textContent = state.mode === 'ros1' ? 'ROS1 .bag' : 'ROS2 bag';
+            const modeLabels = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
+            badge.textContent = modeLabels[state.mode] || 'ROS2 mcap';
         }
     }
 }
@@ -5172,10 +5173,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // (KITTI 변환 진행률 등 전역 백엔드 이벤트 수신에 필요)
     _initBackendWs();
 
-    // ROS1 toggle 체크박스: 체크 여부에 따라 .bag 확장자 표시 업데이트
-    const ros1Toggle = document.getElementById('recorder-save-ros1-toggle');
-    if (ros1Toggle) {
-        ros1Toggle.addEventListener('change', () => {
+    // 포맷 선택 변경 시 bag 이름 표시 업데이트
+    const formatSelect = document.getElementById('recorder-format-select');
+    if (formatSelect) {
+        formatSelect.addEventListener('change', () => {
             updateRecorderBagNameDisplay();
         });
     }

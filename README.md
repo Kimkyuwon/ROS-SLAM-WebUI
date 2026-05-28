@@ -60,10 +60,10 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - Convert ROS2 bag → ROS1 `.bag` format
 
 - **Bag Recorder**
-  - Record live ROS topics to bag files in both ROS1 `.bag` and ROS2 `.db3` formats
+  - Record live ROS topics to bag files in **ROS2 mcap**, **ROS2 db3**, or **ROS1 `.bag`** format
+  - Format selectable via dropdown before recording
   - Selective topic recording
-  - Real-time recording status
-  - Auto-saved configurations
+  - Real-time recording status badge (shows active format)
 
 - **File Player** — Multi-dataset direct playback
   - Supports 4 dataset formats selectable via dropdown:
@@ -250,8 +250,11 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
    - Click "Save" to confirm — the "Bag Name" field displays the full path (read-only)
 
 2. **Select Format**
-   - Toggle "Save as ROS1 .bag" to record in ROS1 format; leave unchecked for ROS2 `.db3`
-   - When checked, the Bag Name field automatically appends `.bag` to the filename
+   - Use the **Format** dropdown to choose the output format:
+     - **ROS2 (mcap)** — default; single `.mcap` file, fast write, native compression support *(ROS2 Iron / Jazzy or later)*
+     - **ROS2 (db3)** — SQLite3 based; classic ROS2 bag format (folder + `.db3` + `metadata.yaml`). Use this if your ROS2 version is older than Iron (e.g. Humble or earlier)
+     - **ROS1 (.bag)** — direct ROS1 `.bag` recording via `rosbags`; `.bag` extension is appended to the bag name automatically
+   - The Bag Name display updates automatically when switching between ROS1 and ROS2 formats
 
 3. **Select Topics**
    - Click "Select Topic" button
@@ -260,7 +263,7 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 
 4. **Record**
    - Click "Record" to start recording
-   - A badge shows the active recording format (ROS1 .bag / ROS2 bag)
+   - A badge shows the active recording format (ROS1 .bag / ROS2 db3 / ROS2 mcap)
    - Click "Stop" to finish recording
    - Bag file is saved to the directory selected in step 1
 

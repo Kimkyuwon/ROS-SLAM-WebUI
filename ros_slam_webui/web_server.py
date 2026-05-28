@@ -3431,13 +3431,15 @@ class WebGUINode(Node):
             'player_pc2_topics': player_pc2_topics,
         }
 
-    def record_bag(self, topics, save_as_ros1=False):
+    def record_bag(self, topics, bag_format='ros2_mcap'):
         """Start or stop bag recording.
 
         Args:
             topics: 녹화할 토픽 목록. 문자열 리스트 또는 {'name', 'type'} dict 리스트.
-            save_as_ros1 (bool): True이면 Ros1BagRecorderThread로 .bag 직접 기록,
-                                 False이면 기존 ros2 bag record subprocess 사용.
+            bag_format (str): 'ros2_mcap' | 'ros2_db3' | 'ros1'
+                              ros2_mcap - ros2 bag record (mcap, 기본값)
+                              ros2_db3  - ros2 bag record -s sqlite3
+                              ros1      - Ros1BagRecorderThread (.bag 직접 기록)
 
         Returns:
             bool: 성공 여부
@@ -3487,7 +3489,7 @@ class WebGUINode(Node):
                 self.get_logger().error('No valid topics selected')
                 return False
 
-            if save_as_ros1:
+            if bag_format == 'ros1':
                 # ROS1 .bag 직접 녹화 (Ros1BagRecorderThread)
                 if not topic_type_map:
                     self.get_logger().error('Topic type information required for ROS1 recording')
@@ -3516,7 +3518,8 @@ class WebGUINode(Node):
                     self.get_logger().error(f'Failed to start ROS1 recording: {str(e)}')
                     return False
             else:
-                # ros2 bag record subprocess
+                # ros2 bag record subprocess (mcap 또는 sqlite3)
+                storage_flag = '-s sqlite3' if bag_format == 'ros2_db3' else ''
                 bag_name = self.recorder_bag_name
                 if PathLib(bag_name).is_absolute():
                     output_dir = bag_name
@@ -3528,11 +3531,12 @@ class WebGUINode(Node):
                     output_dir = f'/home/kkw/dataset/{bag_name}'
                     record_arg = bag_name
 
+                record_cmd = f'ros2 bag record -o {record_arg} {storage_flag} ' + ' '.join(topic_names)
                 cmd = [
                     'bash', '-c',
                     f'cd {cd_dir} && '
                     f'source /opt/ros/jazzy/setup.bash && '
-                    f'ros2 bag record -o {record_arg} ' + ' '.join(topic_names)
+                    + record_cmd.strip()
                 ]
 
                 self.get_logger().info(f'Starting bag recording in: {output_dir}')
@@ -3547,8 +3551,8 @@ class WebGUINode(Node):
                         start_new_session=True
                     )
                     self.recorder_recording = True
-                    self.recorder_mode = 'ros2'
-                    self.get_logger().info('Bag recording started')
+                    self.recorder_mode = bag_format  # 'ros2_mcap' or 'ros2_db3'
+                    self.get_logger().info(f'Bag recording started (format: {bag_format})')
                     return True
                 except Exception as e:
                     self.get_logger().error(f'Failed to start recording: {str(e)}')
@@ -7202,8 +7206,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             response = {'success': success}
         elif parsed_path.path == '/api/recorder/record':
             topics = data.get('topics', [])
-            save_as_ros1 = data.get('save_as_ros1', False)
-            success = self.node.record_bag(topics, save_as_ros1=save_as_ros1)
+            bag_format = data.get('bag_format', 'ros2_mcap')
+            success = self.node.record_bag(topics, bag_format=bag_format)
             response = {
                 'success': success,
                 'recording': self.node.recorder_recording,
