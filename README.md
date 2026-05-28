@@ -89,9 +89,11 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 ### Prerequisites
 
 - **Ubuntu**: 22.04 or later
-- **ROS2**: Jazzy or later ([Installation Guide](https://docs.ros.org/en/jazzy/Installation.html))
+- **ROS2**: Jazzy or later (Desktop Full recommended — includes `rclpy`, `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, `tf2_msgs`, `rosbag2_py`)
+  → [Installation Guide](https://docs.ros.org/en/jazzy/Installation.html)
 - **Python**: 3.10+ (included with ROS2)
-- **rosbridge_server**: For 3D visualization and plot features
+- **rosbridge_server**: required for 3D Viewer and Plot features
+- **Browser**: any modern browser (Chrome / Firefox recommended)
 
 ### Installation
 
@@ -102,8 +104,10 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 
 2. **Install Python dependencies**
    ```bash
-   pip install rosbags ruamel.yaml numpy
+   pip install rosbags ruamel.yaml numpy opencv-python
    ```
+   > `rosbags`: ROS1 bag read/write and format conversion  
+   > `opencv-python`: camera image processing in File Player
 
 3. **Clone SLAM-related packages**
    The SLAM & Localization features are based on the following packages:
@@ -444,52 +448,6 @@ colcon build --packages-select ros_slam_webui
 
 ---
 
-## 📦 Dependencies
-
-### Required
-
-- **ROS2 Jazzy** (Desktop Full)
-  - `rclpy` - ROS2 Python library
-  - `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, `tf2_msgs` - Standard message types
-  - `rosbag2_py` - Bag file handling
-
-- **rosbridge_server** - WebSocket bridge for browser communication
-  ```bash
-  sudo apt install ros-jazzy-rosbridge-server
-  ```
-
-### Optional
-
-**FAST-LIO** (for SLAM/Localization features):
-```bash
-cd ~/your_workspace/src
-git clone https://github.com/hku-mars/FAST_LIO.git
-cd FAST_LIO
-git submodule update --init
-cd ~/your_workspace
-colcon build --packages-select fast_lio
-```
-
-**livox_ros_driver2** (for Livox LiDAR data):
-```bash
-cd ~/your_workspace/src
-git clone https://github.com/Livox-SDK/livox_ros_driver2.git
-cd ~/your_workspace
-colcon build --packages-select livox_ros_driver2
-```
-
-**rosbags** (for ROS1 bag support):
-```bash
-pip install rosbags
-```
-
-**opencv-python** (for camera image processing in File Player):
-```bash
-pip install opencv-python
-```
-
----
-
 ## 🏗️ Project Structure
 
 ```
@@ -521,123 +479,12 @@ ros_slam_webui/
 
 ---
 
-## 🛠️ Development
-
-### Development Workflow
-
-1. **For Python backend changes:**
-   ```bash
-   # Edit files in ros_slam_webui/
-   colcon build --packages-select ros_slam_webui
-   source install/setup.bash
-   # Restart the server
-   ```
-
-2. **For web frontend changes:**
-   ```bash
-   # Edit files in web/static/
-   colcon build --packages-select ros_slam_webui
-   # Hard refresh browser (Ctrl + F5)
-   ```
-
-3. **For faster iteration (one-time setup):**
-   ```bash
-   colcon build --symlink-install --packages-select ros_slam_webui
-   # Now Python and web file changes don't require rebuild
-   ```
-
-### Code Organization
-
-**Backend (Python):**
-- Add API endpoints in `ros_slam_webui/web_server.py`
-- Use `do_GET()` for GET requests, `do_POST()` for POST requests
-- Follow existing patterns for error handling and responses
-- Dataset converters (`kitti_converter.py`, `kaist_converter.py`, `mulran_converter.py`) handle all format-specific parsing
-
-**Frontend (JavaScript):**
-- Main UI logic: `web/static/script.js`
-- Plot management: `web/static/plot_manager.js`
-- Tab management: `web/static/plot_tab_manager.js`
-- Tree view: `web/static/plot_tree.js`
-- Use `apiCall(endpoint, data)` for backend communication
-
-**UI (HTML/CSS):**
-- Layout: `web/index.html`
-- Styling: `web/static/style.css`
-- Follow existing CSS variable conventions for theming
-
----
-
-## 🐛 Troubleshooting
-
-### Web Server Won't Start
-
-**Issue**: Port 8080 already in use
-```bash
-# Check what's using port 8080
-sudo lsof -i :8080
-# Kill the process or change port in web_server.py
-```
-
-### rosbridge Connection Failed
-
-**Issue**: Plot or 3D viewer not working
-```bash
-# Ensure rosbridge is installed
-sudo apt install ros-jazzy-rosbridge-server
-
-# Check if rosbridge is running (it starts automatically with the launch file)
-ros2 node list | grep rosbridge
-```
-
-### Topics Not Appearing
-
-**Issue**: No topics in plot tree or bag recorder
-```bash
-# Check ROS2 environment variables
-echo $ROS_DOMAIN_ID      # Should be 0
-echo $ROS_LOCALHOST_ONLY # Should be 1
-
-# List topics manually
-ros2 topic list
-```
-
-### Page Refresh Loses Data
-
-**Issue**: Plot configurations not restoring
-- Check browser console (F12) for JavaScript errors
-- Clear browser cache and LocalStorage if corrupted:
-  ```javascript
-  // In browser console
-  localStorage.clear();
-  location.reload();
-  ```
-
-### File Player Latency Spikes
-
-**Issue**: `latency` indicator turns red during dataset playback
-- Ensure the server is rebuilt and restarted after the latest update
-- KITTI/MulRan use background worker threads; first playback may take 1-2 s to warm up
-- Reducing the number of active rviz2 subscribers lowers DDS load
-
-### Build Errors
-
-**Issue**: `colcon build` fails
-```bash
-# Clean build artifacts
-rm -rf build/ install/ log/
-
-# Rebuild from scratch
-colcon build --packages-select ros_slam_webui
-```
-
----
-
 ## 📚 Related Projects
 
 ### SLAM & Localization
-- [FAST-LIO](https://github.com/hku-mars/FAST_LIO) - Fast LiDAR-Inertial Odometry
 - [FAST-LIO Mapping & Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) - ROS2 FAST-LIO mapping/localization package used by this Web UI
+- [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
+- [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
 
 ### Dataset & Tools
 - [ConPR](https://github.com/dongjae0107/ConPR) - ConPR dataset format
@@ -657,10 +504,30 @@ colcon build --packages-select ros_slam_webui
 
 This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
 
-### Third-Party Licenses
-- **Three.js**: MIT License
-- **Plotly.js**: MIT License
-- **rosbridge_suite**: BSD License
+### Third-Party Notices
+
+The following libraries are loaded at runtime and are **not** bundled in this repository:
+
+| Library | Version | License | Usage |
+|---|---|---|---|
+| [Three.js](https://github.com/mrdoob/three.js) | 0.128.0 | MIT | 3D rendering |
+| [Plotly.js](https://github.com/plotly/plotly.js) | 2.27.0 | MIT | Interactive plots |
+| [roslibjs](https://github.com/RobotWebTools/roslibjs) | 1.1.0 | BSD-3-Clause | ROS WebSocket bridge |
+| [rosbridge_suite](https://github.com/RobotWebTools/rosbridge_suite) | — | BSD-3-Clause | ROS WebSocket server |
+
+The following Python packages are installed separately as runtime dependencies:
+
+| Package | License |
+|---|---|
+| [rosbags](https://gitlab.com/ternaris/rosbags) | Apache 2.0 |
+| [ruamel.yaml](https://sourceforge.net/p/ruamel-yaml) | MIT |
+| [numpy](https://numpy.org) | BSD |
+| [opencv-python](https://github.com/opencv/opencv-python) | MIT / Apache 2.0 |
+
+### Design Inspiration
+
+- **[PlotJuggler](https://github.com/facontidavide/PlotJuggler)** (LGPL v3.0) — The `PlotJugglerTree` component is an **independent JavaScript implementation** inspired by PlotJuggler's tree-view UI concept. No source code from PlotJuggler is copied or derived. LGPL does not apply to independently re-implemented works.
+- **KITTI / KAIST / MulRan / ConPR** — The File Player implements **file format parsers** for these dataset formats. The dataset files themselves are not included or redistributed; their respective dataset licenses apply only to the data.
 
 ---
 
