@@ -1,8 +1,8 @@
 # ROS SLAM WEBUI
 
-> **A modern, browser-based control center for LiDAR SLAM, localization, data playback, and visualization with ROS2**
+> **An all-in-one web-based GUI for LiDAR SLAM development with ROS**
 
-Web-based graphical user interface providing intuitive control, data playback, and real-time visualization of LiDAR SLAM, localization, multi-session map optimization, and dataset/bag data management for ROS2-based mapping workflows. Access everything from any device with a web browser.
+ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and real-time visualization into a single browser-based interface. Instead of running each ROS launch file and tool manually from separate terminals, you can control the full LiDAR SLAM development workflow comfortably from one web GUI on any device (such as Desktop, Tablet, Smartphone).
 
 <p align="center">
   <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-blue.svg" alt="ROS2 Jazzy" /></a>
@@ -25,7 +25,7 @@ Web-based graphical user interface providing intuitive control, data playback, a
 - Live YAML configuration editing with instant apply
 - Real-time terminal output monitoring
 - One-click start/stop control
-- Async Save Map with cancel support
+- Async Save Map 
 
 ### 📊 Advanced Data Visualization
 - **PlotJuggler-style Real-time Plotting**
@@ -36,20 +36,15 @@ Web-based graphical user interface providing intuitive control, data playback, a
   - Zoom, pan, play/pause controls
   - Export plots (PNG)
   - XY Plot support
-  - Filter (Low-pass, High-pass, Band-pass)
 
   ![plot](doc/plot.gif)
 
 - **3D Visualization**
-  - Real-time PointCloud2 rendering (Ouster, Velodyne, Hesai, Livox)
+  - Real-time PointCloud2 and Livox CustomMsg visualization
   - Path and odometry display
   - TF tree visualization with Fixed Frame support
   - Interactive camera controls
-  - Python backend binary WebSocket for low-latency updates (port 8081)
-  - Point Size / Alpha / Decay Time settings
-  - **Image topic streaming** via binary WebSocket Web Worker (`img_stream_worker.js`)
-    - GPU-accelerated JPEG decoding via `createImageBitmap()`
-    - Subscribe/unsubscribe image topics live
+  - Image topic streaming
   - Snapshot export
 
   ![plot](doc/visualization.gif)
@@ -65,7 +60,7 @@ Web-based graphical user interface providing intuitive control, data playback, a
   - Convert ROS2 bag → ROS1 `.bag` format
 
 - **Bag Recorder**
-  - Record live ROS2 topics to bag files
+  - Record live ROS topics to bag files in both ROS1 `.bag` and ROS2 `.db3` formats
   - Selective topic recording
   - Real-time recording status
   - Auto-saved configurations
@@ -77,11 +72,9 @@ Web-based graphical user interface providing intuitive control, data playback, a
     - **KAIST Complex Urban**: VLP-16 (left/right), SICK LiDAR (back/mid), stereo camera, IMU, GPS, VRS
     - **MulRan**: Ouster OS1-64 LiDAR, radar polar image, IMU, GPS
   - **Drive/Sequence selection** per dataset (scanned from directory)
-  - **Save Bag** in ROS2 or ROS1 format with progress bar
+  - **Save Bag** in ROS2 or ROS1 format
   - Playback controls: Loop / Skip stop section / Auto start
   - Timeline slider for frame-accurate seeking
-  - Background worker threads for heavy I/O (non-blocking sensor publish)
-  - Low-latency design: 3ms CPU yield per worker frame, batch limit 8 frames, 100 Hz timer
 
 ### 🌐 Network Tools
 - **Latency Monitor** — real-time HTTP round-trip measurement
@@ -107,16 +100,31 @@ Web-based graphical user interface providing intuitive control, data playback, a
    sudo apt install ros-jazzy-rosbridge-server
    ```
 
-2. **Clone the repository**
+2. **Install Python dependencies**
    ```bash
-   cd ~/your_workspace/src
-   git clone https://github.com/Kimkyuwon/Web-based-GUI-for-ROS2-SLAM-and-File-Player.git ros_slam_webui
+   pip install rosbags ruamel.yaml numpy
    ```
 
-3. **Build the package**
+3. **Clone SLAM-related packages**
+   The SLAM & Localization features are based on the following packages:
    ```bash
+   cd ~/your_workspace/src
+   git clone https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization.git
+   git clone https://github.com/Kimkyuwon/Pose_Graph_Optimization.git pose_graph_optimization
+   git clone https://github.com/Kimkyuwon/long_term_mapping.git
+   ```
+
+4. **Livox LiDAR support**
+   Required only if you use a Livox LiDAR sensor. Clone [livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2):
+   ```bash
+   git clone https://github.com/Livox-SDK/livox_ros_driver2.git
+   ```
+
+5. **Clone and build ros_slam_webui**
+   ```bash
+   git clone https://github.com/Kimkyuwon/Web-based-GUI-for-ROS2-SLAM-and-File-Player.git ros_slam_webui
    cd ~/your_workspace
-   colcon build --packages-select ros_slam_webui
+   colcon build
    source install/setup.bash
    ```
 
@@ -142,7 +150,7 @@ Once the server starts, you'll see:
 [INFO] [ros_slam_webui_node]: ======================================
 ```
 
-Open the URL in your web browser.
+Open the URL in your web browser. For network access from another device (e.g. tablet or smartphone), the device must be connected to the same Wi-Fi network (AP) as the host machine.
 
 ---
 
@@ -193,14 +201,15 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
    - Click "Visualization" → "Plot" in the main navigation
 
 2. **Browse Topics**
-   - Topics are displayed in a tree view (topic → message fields)
-   - Search topics by name using the search box
-   - Click to expand/collapse message fields
+   - Currently published topics are listed in the tree view (topic → message fields)
+   - Click a topic to subscribe and expand its message fields
+   - **Ctrl+click** to select multiple topics simultaneously
 
 3. **Create Plots**
    - Drag leaf nodes (data fields) from tree to plot area
    - Each drag creates a new trace in the plot
    - Multiple traces can be added to a single plot
+   - **XY Plot**: Ctrl+click to select 2 leaf fields → right-click → "Create XY Plot"
 
 4. **Manage Tabs**
    - Click "+" to create new plot tabs
@@ -210,17 +219,24 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 
 5. **Plot Controls**
    - **Play/Pause**: Toggle real-time data updates
-   - **t0 Mode**: Show relative time (starts from 0 seconds)
-   - **Zoom Out**: Auto-scale to fit all data
-   - **Clear Plot**: Reset plot (keeps current subscriptions)
-   - **Buffer Time**: Adjust visible time window (1-300 seconds)
+   - **t0 Mode**: Show relative time from first data point (enabled by default)
+   - **Buffer Time**: Adjust visible time window (1-100 seconds)
 
 6. **Interact with Plots**
    - **Zoom**: Scroll wheel (when paused)
-   - **Pan**: Middle mouse button drag (when paused)
+   - **Auto Scale**: Right-click on plot → "Auto Scale"
    - **Delete Plot**: Right-click on trace or legend → "Delete plot"
-   - **Auto-save**: Plot configurations save automatically
+   - **Clear Plot**: Right-click on plot → "Clear Plot"
+   - **Export PNG**: Right-click on plot → "Export as PNG"
+   - **Auto-save**: Plot configurations save automatically to browser storage
    - **Auto-restore**: Plots restore after page refresh
+
+7. **Filters** (right-click on a trace → "Apply Filter")
+   - **Derivative**: Rate of change
+   - **Moving Average**: Smoothing
+   - **Moving RMS**: Root mean square
+   - **Moving Variance**: Variance over window
+   - **Scale + Offset**: Linear transform (y = scale × x + offset)
 
 ### 🎥 Bag Recorder
 
@@ -233,17 +249,21 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
    - Choose topics to record from the list
    - Click "Confirm"
 
-3. **Record**
+3. **Select Format**
+   - Toggle "Save as ROS1 .bag" to record in ROS1 format; leave unchecked for ROS2 `.db3`
+
+4. **Record**
    - Click "Record" to start recording
-   - Status indicator shows recording state
+   - A badge shows the active recording format (ROS1 .bag / ROS2 bag)
    - Click "Stop" to finish recording
-   - Bag file is saved to `/home/user/dataset/[bag_name]/`
+   - Bag file is saved to `/home/kkw/dataset/[bag_name]/`
 
 ### 🎮 Bag Player
 
 1. **Load Bag**
    - Click "Load Bag File" to browse for bag directory
-   - ROS2 bags are stored as directories; ROS1 `.bag` files are also supported
+   - ROS2 bags (`.db3` directory) and ROS1 `.bag` files are both supported
+   - A badge (ROS1 Bag / ROS2 Bag) shows the detected format
 
 2. **Select Topics**
    - Click "Select Topic" to filter which topics to play
@@ -252,15 +272,14 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 3. **Playback**
    - Click "Play" to start playback
    - Use timeline slider for seeking
-   - Use the speed slider to adjust playback rate
+   - Use the speed slider to adjust playback rate (applies to both ROS1 and ROS2 bags)
    - Toggle **Loop** checkbox to replay automatically when finished
    - Click "Stop" to stop playback
 
-4. **ROS1 Bag Support**
-   - `.bag` files are auto-detected as ROS1 format ("ROS1 Bag" badge shown)
-   - Click "Convert to ROS2" for offline conversion using `rosbags-convert`
-   - Click "Play" to stream directly as ROS2 messages without conversion
-   - Click "Convert to ROS1" to convert a loaded ROS2 bag back to `.bag` format
+4. **Format Conversion**
+   - **ROS1 bag loaded**: "Convert to ROS2" button appears — converts offline using `rosbags-convert`
+   - **ROS2 bag loaded**: "Convert to ROS1" button appears — converts to `.bag` format
+   - Direct playback without conversion is available for both formats
 
 ### 📂 File Player
 

@@ -238,7 +238,7 @@
 
                     <div class="form-group">
                         <label>Bag Name:</label>
-                        <input type="text" id="recorder-bag-name" placeholder="Enter bag name">
+                        <input type="text" id="recorder-bag-name" placeholder="Enter bag name" readonly style="cursor:default;">
                         <button onclick="enterBagName()">Enter Bag Name</button>
                     </div>
 
@@ -638,6 +638,32 @@
             <div class="modal-footer">
                 <button onclick="selectCurrentDirectory()">Select This Directory</button>
                 <button onclick="closeFileBrowser()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bag Name Browser Modal (Save As style) -->
+    <div id="bag-name-browser-modal" class="modal" style="display:none;">
+        <div class="modal-content bag-name-modal-content">
+            <div class="modal-header">
+                <h3>Select Bag Save Location</h3>
+                <span class="close" onclick="closeBagNameBrowser()">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="current-path">
+                    <strong>Current Path:</strong> <span id="bag-name-current-path">/home</span>
+                </div>
+                <div class="directory-list" id="bag-name-directory-list">
+                    <!-- Directory entries loaded here -->
+                </div>
+            </div>
+            <div class="bag-name-modal-footer">
+                <label for="bag-name-input">File Name:</label>
+                <input type="text" id="bag-name-input" placeholder="Enter bag name...">
+                <div class="bag-name-footer-buttons">
+                    <button onclick="confirmBagName()">Save</button>
+                    <button onclick="closeBagNameBrowser()">Cancel</button>
+                </div>
             </div>
         </div>
     </div>

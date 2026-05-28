@@ -3320,7 +3320,12 @@ class WebGUINode(Node):
         return dict(self.slam_opt_status)
 
     def update_slam_parameters(self):
-        param_file = "/home/kkw/localization_ws/src/long_term_mapping/config/params.yaml"
+        lt_dir = _find_sibling_package_dir('long_term_mapping')
+        if lt_dir:
+            param_file = str(lt_dir / 'config' / 'params.yaml')
+        else:
+            param_file = "/home/kkw/localization_ws/src/long_term_mapping/config/params.yaml"
+            self.get_logger().warn('long_term_mapping package not found in workspace; using fallback path')
 
         try:
             with open(param_file, 'r') as f:
@@ -3488,7 +3493,13 @@ class WebGUINode(Node):
                     self.get_logger().error('Topic type information required for ROS1 recording')
                     return False
 
-                output_path = f'/home/kkw/dataset/{self.recorder_bag_name}.bag'
+                base_name = self.recorder_bag_name.rstrip('.bag').rstrip('/')
+                if PathLib(base_name).is_absolute():
+                    output_path = f'{base_name}.bag'
+                    parent_dir = str(PathLib(base_name).parent)
+                    PathLib(parent_dir).mkdir(parents=True, exist_ok=True)
+                else:
+                    output_path = f'/home/kkw/dataset/{base_name}.bag'
                 self.get_logger().info(f'Starting ROS1 bag recording to: {output_path}')
                 self.get_logger().info(f'Recording topics: {", ".join(topic_names)}')
 
@@ -3505,13 +3516,23 @@ class WebGUINode(Node):
                     self.get_logger().error(f'Failed to start ROS1 recording: {str(e)}')
                     return False
             else:
-                # 기존 ros2 bag record subprocess
-                output_dir = f'/home/kkw/dataset/{self.recorder_bag_name}'
+                # ros2 bag record subprocess
+                bag_name = self.recorder_bag_name
+                if PathLib(bag_name).is_absolute():
+                    output_dir = bag_name
+                    cd_dir = str(PathLib(bag_name).parent)
+                    PathLib(cd_dir).mkdir(parents=True, exist_ok=True)
+                    record_arg = bag_name
+                else:
+                    cd_dir = '/home/kkw/dataset'
+                    output_dir = f'/home/kkw/dataset/{bag_name}'
+                    record_arg = bag_name
+
                 cmd = [
                     'bash', '-c',
-                    f'cd /home/kkw/dataset && '
+                    f'cd {cd_dir} && '
                     f'source /opt/ros/jazzy/setup.bash && '
-                    f'ros2 bag record -o {self.recorder_bag_name} ' + ' '.join(topic_names)
+                    f'ros2 bag record -o {record_arg} ' + ' '.join(topic_names)
                 ]
 
                 self.get_logger().info(f'Starting bag recording in: {output_dir}')
@@ -6847,6 +6868,25 @@ def _find_fast_lio_config_dir():
     return None
 
 
+def _find_sibling_package_dir(package_name):
+    """Find any sibling ROS package directory in the same workspace."""
+    for src_dir in _workspace_src_candidates():
+        pkg_dir = src_dir / package_name
+        if pkg_dir.is_dir():
+            return pkg_dir
+    return None
+
+
+def get_sibling_package_dirs():
+    """Return auto-detected directories for sibling packages used by the UI."""
+    result = {'success': True}
+    for pkg in ('long_term_mapping', 'pose_graph_optimization', 'FAST_LIO_Localization_and_Mapping', 'FAST_LIO_ROS2'):
+        pkg_dir = _find_sibling_package_dir(pkg)
+        if pkg_dir:
+            result[pkg] = str(pkg_dir)
+    return result
+
+
 def get_fast_lio_config_paths():
     config_dir = _find_fast_lio_config_dir()
     if not config_dir:
@@ -6888,7 +6928,7 @@ def browse_directory(start_path="/home"):
     """Get list of directories and files in the given path"""
     try:
         entries = []
-        path = PathLib(start_path)
+        path = PathLib(start_path).expanduser()
 
         # Add parent directory option
         if path.parent != path:
@@ -6953,6 +6993,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response(self.node.get_optimization_status())
         elif parsed_path.path == '/api/slam/default_config_paths':
             self.send_json_response(get_fast_lio_config_paths())
+        elif parsed_path.path == '/api/slam/sibling_package_dirs':
+            self.send_json_response(get_sibling_package_dirs())
         elif parsed_path.path == '/api/localization/state':
             self.send_json_response(self.node.get_localization_state())
         elif parsed_path.path == '/api/player/state':

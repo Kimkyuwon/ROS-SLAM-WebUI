@@ -17,6 +17,11 @@ const bagRecorderState = {
     selectedTopics: []
 };
 
+const siblingPackagePaths = {
+    longTermMapping: null,
+    poseGraphOptimization: null,
+};
+
 const kittiState = {
     baseDir: null,   // 사용자가 선택한 KITTI 최상위 디렉토리
     calibDir: null,  // calib 파일이 있는 실제 경로
@@ -267,7 +272,7 @@ async function apiCall(endpoint, data = null) {
 }
 
 // File Browser Functions
-async function openFileBrowser(callback, startPath = '/home') {
+async function openFileBrowser(callback, startPath = '~') {
     fileBrowserState.callback = callback;
     fileBrowserState.currentPath = startPath;
     await loadDirectoryList(fileBrowserState.currentPath);
@@ -332,23 +337,25 @@ function selectCurrentDirectory() {
 
 // SLAM GUI Functions
 async function loadMap1() {
+    const defaultDir = siblingPackagePaths.longTermMapping || '~';
     openFileBrowser(async (path) => {
         domCache.get('slam-map1').value = path;
         const result = await apiCall('/api/slam/set_map1', { path });
         if (result.success) {
             updateSlamStatus(result.status);
         }
-    }, '/home/kkw/localization_ws/src/long_term_mapping');
+    }, defaultDir);
 }
 
 async function loadMap2() {
+    const defaultDir = siblingPackagePaths.longTermMapping || '~';
     openFileBrowser(async (path) => {
         domCache.get('slam-map2').value = path;
         const result = await apiCall('/api/slam/set_map2', { path });
         if (result.success) {
             updateSlamStatus(result.status);
         }
-    }, '/home/kkw/localization_ws/src/long_term_mapping');
+    }, defaultDir);
 }
 
 async function setOutput() {
@@ -650,7 +657,7 @@ async function loadBagFile() {
         } else {
             alert('Failed to load bag file: ' + (result.message || 'Unknown error'));
         }
-    }, '/home/kkw/dataset');
+    }, '~');
 }
 
 function formatTime(seconds) {
@@ -1278,7 +1285,7 @@ async function loadKittiDirectory() {
             // 항상 "Select a drive" 기본값 유지 - 사용자가 직접 선택
             console.log(`[KITTI] Found ${kittiState.drives.length} drive(s) in ${path}`);
         }
-    }, '/home');
+    }, '~');
 }
 
 /** File Player load_data 성공 시 이전 백/뷰어 상태 전부 비우고 서버 PC2 목록만 다시 연결 */
@@ -1513,7 +1520,7 @@ async function loadKaistDirectory() {
         } else {
             console.log(`[KAIST] Found ${sequences.length} sequence(s) in ${path}`);
         }
-    }, '/home');
+    }, '~');
 }
 
 /**
@@ -1676,7 +1683,7 @@ async function loadMulranDirectory() {
                 await onMulranSequenceChange('0');
             }
         }
-    }, '/home/kkw/dataset');
+    }, '~');
 }
 
 /**
@@ -1857,7 +1864,7 @@ async function loadPlayerPath() {
             domCache.get('player-path-label').textContent = 'Failed to load';
             alert('Failed to load player data: ' + result.message);
         }
-    }, '/home');
+    }, '~');
 }
 
 async function playPlayer() {
@@ -2006,24 +2013,94 @@ async function updatePlayerState() {
 
 // Bag Recorder Functions
 
-async function enterBagName() {
-    const bagNameInput = domCache.get('recorder-bag-name');
-    const bagName = bagNameInput.value.trim();
+const bagNameBrowserState = {
+    currentPath: '~'
+};
 
-    if (!bagName) {
+async function enterBagName() {
+    await openBagNameBrowser();
+}
+
+async function openBagNameBrowser() {
+    bagNameBrowserState.currentPath = '~';
+    domCache.get('bag-name-input').value = '';
+    await loadBagNameDirectory(bagNameBrowserState.currentPath);
+    domCache.get('bag-name-browser-modal').style.display = 'block';
+}
+
+function closeBagNameBrowser() {
+    domCache.get('bag-name-browser-modal').style.display = 'none';
+    domCache.get('bag-name-input').value = '';
+}
+
+async function loadBagNameDirectory(path) {
+    try {
+        const response = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+        const result = await response.json();
+
+        if (result.success) {
+            bagNameBrowserState.currentPath = result.current_path;
+            domCache.get('bag-name-current-path').textContent = result.current_path;
+
+            const listElement = domCache.get('bag-name-directory-list');
+            listElement.innerHTML = '';
+
+            result.entries.forEach(entry => {
+                const div = document.createElement('div');
+                div.className = 'directory-entry';
+
+                if (entry.is_dir) {
+                    div.textContent = '📁 ' + entry.name;
+                    div.onclick = () => loadBagNameDirectory(entry.path);
+                } else {
+                    div.textContent = '📄 ' + entry.name;
+                    div.style.color = '#aaaaaa';
+                    div.onclick = () => {
+                        domCache.get('bag-name-input').value = entry.name;
+                    };
+                }
+
+                listElement.appendChild(div);
+            });
+        } else {
+            alert('Failed to load directory: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        console.error('Failed to load directory:', error);
+        alert('Failed to load directory');
+    }
+}
+
+async function confirmBagName() {
+    const nameInput = domCache.get('bag-name-input');
+    const name = nameInput.value.trim().replace(/\.bag$/, '');
+
+    if (!name) {
         alert('Please enter a bag name');
         return;
     }
 
-    bagRecorderState.bagName = bagName;
-    console.log('Bag name set:', bagRecorderState.bagName);
+    const basePath = bagNameBrowserState.currentPath.replace(/\/+$/, '') + '/' + name;
 
-    const result = await apiCall('/api/recorder/set_bag_name', { bag_name: bagName });
-    if (result.success) {
-        console.log('Bag name confirmed:', bagName);
-    } else {
+    bagRecorderState.bagName = basePath;
+    updateRecorderBagNameDisplay();
+    console.log('Bag name set:', basePath);
+
+    closeBagNameBrowser();
+
+    const result = await apiCall('/api/recorder/set_bag_name', { bag_name: basePath });
+    if (!result.success) {
         alert('Failed to set bag name: ' + (result.message || 'Unknown error'));
     }
+}
+
+function updateRecorderBagNameDisplay() {
+    if (!bagRecorderState.bagName) {
+        return;
+    }
+    const isRos1 = domCache.get('recorder-save-ros1-toggle').checked;
+    const displayPath = isRos1 ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
+    domCache.get('recorder-bag-name').value = displayPath;
 }
 
 async function selectRecorderTopics() {
@@ -2151,7 +2228,9 @@ async function recordBag() {
         badge.textContent = result.mode === 'ros1' ? 'ROS1 .bag' : 'ROS2 bag';
 
         if (result.recording) {
-            alert(`Recording started in /home/kkw/dataset/${bagRecorderState.bagName}`);
+            const isRos1 = domCache.get('recorder-save-ros1-toggle').checked;
+            const displayPath = isRos1 ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
+            alert(`Recording started:\n${displayPath}`);
         } else {
             alert('Recording stopped');
         }
@@ -2558,6 +2637,21 @@ async function initializeFastLioConfigPaths() {
         console.log('FAST-LIO config directory:', result.config_dir);
     } else {
         console.error('Failed to resolve FAST-LIO config directory:', result.message || result.error);
+    }
+}
+
+async function initializeSiblingPackagePaths() {
+    const result = await apiCall('/api/slam/sibling_package_dirs');
+    if (result.success) {
+        if (result.long_term_mapping) {
+            siblingPackagePaths.longTermMapping = result.long_term_mapping;
+        }
+        if (result.pose_graph_optimization) {
+            siblingPackagePaths.poseGraphOptimization = result.pose_graph_optimization;
+        }
+        console.log('Sibling package paths:', siblingPackagePaths);
+    } else {
+        console.warn('Could not auto-detect sibling package paths');
     }
 }
 
@@ -2991,8 +3085,11 @@ window.addEventListener('load', async () => {
     updateBagState();
     updateRosDomainId(); // Update ROS DOMAIN ID display
 
-    // Resolve FAST-LIO config paths from the current ROS workspace, then load defaults.
-    await initializeFastLioConfigPaths();
+    // Resolve FAST-LIO config paths and sibling package paths from the current ROS workspace.
+    await Promise.all([
+        initializeFastLioConfigPaths(),
+        initializeSiblingPackagePaths(),
+    ]);
     loadDefaultSlamConfig();
     loadDefaultLocalizationConfig();
 
@@ -5074,7 +5171,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // 8081 WebSocket은 Plot 탭 여부와 무관하게 항상 연결 유지
     // (KITTI 변환 진행률 등 전역 백엔드 이벤트 수신에 필요)
     _initBackendWs();
-    
+
+    // ROS1 toggle 체크박스: 체크 여부에 따라 .bag 확장자 표시 업데이트
+    const ros1Toggle = document.getElementById('recorder-save-ros1-toggle');
+    if (ros1Toggle) {
+        ros1Toggle.addEventListener('change', () => {
+            updateRecorderBagNameDisplay();
+        });
+    }
+
     // Visualization 탭의 Plot subtab이 기본 활성화되어 있으면 초기화
     setTimeout(() => {
         const visualizationTab = domCache.get('visualization-tab');
