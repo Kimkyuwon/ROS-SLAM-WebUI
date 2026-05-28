@@ -241,27 +241,30 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 ### 🎥 Bag Recorder
 
 1. **Enter Bag Name**
-   - Type desired bag name in "Bag Name" field
-   - Click "Enter Bag Name" to confirm
+   - Click "Enter Bag Name" to open a file browser dialog (Save As style)
+   - Navigate to the desired save directory
+   - Type the bag name in the filename field at the bottom
+   - Click "Save" to confirm — the "Bag Name" field displays the full path (read-only)
 
-2. **Select Topics**
-   - Click "Select Topic" button
-   - Choose topics to record from the list
-   - Click "Confirm"
-
-3. **Select Format**
+2. **Select Format**
    - Toggle "Save as ROS1 .bag" to record in ROS1 format; leave unchecked for ROS2 `.db3`
+   - When checked, the Bag Name field automatically appends `.bag` to the filename
+
+3. **Select Topics**
+   - Click "Select Topic" button
+   - Choose topics to record from the list (requires bag name to be set first)
+   - Click "Confirm"
 
 4. **Record**
    - Click "Record" to start recording
    - A badge shows the active recording format (ROS1 .bag / ROS2 bag)
    - Click "Stop" to finish recording
-   - Bag file is saved to `/home/kkw/dataset/[bag_name]/`
+   - Bag file is saved to the directory selected in step 1
 
 ### 🎮 Bag Player
 
 1. **Load Bag**
-   - Click "Load Bag File" to browse for bag directory
+   - Click "Load Bag File" to open a file browser (starts from your home directory)
    - ROS2 bags (`.db3` directory) and ROS1 `.bag` files are both supported
    - A badge (ROS1 Bag / ROS2 Bag) shows the detected format
 
@@ -289,7 +292,8 @@ The File Player supports direct playback of four dataset formats without convers
    - Use the "Dataset" dropdown to choose: ConPR / KITTI Raw / KAIST Complex Urban / MulRan
 
 2. **Load Directory**
-   - Click "Load" and browse to the dataset root directory
+   - Click "Load" to open a file browser (starts from your home directory)
+   - Navigate to and select the dataset root directory
    - For KITTI: select the base directory containing drive folders (`2011_09_26_drive_*`)
    - For KAIST: select the directory containing sequence folders (`urban00`, `urban01`, …)
    - For MulRan: select the directory containing sequence folders (`Riverside01`, `KAIST01`, …)
