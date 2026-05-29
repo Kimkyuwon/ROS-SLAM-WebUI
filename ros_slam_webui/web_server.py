@@ -2114,13 +2114,13 @@ class WebGUINode(Node):
         self.bag_start_real_time = 0.0  # Real time when playback started
         self.bag_pause_time = 0.0  # Time when paused
         self._bag_stop_pause_offset = None  # 서비스 실패 시 stop+restart 방식에서 일시정지 위치(초)
+        self._bag_play_lock = threading.Lock()  # bag_play_toggle 과 _bag_process_monitor 간 경쟁 방지
 
         # File Player state
         self.player_path = ""
         self.player_playing = False
         self.player_paused = False
         self.player_loop = False
-        self.player_skip_stop = True
         self.player_auto_start = False
         self.player_speed = 1.0
         self.player_timestamp = 0
@@ -5749,6 +5749,11 @@ class WebGUINode(Node):
             self.get_logger().warn('No bag file loaded. Please load a bag file first.')
             return False
 
+        with self._bag_play_lock:
+            return self._bag_play_toggle_locked(selected_topics, start_offset, rate)
+
+    def _bag_play_toggle_locked(self, selected_topics=None, start_offset=None, rate=1.0):
+        """bag_play_toggle의 실제 구현 (락 획득 후 호출)."""
         if self.bag_playing:
             # Stop playback
             self.get_logger().info('Stopping bag playback...')
@@ -5789,10 +5794,10 @@ class WebGUINode(Node):
                     cmd.extend(['--rate', str(rate)])
                 self.get_logger().info(f'Playback rate: {rate}x')
 
-                # Add loop flag if enabled
+                # --loop 플래그는 사용하지 않음: 루프 재시작을 _bag_process_monitor에서
+                # 직접 처리하여 항상 position 0부터 재시작하도록 보장
                 if self.bag_player_loop:
-                    cmd.append('--loop')
-                    self.get_logger().info('Loop playback enabled')
+                    self.get_logger().info('Loop playback enabled (managed by monitor thread)')
 
                 # Add topic filter if topics are selected
                 # ROS1 bag player 참조: /tf, /tf_static는 3D Viewer 좌표 변환에 필수.
@@ -5833,11 +5838,87 @@ class WebGUINode(Node):
                         if line:
                             self.get_logger().info(f'[bag play] {line.decode().strip()}')
                 threading.Thread(target=read_output, daemon=True).start()
+
+                # Start monitor thread: detect natural process exit → update playing state
+                current_process = self.bag_process
+                threading.Thread(
+                    target=self._bag_process_monitor,
+                    args=(current_process,),
+                    daemon=True
+                ).start()
             except Exception as e:
                 self.get_logger().error(f'Failed to start bag playback: {str(e)}')
                 return False
 
         return True
+
+    def _bag_process_monitor(self, process_ref):
+        """ROS2 bag play 프로세스 자연 종료를 감지하여 playing 상태를 업데이트한다.
+
+        - 루프 OFF: 프로세스 종료 시 bag_playing = False, 시간 0으로 리셋
+        - 루프 ON : 락 안에서 직접 새 프로세스 시작 (bag_play_toggle 호출 시 데드락/경쟁 방지)
+        """
+        try:
+            process_ref.wait()
+        except Exception:
+            return
+
+        with self._bag_play_lock:
+            # 수동 정지(bag_process가 교체 또는 None)된 경우 스킵
+            if self.bag_process is not process_ref or not self.bag_playing:
+                return
+
+            if not self.bag_player_loop:
+                # 비루프: 재생 완료 → 상태 리셋
+                self.get_logger().info('[bag monitor] Bag ended naturally → resetting state')
+                self.bag_playing = False
+                self.bag_process = None
+                self.bag_current_time = 0.0
+                self.bag_start_offset = 0.0
+                return
+
+            # 루프: 락 안에서 직접 프로세스 재시작 (bag_play_toggle 재진입 방지)
+            self.get_logger().info('[bag monitor] Bag ended → restarting from position 0 (loop)')
+            try:
+                cmd = ['ros2', 'bag', 'play', self.bag_path]
+                rate = self.bag_playback_rate
+                if rate != 1.0:
+                    cmd.extend(['--rate', str(rate)])
+                if self.bag_selected_topics and len(self.bag_selected_topics) > 0:
+                    topics_to_play = list(self.bag_selected_topics)
+                    for tf_topic in ('/tf', '/tf_static'):
+                        if tf_topic not in topics_to_play:
+                            topics_to_play.append(tf_topic)
+                    cmd.append('--topics')
+                    cmd.extend(topics_to_play)
+
+                new_proc = subprocess.Popen(
+                    cmd, env=self._ros_env,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                )
+                self.bag_process = new_proc
+                self.bag_playing = True
+                self.bag_paused = False
+                self.bag_start_real_time = time.time()
+                self.bag_current_time = 0.0
+                self.bag_start_offset = 0.0
+
+                def _read_loop_output():
+                    for line in iter(new_proc.stdout.readline, b''):
+                        if line:
+                            self.get_logger().info(f'[bag loop] {line.decode().strip()}')
+                threading.Thread(target=_read_loop_output, daemon=True).start()
+                threading.Thread(
+                    target=self._bag_process_monitor,
+                    args=(new_proc,),
+                    daemon=True
+                ).start()
+
+            except Exception as e:
+                self.bag_playing = False
+                self.bag_process = None
+                self.bag_current_time = 0.0
+                self.get_logger().error(f'[bag monitor] Loop restart failed: {e}')
 
     def bag_pause_toggle(self):
         """Toggle bag playback pause/resume.
@@ -6378,6 +6459,7 @@ class WebGUINode(Node):
                     self.get_logger().info('Playback finished')
                     self.player_playing = False
                     self.player_processed_stamp = 0
+                    self.player_slider_pos = 0
                     current_idx = 0
 
         self.get_logger().info('Playback worker stopped')
@@ -6850,7 +6932,6 @@ class WebGUINode(Node):
             'playing': self.player_playing,
             'paused': self.player_paused,
             'loop': self.player_loop,
-            'skip_stop': self.player_skip_stop,
             'auto_start': self.player_auto_start,
             'timestamp': self.player_timestamp,
             'slider_pos': self.player_slider_pos,
@@ -7611,9 +7692,6 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             response = {'success': started, 'message': 'Save started' if started else 'Save already in progress'}
         elif parsed_path.path == '/api/player/set_loop':
             self.node.player_loop = data.get('loop', False)
-            response = {'success': True}
-        elif parsed_path.path == '/api/player/set_skip_stop':
-            self.node.player_skip_stop = data.get('skip_stop', False)
             response = {'success': True}
         elif parsed_path.path == '/api/player/set_auto_start':
             self.node.player_auto_start = data.get('auto_start', False)

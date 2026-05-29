@@ -13,6 +13,11 @@ const bagPlayerState = {
     wasPlaying: false  // 재생 종료 시 슬라이더 리셋 감지용
 };
 
+// bag 슬라이더 드래그 중 여부 (드래그 중에만 폴링 업데이트 차단)
+let _bagSliderDragging = false;
+// seek 처리 중 여부 (ROS2 bag seek 시 잠깐 playing=false → 슬라이더 0 리셋 방지)
+let _bagSeeking = false;
+
 const bagRecorderState = {
     bagName: '',
     selectedTopics: []
@@ -867,6 +872,7 @@ async function pauseBag() {
 
 async function setBagPosition(position) {
     console.log('Setting bag position:', position);
+    _bagSeeking = true;  // ROS2 bag seek 중 잠깐 playing=false 구간에서 슬라이더 리셋 방지
     await apiCall('/api/bag/set_position', { position: parseInt(position) });
 
     // Update time label
@@ -882,26 +888,7 @@ async function updateBagState() {
         if (ros1State) {
             const { status, elapsed_sec, total_sec } = ros1State;
 
-            // Progress bar(슬라이더) 업데이트
-            const duration = total_sec || bagPlayerState.bagDuration;
-            if (duration > 0 && elapsed_sec !== undefined) {
-                const ratio = elapsed_sec / duration;
-                const sliderValue = Math.floor(ratio * 10000);
-                const slider = domCache.get('bag-slider');
-                if (slider) {
-                    // 루프 감지: elapsed가 높은 값에서 0 근처로 떨어지면 강제 업데이트 (클릭 없이 즉시 반영)
-                    const loopDetected = (sliderValue < 500 && parseInt(slider.value, 10) > 9500);
-                    if (loopDetected || document.activeElement !== slider) {
-                        slider.value = sliderValue;
-                        if (loopDetected && document.activeElement === slider) {
-                            slider.blur();
-                        }
-                    }
-                }
-                updateBagTimeLabel(elapsed_sec, duration);
-            }
-
-            // 버튼 상태 업데이트
+            // 버튼 상태 업데이트 (슬라이더 리셋 전에 먼저 처리)
             const playButton = domCache.get('bag-play-button');
             const pauseButton = domCache.get('bag-pause-button');
 
@@ -913,13 +900,13 @@ async function updateBagState() {
                 if (pauseButton) {
                     pauseButton.textContent = 'Pause';
                 }
-                // 재생이 끝난 직후 슬라이더를 처음으로 되돌림
-                if (bagPlayerState.wasPlaying) {
-                    const slider = domCache.get('bag-slider');
-                    if (slider) { slider.value = 0; }
+                // 슬라이더가 0이 아니거나 방금 재생 중이었던 경우 처음으로 리셋
+                const slider = domCache.get('bag-slider');
+                if (slider && (bagPlayerState.wasPlaying || parseInt(slider.value, 10) > 0)) {
+                    slider.value = 0;
                     updateBagTimeLabel(0, bagPlayerState.bagDuration);
-                    bagPlayerState.wasPlaying = false;
                 }
+                bagPlayerState.wasPlaying = false;
             } else if (status === 'playing') {
                 bagPlayerState.wasPlaying = true;
                 if (playButton) {
@@ -934,6 +921,26 @@ async function updateBagState() {
                 }
                 if (pauseButton) {
                     pauseButton.textContent = 'Resume';
+                }
+            }
+
+            // Progress bar(슬라이더) 업데이트: 재생/일시정지 중일 때만 current_time으로 덮어씀
+            if (status === 'playing' || status === 'paused') {
+                const duration = total_sec || bagPlayerState.bagDuration;
+                if (duration > 0 && elapsed_sec !== undefined) {
+                    const ratio = elapsed_sec / duration;
+                    const sliderValue = Math.floor(ratio * 10000);
+                    const slider = domCache.get('bag-slider');
+                    if (slider && !_bagSliderDragging) {
+                        // 루프 감지: elapsed가 높은 값에서 0 근처로 떨어지면 강제 업데이트
+                        const loopDetected = (sliderValue < 500 && parseInt(slider.value, 10) > 9500);
+                        if (loopDetected) {
+                            slider.value = sliderValue;
+                        } else {
+                            slider.value = sliderValue;
+                        }
+                    }
+                    updateBagTimeLabel(elapsed_sec, duration);
                 }
             }
         }
@@ -951,40 +958,42 @@ async function updateBagState() {
     // ROS2 bag: 기존 폴링 유지
     const state = await apiCall('/api/bag/state');
     if (state) {
-        // Update slider position based on current time
-        if (bagPlayerState.bagDuration > 0 && state.current_time !== undefined) {
+        // Update play button state (슬라이더 리셋 전에 먼저 처리)
+        const playButton = domCache.get('bag-play-button');
+        if (state.playing) {
+            bagPlayerState.wasPlaying = true;
+            _bagSeeking = false;  // 재생 재개 확인 → seek 플래그 해제
+            playButton.textContent = 'Stop';
+        } else {
+            playButton.textContent = 'Play';
+            // seek 처리 중(ROS2 stop→restart 과도 구간)에는 슬라이더 리셋 금지
+            if (!_bagSeeking) {
+                const slider = domCache.get('bag-slider');
+                if (slider && (bagPlayerState.wasPlaying || parseInt(slider.value, 10) > 0)) {
+                    slider.value = 0;
+                    updateBagTimeLabel(0, bagPlayerState.bagDuration);
+                }
+                bagPlayerState.wasPlaying = false;
+            }
+        }
+
+        // Update slider position: 재생/일시정지 중일 때만 current_time으로 덮어씀 (정지 후 리셋 위치를 보존)
+        if ((state.playing || state.paused) && bagPlayerState.bagDuration > 0 && state.current_time !== undefined) {
             const ratio = state.current_time / bagPlayerState.bagDuration;
             const sliderValue = Math.floor(ratio * 10000);
 
             const slider = domCache.get('bag-slider');
-            if (slider) {
-                // ROS2 루프 감지: current_time이 0 근처로 떨어지면 강제 업데이트 (클릭 없이 즉시 반영)
+            if (slider && !_bagSliderDragging) {
+                // ROS2 루프 감지: current_time이 0 근처로 떨어지면 강제 업데이트
                 const loopDetected = (sliderValue < 500 && parseInt(slider.value, 10) > 9500);
-                if (loopDetected || document.activeElement !== slider) {
+                if (loopDetected) {
                     slider.value = sliderValue;
-                    if (loopDetected && document.activeElement === slider) {
-                        slider.blur();
-                    }
+                } else {
+                    slider.value = sliderValue;
                 }
             }
 
             updateBagTimeLabel(state.current_time, bagPlayerState.bagDuration);
-        }
-
-        // Update play button state
-        const playButton = domCache.get('bag-play-button');
-        if (state.playing) {
-            bagPlayerState.wasPlaying = true;
-            playButton.textContent = 'Stop';
-        } else {
-            playButton.textContent = 'Play';
-            // 재생이 끝난 직후 슬라이더를 처음으로 되돌림
-            if (bagPlayerState.wasPlaying) {
-                const slider = domCache.get('bag-slider');
-                if (slider) { slider.value = 0; }
-                updateBagTimeLabel(0, bagPlayerState.bagDuration);
-                bagPlayerState.wasPlaying = false;
-            }
         }
 
         // Update pause button state
@@ -1989,9 +1998,6 @@ async function setBagPlayerLoop(loop) {
     await apiCall('/api/bag/set_loop', { loop });
 }
 
-async function setSkipStop(skip_stop) {
-    await apiCall('/api/player/set_skip_stop', { skip_stop });
-}
 
 async function setAutoStart(auto_start) {
     await apiCall('/api/player/set_auto_start', { auto_start });
@@ -2008,7 +2014,6 @@ async function updatePlayerState() {
     if (state) {
         domCache.get('player-path-label').textContent = state.path || '';
         domCache.get('player-loop').checked = state.loop || false;
-        domCache.get('player-skip-stop').checked = state.skip_stop !== undefined ? state.skip_stop : true;
         domCache.get('player-auto-start').checked = state.auto_start || false;
 
         domCache.get('player-timestamp-label').textContent = state.timestamp || 0;
@@ -2023,6 +2028,8 @@ async function updatePlayerState() {
             if (_playerWasPlaying) {
                 domCache.get('player-slider').value = 0;
                 _playerWasPlaying = false;
+                // 서버 slider_pos도 0으로 동기화 (이후 폴링에서 끝 위치로 덮어쓰이는 것 방지)
+                apiCall('/api/player/set_slider', { position: 0 });
             } else {
                 domCache.get('player-slider').value = state.slider_pos || 0;
             }
@@ -5199,6 +5206,14 @@ document.addEventListener('DOMContentLoaded', () => {
     // 8081 WebSocket은 Plot 탭 여부와 무관하게 항상 연결 유지
     // (KITTI 변환 진행률 등 전역 백엔드 이벤트 수신에 필요)
     _initBackendWs();
+
+    // bag 슬라이더 드래그 중에는 폴링 업데이트가 썸 위치를 덮어쓰지 않도록 플래그 관리
+    const bagSlider = document.getElementById('bag-slider');
+    if (bagSlider) {
+        bagSlider.addEventListener('pointerdown', () => { _bagSliderDragging = true; });
+        bagSlider.addEventListener('pointerup',   () => { _bagSliderDragging = false; });
+        bagSlider.addEventListener('pointercancel', () => { _bagSliderDragging = false; });
+    }
 
     // 포맷 선택 변경 시 bag 이름 표시 업데이트
     const formatSelect = document.getElementById('recorder-format-select');
