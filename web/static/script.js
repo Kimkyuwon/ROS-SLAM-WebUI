@@ -9,7 +9,8 @@ const bagPlayerState = {
     availableTopics: [],
     bagDuration: 0.0,
     bagType: 'ros2',   // 'ros1' or 'ros2'
-    playbackRate: 1.0  // ROS1 재생 속도 배율
+    playbackRate: 1.0, // ROS1 재생 속도 배율
+    wasPlaying: false  // 재생 종료 시 슬라이더 리셋 감지용
 };
 
 const bagRecorderState = {
@@ -912,7 +913,15 @@ async function updateBagState() {
                 if (pauseButton) {
                     pauseButton.textContent = 'Pause';
                 }
+                // 재생이 끝난 직후 슬라이더를 처음으로 되돌림
+                if (bagPlayerState.wasPlaying) {
+                    const slider = domCache.get('bag-slider');
+                    if (slider) { slider.value = 0; }
+                    updateBagTimeLabel(0, bagPlayerState.bagDuration);
+                    bagPlayerState.wasPlaying = false;
+                }
             } else if (status === 'playing') {
+                bagPlayerState.wasPlaying = true;
                 if (playButton) {
                     playButton.textContent = 'Stop';
                 }
@@ -965,9 +974,17 @@ async function updateBagState() {
         // Update play button state
         const playButton = domCache.get('bag-play-button');
         if (state.playing) {
+            bagPlayerState.wasPlaying = true;
             playButton.textContent = 'Stop';
         } else {
             playButton.textContent = 'Play';
+            // 재생이 끝난 직후 슬라이더를 처음으로 되돌림
+            if (bagPlayerState.wasPlaying) {
+                const slider = domCache.get('bag-slider');
+                if (slider) { slider.value = 0; }
+                updateBagTimeLabel(0, bagPlayerState.bagDuration);
+                bagPlayerState.wasPlaying = false;
+            }
         }
 
         // Update pause button state
@@ -1984,6 +2001,8 @@ async function setSliderPosition(position) {
     await apiCall('/api/player/set_slider', { position: parseInt(position) });
 }
 
+let _playerWasPlaying = false;
+
 async function updatePlayerState() {
     const state = await apiCall('/api/player/state');
     if (state) {
@@ -1992,13 +2011,21 @@ async function updatePlayerState() {
         domCache.get('player-skip-stop').checked = state.skip_stop !== undefined ? state.skip_stop : true;
         domCache.get('player-auto-start').checked = state.auto_start || false;
 
-        domCache.get('player-slider').value = state.slider_pos || 0;
         domCache.get('player-timestamp-label').textContent = state.timestamp || 0;
 
         // Update button states
         if (state.playing) {
+            _playerWasPlaying = true;
+            domCache.get('player-slider').value = state.slider_pos || 0;
             domCache.get('play-button').textContent = 'End';
         } else {
+            // 재생이 끝난 직후 슬라이더를 처음으로 되돌림
+            if (_playerWasPlaying) {
+                domCache.get('player-slider').value = 0;
+                _playerWasPlaying = false;
+            } else {
+                domCache.get('player-slider').value = state.slider_pos || 0;
+            }
             domCache.get('play-button').textContent = 'Play';
         }
 
