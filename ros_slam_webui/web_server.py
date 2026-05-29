@@ -2113,6 +2113,7 @@ class WebGUINode(Node):
         self.bag_start_offset = 0.0  # Start offset for playback
         self.bag_start_real_time = 0.0  # Real time when playback started
         self.bag_pause_time = 0.0  # Time when paused
+        self._bag_stop_pause_offset = None  # 서비스 실패 시 stop+restart 방식에서 일시정지 위치(초)
 
         # File Player state
         self.player_path = ""
@@ -5751,23 +5752,19 @@ class WebGUINode(Node):
         if self.bag_playing:
             # Stop playback
             self.get_logger().info('Stopping bag playback...')
-            # SIGSTOP 상태로 멈춰 있는 경우 먼저 재개해야 terminate가 즉시 동작함
-            if self.bag_paused and self.bag_process:
-                try:
-                    os.kill(self.bag_process.pid, signal.SIGCONT)
-                except Exception:
-                    pass
+            # stop+restart 방식 일시정지 상태: bag_process가 None일 수 있으므로 guard
             if self.bag_process:
                 self.bag_process.terminate()
                 try:
                     self.bag_process.wait(timeout=5)
-                except:
+                except Exception:
                     self.bag_process.kill()
                 self.bag_process = None
             self.bag_playing = False
             self.bag_paused = False
             self.bag_current_time = 0.0
             self.bag_start_real_time = 0.0
+            self._bag_stop_pause_offset = None
         else:
             # Start playback using ros2 bag play
             self.get_logger().info(f'Starting bag playback: {self.bag_path}')
@@ -5845,15 +5842,23 @@ class WebGUINode(Node):
     def bag_pause_toggle(self):
         """Toggle bag playback pause/resume.
 
-        rosbag2_interfaces 서비스(/rosbag2_player/pause, /rosbag2_player/resume)를 우선
-        사용한다. 서비스가 없을 때만 SIGSTOP/SIGCONT fallback을 사용한다.
+        우선순위:
+        1. rosbag2_interfaces 서비스(/rosbag2_player/pause, /rosbag2_player/resume) 사용
+        2. 서비스 실패 시 → 안전한 stop+restart 방식 사용
 
-        ROS2 서비스 방식은 DDS 하트비트 스레드를 그대로 유지하므로, SIGSTOP 방식에서
-        발생하는 재개 후 메시지 재전송(old timestamp) → FAST_LIO imu_buffer clear →
-        궤적 점프 문제를 방지한다.
+        ▶ SIGSTOP/SIGCONT 방식을 사용하지 않는 이유 ◀
+        SIGSTOP으로 프로세스를 동결하면 DDS 하트비트 스레드도 멈춘다.
+        SIGCONT 재개 시 DDS 리더(FAST_LIO 등)가 라이터 재연결을 감지하고
+        old timestamp 메시지를 재전송 → FAST_LIO imu_buffer clear → 궤적 발산.
+        stop+restart 방식은 프로세스를 깨끗이 종료 후 동일 offset에서 재시작하므로
+        타임스탬프 연속성이 보장된다.
         """
-        if not self.bag_playing or not self.bag_process:
+        # stop+restart 일시정지 상태(bag_process=None, bag_paused=True)도 허용
+        if not self.bag_playing:
             self.get_logger().warn('No bag playback in progress')
+            return False
+        if not self.bag_process and not self.bag_paused:
+            self.get_logger().warn('No bag playback process found')
             return False
 
         try:
@@ -5867,13 +5872,14 @@ class WebGUINode(Node):
             self.get_logger().info('Resuming bag playback...')
             success = False
 
-            if ros2_interfaces_available:
+            # 1순위: ROS2 서비스 (프로세스가 살아있는 경우)
+            if ros2_interfaces_available and self.bag_process:
                 try:
                     client = self.create_client(Resume, '/rosbag2_player/resume')
-                    if client.wait_for_service(timeout_sec=1.0):
+                    if client.wait_for_service(timeout_sec=2.0):
                         future = client.call_async(Resume.Request())
                         start = time.time()
-                        while not future.done() and time.time() - start < 2.0:
+                        while not future.done() and time.time() - start < 3.0:
                             time.sleep(0.01)
                         if future.done() and future.result() is not None:
                             success = True
@@ -5881,42 +5887,124 @@ class WebGUINode(Node):
                 except Exception as e:
                     self.get_logger().warn(f'rosbag2 resume service failed: {e}')
 
+            # 2순위: stop+restart (서비스 실패 or 프로세스가 이미 없는 경우)
             if not success:
-                # SIGSTOP/SIGCONT fallback
-                self.get_logger().info('Resuming via SIGCONT (fallback)')
-                os.kill(self.bag_process.pid, signal.SIGCONT)
+                pause_offset = self._bag_stop_pause_offset
+                if pause_offset is not None:
+                    self.get_logger().info(
+                        f'Resuming via stop+restart at offset {pause_offset:.2f}s'
+                    )
+                    try:
+                        new_proc = self._start_bag_process_at_offset(pause_offset)
+                        if new_proc:
+                            self.bag_process = new_proc
+                            self._bag_stop_pause_offset = None
+                            success = True
+                            self.get_logger().info('Resumed via stop+restart fallback')
+                    except Exception as e:
+                        self.get_logger().error(f'stop+restart resume failed: {e}')
+                else:
+                    # 서비스 일시정지였으나 재개 서비스도 실패한 극단적 케이스
+                    # → 재시작 offset이 없으므로 현재 bag_current_time 기준으로 재시작
+                    self.get_logger().warn(
+                        'No pause offset recorded; restarting from current position'
+                    )
+                    try:
+                        new_proc = self._start_bag_process_at_offset(self.bag_current_time)
+                        if new_proc:
+                            if self.bag_process:
+                                try:
+                                    self.bag_process.terminate()
+                                    self.bag_process.wait(timeout=2)
+                                except Exception:
+                                    pass
+                            self.bag_process = new_proc
+                            success = True
+                    except Exception as e:
+                        self.get_logger().error(f'Fallback restart failed: {e}')
 
-            self.bag_paused = False
-            pause_duration = time.time() - self.bag_pause_time
-            self.bag_start_real_time += pause_duration
+            if success:
+                self.bag_paused = False
+                pause_duration = time.time() - self.bag_pause_time
+                self.bag_start_real_time += pause_duration
+            return success
+
         else:
             # ── Pause ─────────────────────────────────────────────────────────
             self.get_logger().info('Pausing bag playback...')
             success = False
 
-            if ros2_interfaces_available:
+            # 1순위: ROS2 서비스
+            if ros2_interfaces_available and self.bag_process:
                 try:
                     client = self.create_client(Pause, '/rosbag2_player/pause')
-                    if client.wait_for_service(timeout_sec=1.0):
+                    if client.wait_for_service(timeout_sec=2.0):
                         future = client.call_async(Pause.Request())
                         start = time.time()
-                        while not future.done() and time.time() - start < 2.0:
+                        while not future.done() and time.time() - start < 3.0:
                             time.sleep(0.01)
                         if future.done() and future.result() is not None:
                             success = True
+                            self._bag_stop_pause_offset = None  # 서비스 방식 → offset 불필요
                             self.get_logger().info('Paused via /rosbag2_player/pause service')
                 except Exception as e:
                     self.get_logger().warn(f'rosbag2 pause service failed: {e}')
 
-            if not success:
-                # SIGSTOP/SIGCONT fallback
-                self.get_logger().info('Pausing via SIGSTOP (fallback)')
-                os.kill(self.bag_process.pid, signal.SIGSTOP)
+            # 2순위: 프로세스 종료 + 위치 기록 (SIGSTOP 대신)
+            if not success and self.bag_process:
+                self._bag_stop_pause_offset = self.bag_current_time
+                self.get_logger().info(
+                    f'Pausing via process stop (offset={self._bag_stop_pause_offset:.2f}s); '
+                    'will restart from this position on resume'
+                )
+                try:
+                    self.bag_process.terminate()
+                    self.bag_process.wait(timeout=3)
+                except Exception:
+                    try:
+                        self.bag_process.kill()
+                    except Exception:
+                        pass
+                self.bag_process = None
+                success = True
 
-            self.bag_paused = True
-            self.bag_pause_time = time.time()
+            if success:
+                self.bag_paused = True
+                self.bag_pause_time = time.time()
+            return success
 
-        return True
+    def _start_bag_process_at_offset(self, start_offset: float):
+        """지정 offset(초)에서 ros2 bag play 서브프로세스를 새로 시작한다.
+
+        stop+restart 방식의 pause/resume fallback에서 사용.
+        bag_start_real_time / bag_start_offset 은 호출 측에서 관리한다.
+        """
+        cmd = ['ros2', 'bag', 'play', self.bag_path]
+        if start_offset > 0.0:
+            cmd.extend(['--start-offset', str(start_offset)])
+        rate = getattr(self, 'bag_playback_rate', 1.0)
+        if rate != 1.0:
+            cmd.extend(['--rate', str(rate)])
+        if self.bag_player_loop:
+            cmd.append('--loop')
+        topics = getattr(self, 'bag_selected_topics', [])
+        if topics:
+            cmd.append('--topics')
+            cmd.extend(topics)
+        self.get_logger().info(f'[restart] {" ".join(cmd)}')
+        proc = subprocess.Popen(
+            cmd,
+            env=self._ros_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+
+        def _read_output():
+            for line in iter(proc.stdout.readline, b''):
+                if line:
+                    self.get_logger().info(f'[bag play] {line.decode().strip()}')
+        threading.Thread(target=_read_output, daemon=True).start()
+        return proc
 
     def set_bag_position(self, position_ratio):
         """Set bag playback position (0.0 to 1.0). ROS1/ROS2 bag 모두 지원."""
