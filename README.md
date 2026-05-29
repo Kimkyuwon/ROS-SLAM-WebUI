@@ -126,7 +126,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 
 5. **Clone and build ros_slam_webui**
    ```bash
-   git clone https://github.com/Kimkyuwon/Web-based-GUI-for-ROS2-SLAM-and-File-Player.git ros_slam_webui
+   git clone https://github.com/Kimkyuwon/ROS-SLAM-WebUI.git
    cd ~/your_workspace
    colcon build
    source install/setup.bash
