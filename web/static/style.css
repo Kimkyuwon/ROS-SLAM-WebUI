@@ -2495,3 +2495,24 @@ h3 {
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+/* Directory Browser Modals - 브라우저 창 크기에 맞는 반응형 레이아웃 */
+#file-browser-modal .modal-content,
+#bag-name-browser-modal .modal-content {
+    display: flex;
+    flex-direction: column;
+    width: 90%;
+    max-width: 720px;
+    max-height: calc(90vh - 40px);
+    margin: 5vh auto;
+    overflow: hidden;
+}
+
+#file-browser-modal .modal-body,
+#bag-name-browser-modal .modal-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    max-height: none;
+    padding: 18px;
+}
