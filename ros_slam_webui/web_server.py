@@ -3378,6 +3378,8 @@ class WebGUINode(Node):
             'map2_pcd': (output_dir + '/SecondMap.pcd') if output_dir else '',
             'pd_pcd': (output_dir + '/Debug/PD.pcd') if output_dir else '',
             'nd_pcd': (output_dir + '/Debug/ND.pcd') if output_dir else '',
+            'first_ue_pcd': (output_dir + '/Debug/FirstUE.pcd') if output_dir else '',
+            'second_ue_pcd': (output_dir + '/Debug/SecondUE.pcd') if output_dir else '',
             'output_dir': output_dir,
         }
 

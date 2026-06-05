@@ -5233,6 +5233,7 @@ class SlamResultViewer {
         this._diffObjects = [];
         this._diffLoaded = false;
         this._diffPaths = null;
+        this._layers = {};
     }
 
     _waitForThree() {
@@ -5304,11 +5305,16 @@ class SlamResultViewer {
         }
         this._allObjects = [];
         this._pcdObjects = [];
+        this._layers = {};
     }
 
-    _addToScene(obj) {
+    _addToScene(obj, layerName) {
         this._scene.add(obj);
         this._allObjects.push(obj);
+        if (layerName) {
+            if (!this._layers[layerName]) this._layers[layerName] = [];
+            this._layers[layerName].push(obj);
+        }
     }
 
     _makeLine(positions, color) {
@@ -5458,12 +5464,12 @@ class SlamResultViewer {
 
         if (pcd1) {
             pcd1.material = new THREE.PointsMaterial({ color: 0x4488ff, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false });
-            this._addToScene(pcd1);
+            this._addToScene(pcd1, 'map1');
             this._pcdObjects.push(pcd1);
         }
         if (pcd2) {
             pcd2.material = new THREE.PointsMaterial({ color: 0x44dd88, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false });
-            this._addToScene(pcd2);
+            this._addToScene(pcd2, 'map2');
             this._pcdObjects.push(pcd2);
         }
 
@@ -5471,13 +5477,13 @@ class SlamResultViewer {
         const flat2 = this._posesToFlat(poses2);
         const flatOut = this._posesToFlat(posesOut);
 
-        if (flat1.length >= 6) this._addToScene(this._makeLine(flat1, 0x4488ff));
-        if (flat2.length >= 6) this._addToScene(this._makeLine(flat2, 0xff4444));
-        if (flatOut.length >= 6) this._addToScene(this._makeLine(flatOut, 0xffffff));
+        if (flat1.length >= 6) this._addToScene(this._makeLine(flat1, 0x4488ff), 'map1traj');
+        if (flat2.length >= 6) this._addToScene(this._makeLine(flat2, 0xff4444), 'map2traj');
+        if (flatOut.length >= 6) this._addToScene(this._makeLine(flatOut, 0xffffff), 'outputtraj');
 
-        if (flat1.length >= 3) this._addToScene(this._makeNodes(flat1, 0xffee44));
-        if (flat2.length >= 3) this._addToScene(this._makeNodes(flat2, 0xff9900));
-        if (flatOut.length >= 3) this._addToScene(this._makeNodes(flatOut, 0x44ffff));
+        if (flat1.length >= 3) this._addToScene(this._makeNodes(flat1, 0xffee44), 'map1traj');
+        if (flat2.length >= 3) this._addToScene(this._makeNodes(flat2, 0xff9900), 'map2traj');
+        if (flatOut.length >= 3) this._addToScene(this._makeNodes(flatOut, 0x44ffff), 'outputtraj');
 
         this._fitCamera();
     }
@@ -5557,8 +5563,9 @@ class SlamResultViewer {
         }
     }
 
-    async _loadDiffPCD(path, color) {
+    async _loadDiffPCD(path, color, layerName) {
         const THREE = window.THREE;
+        if (!path) return;
         const points = await this._loadPCD(path);
         if (!points) return;
         points.material = new THREE.PointsMaterial({
@@ -5569,6 +5576,10 @@ class SlamResultViewer {
         });
         this._scene.add(points);
         this._diffObjects.push(points);
+        if (layerName) {
+            if (!this._layers[layerName]) this._layers[layerName] = [];
+            this._layers[layerName].push(points);
+        }
     }
 
     async toggleDiffPCDs(enabled) {
@@ -5582,11 +5593,13 @@ class SlamResultViewer {
                         this._diffPaths = await apiCall('/api/slam/result_paths');
                     }
                     const paths = this._diffPaths;
-                    if (paths && paths.pd_pcd) await this._loadDiffPCD(paths.pd_pcd, 0xff6600);
-                    if (paths && paths.nd_pcd) await this._loadDiffPCD(paths.nd_pcd, 0xdd00ff);
+                    // PD / ND — 없을 수 있으므로 각각 독립 try
+                    try { if (paths && paths.pd_pcd) await this._loadDiffPCD(paths.pd_pcd, 0xff6600, 'pd'); } catch (e) { console.warn('PD.pcd not available'); }
+                    try { if (paths && paths.nd_pcd) await this._loadDiffPCD(paths.nd_pcd, 0xdd00ff, 'nd'); } catch (e) { console.warn('ND.pcd not available'); }
+                    // FirstUE / SecondUE — 없을 수 있으므로 각각 독립 try
+                    try { if (paths && paths.first_ue_pcd) await this._loadDiffPCD(paths.first_ue_pcd, 0xff0066, 'firstue'); } catch (e) { console.warn('FirstUE.pcd not available'); }
+                    try { if (paths && paths.second_ue_pcd) await this._loadDiffPCD(paths.second_ue_pcd, 0xaaff00, 'secondue'); } catch (e) { console.warn('SecondUE.pcd not available'); }
                     this._diffLoaded = true;
-                } catch (e) {
-                    console.error('SlamResultViewer: diff PCD load failed:', e);
                 } finally {
                     if (loadingEl) loadingEl.style.display = 'none';
                 }
@@ -5594,6 +5607,7 @@ class SlamResultViewer {
                 for (const obj of this._diffObjects) {
                     obj.visible = true;
                 }
+                this._restoreDiffLayerVisuals();
             }
             if (diffLegend) diffLegend.style.display = 'block';
         } else {
@@ -5601,6 +5615,17 @@ class SlamResultViewer {
                 obj.visible = false;
             }
             if (diffLegend) diffLegend.style.display = 'none';
+        }
+    }
+
+    _restoreDiffLayerVisuals() {
+        for (const name of ['pd', 'nd', 'firstue', 'secondue']) {
+            const row = document.querySelector(`.slam-legend-row[data-layer="${name}"]`);
+            if (row) {
+                const active = row.dataset.active !== 'false';
+                const objs = this._layers[name] || [];
+                for (const obj of objs) { obj.visible = active; }
+            }
         }
     }
 
@@ -5613,6 +5638,17 @@ class SlamResultViewer {
         this._diffObjects = [];
         this._diffLoaded = false;
         this._diffPaths = null;
+        ['pd', 'nd', 'firstue', 'secondue'].forEach(k => delete this._layers[k]);
+    }
+
+    toggleLayer(name) {
+        const objs = this._layers[name];
+        const row = document.querySelector(`.slam-legend-row[data-layer="${name}"]`);
+        if (!objs || objs.length === 0) return;
+        const nowVisible = objs[0].visible;
+        const newVisible = !nowVisible;
+        for (const obj of objs) { obj.visible = newVisible; }
+        if (row) row.dataset.active = String(newVisible);
     }
 
     setPointSize(size) {
@@ -5627,11 +5663,18 @@ class SlamResultViewer {
         if (label) label.textContent = size.toFixed(2) + ' m';
     }
 
+    _resetAllLegendRows() {
+        document.querySelectorAll('.slam-legend-row[data-layer]').forEach(row => {
+            row.dataset.active = 'true';
+        });
+    }
+
     hideAndReset() {
         this.hide();
         this._loaded = false;
         this._loading = false;
         this._clearScene();
+        this._resetAllLegendRows();
         this._topView = false;
         this._savedCameraPos = null;
         this._savedCameraUp = null;
@@ -5676,6 +5719,10 @@ function toggleSlamDiff(checked) {
 
 function setSlamPointSize(size) {
     slamResultViewer.setPointSize(size);
+}
+
+function toggleSlamLayer(name) {
+    slamResultViewer.toggleLayer(name);
 }
 
 // ==============================================================

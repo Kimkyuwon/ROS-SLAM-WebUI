@@ -174,18 +174,20 @@
                             <canvas id="slam-result-canvas"></canvas>
                             <div id="slam-result-loading">Loading...</div>
                             <div id="slam-pcd-legend">
-                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#4488ff;"></span><span>Map1</span></div>
-                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#44dd88;"></span><span>Map2</span></div>
+                                <div class="slam-legend-row" data-layer="map1" data-active="true" onclick="toggleSlamLayer('map1')"><span class="slam-legend-dot" style="background:#4488ff;"></span><span>Map1</span></div>
+                                <div class="slam-legend-row" data-layer="map2" data-active="true" onclick="toggleSlamLayer('map2')"><span class="slam-legend-dot" style="background:#44dd88;"></span><span>Map2</span></div>
                                 <div id="slam-diff-legend-rows" style="display:none;">
                                     <div class="slam-legend-separator"></div>
-                                    <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#ff6600;"></span><span>PD (New)</span></div>
-                                    <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#dd00ff;"></span><span>ND (Del)</span></div>
+                                    <div class="slam-legend-row" data-layer="pd" data-active="true" onclick="toggleSlamLayer('pd')"><span class="slam-legend-dot" style="background:#ff6600;"></span><span>PD (New)</span></div>
+                                    <div class="slam-legend-row" data-layer="nd" data-active="true" onclick="toggleSlamLayer('nd')"><span class="slam-legend-dot" style="background:#dd00ff;"></span><span>ND (Del)</span></div>
+                                    <div class="slam-legend-row" data-layer="firstue" data-active="true" onclick="toggleSlamLayer('firstue')"><span class="slam-legend-dot" style="background:#ff0066;"></span><span>FirstUE</span></div>
+                                    <div class="slam-legend-row" data-layer="secondue" data-active="true" onclick="toggleSlamLayer('secondue')"><span class="slam-legend-dot" style="background:#aaff00;"></span><span>SecondUE</span></div>
                                 </div>
                             </div>
                             <div id="slam-result-legend">
-                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#ffee44;"></span><span>Map1 Traj</span></div>
-                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#ff9900;"></span><span>Map2 Traj</span></div>
-                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#44ffff;"></span><span>Output Traj</span></div>
+                                <div class="slam-legend-row" data-layer="map1traj" data-active="true" onclick="toggleSlamLayer('map1traj')"><span class="slam-legend-dot" style="background:#ffee44;"></span><span>Map1 Traj</span></div>
+                                <div class="slam-legend-row" data-layer="map2traj" data-active="true" onclick="toggleSlamLayer('map2traj')"><span class="slam-legend-dot" style="background:#ff9900;"></span><span>Map2 Traj</span></div>
+                                <div class="slam-legend-row" data-layer="outputtraj" data-active="true" onclick="toggleSlamLayer('outputtraj')"><span class="slam-legend-dot" style="background:#44ffff;"></span><span>Output Traj</span></div>
                             </div>
                             <div id="slam-point-size-overlay">
                                 <span class="slam-ps-label-text">Pt Size</span>

@@ -2632,9 +2632,24 @@ h3 {
 .slam-legend-row {
     align-items: center;
     color: #ddd;
+    cursor: pointer;
     display: flex;
     font-size: 11px;
     gap: 7px;
+    transition: opacity 0.2s;
+    user-select: none;
+}
+
+.slam-legend-row:hover {
+    color: #fff;
+}
+
+.slam-legend-row[data-active="false"] {
+    opacity: 0.35;
+}
+
+.slam-legend-row[data-active="false"] span:last-child {
+    text-decoration: line-through;
 }
 
 .slam-legend-dot {
