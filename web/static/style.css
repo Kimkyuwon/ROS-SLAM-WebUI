@@ -2516,3 +2516,172 @@ h3 {
     max-height: none;
     padding: 18px;
 }
+
+/* SLAM Result Viewer */
+#slam-result-viewer {
+    margin: 12px 0;
+}
+
+#slam-result-canvas-container {
+    background: #1a1a2e;
+    border-radius: 8px;
+    height: 380px;
+    overflow: hidden;
+    position: relative;
+    width: 100%;
+}
+
+#slam-result-canvas {
+    display: block;
+    height: 100%;
+    width: 100%;
+}
+
+#slam-result-loading {
+    color: #aaa;
+    font-size: 13px;
+    left: 50%;
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.slam-viewer-header {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-bottom: 6px;
+}
+
+.small-button {
+    background: linear-gradient(135deg, #1f3a56, #1b3046);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    transition: all 0.2s ease;
+}
+
+.small-button:hover {
+    border-color: rgba(74, 214, 255, 0.5);
+    box-shadow: 0 4px 14px rgba(74, 214, 255, 0.18);
+}
+
+.small-button:active {
+    transform: translateY(1px);
+}
+
+.slam-viewer-toggle {
+    align-items: center;
+    background: linear-gradient(135deg, #1f3a56, #1b3046);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    cursor: pointer;
+    display: flex;
+    font-size: 12px;
+    font-weight: 600;
+    gap: 6px;
+    padding: 5px 12px;
+    transition: all 0.2s ease;
+    user-select: none;
+}
+
+.slam-viewer-toggle:hover {
+    border-color: rgba(74, 214, 255, 0.5);
+    box-shadow: 0 4px 14px rgba(74, 214, 255, 0.18);
+}
+
+.slam-viewer-toggle input[type="checkbox"] {
+    accent-color: var(--accent);
+    cursor: pointer;
+    height: 13px;
+    width: 13px;
+}
+
+#slam-pcd-legend {
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    left: 10px;
+    padding: 8px 12px;
+    position: absolute;
+    top: 10px;
+    z-index: 10;
+}
+
+#slam-result-legend {
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px 12px;
+    position: absolute;
+    right: 10px;
+    top: 10px;
+    z-index: 10;
+}
+
+.slam-legend-row {
+    align-items: center;
+    color: #ddd;
+    display: flex;
+    font-size: 11px;
+    gap: 7px;
+}
+
+.slam-legend-dot {
+    border-radius: 50%;
+    flex-shrink: 0;
+    height: 10px;
+    width: 10px;
+}
+
+.slam-legend-line {
+    flex-shrink: 0;
+    height: 2px;
+    width: 16px;
+}
+
+.slam-legend-separator {
+    border-top: 1px solid rgba(255, 255, 255, 0.2);
+    margin: 3px 0;
+}
+
+#slam-point-size-overlay {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 6px;
+    bottom: 10px;
+    display: flex;
+    gap: 7px;
+    left: 10px;
+    padding: 5px 10px;
+    position: absolute;
+    z-index: 10;
+}
+
+.slam-ps-label-text {
+    color: #aaa;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+#slam-point-size-slider {
+    accent-color: var(--accent, #4ad6ff);
+    cursor: pointer;
+    width: 130px;
+}
+
+#slam-point-size-label {
+    color: var(--accent, #4ad6ff);
+    font-size: 11px;
+    min-width: 40px;
+}

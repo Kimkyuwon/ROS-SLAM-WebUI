@@ -3364,7 +3364,23 @@ class WebGUINode(Node):
             'status': self.slam_status,
             'is_running': is_running
         }
-    
+
+    def get_slam_result_paths(self):
+        """Return file paths for Multi-Session SLAM result visualization."""
+        lt_dir = _find_sibling_package_dir('long_term_mapping')
+        output_dir = str(lt_dir / self.slam_output) if (lt_dir and self.slam_output) else ''
+        return {
+            'success': True,
+            'map1_poses': (self.slam_map1 + '/optimized_poses.txt') if self.slam_map1 else '',
+            'map2_poses': (self.slam_map2 + '/optimized_poses.txt') if self.slam_map2 else '',
+            'output_poses': (output_dir + '/optimized_poses.txt') if output_dir else '',
+            'map1_pcd': (output_dir + '/FirstMap.pcd') if output_dir else '',
+            'map2_pcd': (output_dir + '/SecondMap.pcd') if output_dir else '',
+            'pd_pcd': (output_dir + '/Debug/PD.pcd') if output_dir else '',
+            'nd_pcd': (output_dir + '/Debug/ND.pcd') if output_dir else '',
+            'output_dir': output_dir,
+        }
+
     def get_localization_state(self):
         # Check if Localization process is running
         is_running = self.localization_process is not None and self.localization_process.poll() is None
@@ -7168,6 +7184,16 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response(get_fast_lio_config_paths())
         elif parsed_path.path == '/api/slam/sibling_package_dirs':
             self.send_json_response(get_sibling_package_dirs())
+        elif parsed_path.path == '/api/slam/result_paths':
+            self.send_json_response(self.node.get_slam_result_paths())
+        elif parsed_path.path == '/api/slam/poses':
+            query = parse_qs(parsed_path.query)
+            file_path = query.get('path', [''])[0]
+            self._serve_slam_poses(file_path)
+        elif parsed_path.path == '/api/slam/pcd':
+            query = parse_qs(parsed_path.query)
+            file_path = query.get('path', [''])[0]
+            self._serve_slam_pcd(file_path)
         elif parsed_path.path == '/api/localization/state':
             self.send_json_response(self.node.get_localization_state())
         elif parsed_path.path == '/api/player/state':
@@ -7707,6 +7733,67 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             response = {'success': True}
 
         self.send_json_response(response)
+
+    def _is_allowed_slam_path(self, file_path):
+        """Check if file_path is under one of the permitted SLAM directories."""
+        if not file_path:
+            return False
+        result_paths = self.node.get_slam_result_paths()
+        allowed_dirs = [
+            self.node.slam_map1,
+            self.node.slam_map2,
+            result_paths.get('output_dir', ''),
+        ]
+        return any(allowed and file_path.startswith(allowed) for allowed in allowed_dirs)
+
+    def _serve_slam_poses(self, file_path):
+        """Parse optimized_poses.txt and return pose array as JSON."""
+        if not self._is_allowed_slam_path(file_path):
+            self.send_json_response({'success': False, 'error': 'Invalid or unauthorized path'})
+            return
+        try:
+            poses = []
+            with open(file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 8:
+                        # Format: timestamp x y z qx qy qz qw
+                        poses.append({
+                            'x': float(parts[1]),
+                            'y': float(parts[2]),
+                            'z': float(parts[3]),
+                            'qx': float(parts[4]),
+                            'qy': float(parts[5]),
+                            'qz': float(parts[6]),
+                            'qw': float(parts[7]),
+                        })
+            self.send_json_response({'success': True, 'poses': poses})
+        except FileNotFoundError:
+            self.send_json_response({'success': False, 'error': 'File not found', 'poses': []})
+        except Exception as e:
+            self.send_json_response({'success': False, 'error': str(e), 'poses': []})
+
+    def _serve_slam_pcd(self, file_path):
+        """Serve a PCD file as binary octet-stream."""
+        if not self._is_allowed_slam_path(file_path):
+            self.send_json_response({'success': False, 'error': 'Invalid or unauthorized path'})
+            return
+        try:
+            with open(file_path, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(data)
+        except FileNotFoundError:
+            self.send_json_response({'success': False, 'error': 'File not found'})
+        except Exception as e:
+            self.send_json_response({'success': False, 'error': str(e)})
 
     def send_json_response(self, data):
         self.send_response(200)

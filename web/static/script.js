@@ -391,6 +391,7 @@ function handleOptBtnClick() {
 }
 
 async function runOptimization() {
+    slamResultViewer.hideAndReset();
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = true;
     const result = await apiCall('/api/slam/optimize', {});
@@ -453,6 +454,8 @@ function _showOptSuccess() {
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = false;
     runBtn.textContent = 'Exit';
+
+    slamResultViewer.show();
 }
 
 function _showOptError(message, autoHide = false) {
@@ -549,6 +552,7 @@ async function exitOptimization() {
     _optPollTimer = null;
 
     updateSlamStatus('Optimization exited');
+    slamResultViewer.hideAndReset();
     _resetOptBtn();
 }
 
@@ -570,7 +574,15 @@ async function updateSlamState() {
 
         // Update Multi-Session SLAM status
         updateSlamStatus(state.status || 'Ready');
-        
+
+        // Show result viewer if optimization is already complete (e.g. on subtab re-entry)
+        if (state.status === 'Optimization complete!') {
+            const viewerEl = document.getElementById('slam-result-viewer');
+            if (viewerEl && viewerEl.style.display === 'none') {
+                slamResultViewer.show();
+            }
+        }
+
         // Update LiDAR SLAM status (only if LiDAR SLAM tab is active)
         const lidarSlamStatus = domCache.get('lidar-slam-status');
         if (lidarSlamStatus) {
@@ -5196,6 +5208,475 @@ function togglePlotDisplayPanel() {
 }
 
 window.togglePlotDisplayPanel = togglePlotDisplayPanel;
+
+// ==============================================================
+// SLAM Result Viewer
+// ==============================================================
+
+class SlamResultViewer {
+    constructor() {
+        this._scene = null;
+        this._camera = null;
+        this._renderer = null;
+        this._controls = null;
+        this._animFrameId = null;
+        this._initialized = false;
+        this._loaded = false;
+        this._loading = false;
+        this._pcdObjects = [];
+        this._allObjects = [];
+        this._pcdPointSize = 0.05;
+        this._topView = false;
+        this._savedCameraPos = null;
+        this._savedCameraUp = null;
+        this._savedTarget = null;
+        this._diffObjects = [];
+        this._diffLoaded = false;
+        this._diffPaths = null;
+    }
+
+    _waitForThree() {
+        return new Promise((resolve) => {
+            const check = () => {
+                if (window.THREE && window.OrbitControls && window.PCDLoader) {
+                    resolve();
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            check();
+        });
+    }
+
+    async _init() {
+        if (this._initialized) return;
+        await this._waitForThree();
+        const THREE = window.THREE;
+        const canvas = document.getElementById('slam-result-canvas');
+        if (!canvas) return;
+
+        const container = document.getElementById('slam-result-canvas-container');
+        const w = container.clientWidth || 600;
+        const h = container.clientHeight || 380;
+
+        this._renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        this._renderer.setPixelRatio(window.devicePixelRatio);
+        this._renderer.setSize(w, h);
+
+        this._scene = new THREE.Scene();
+        this._scene.background = new THREE.Color(0x1a1a2e);
+
+        this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
+        this._camera.position.set(0, -100, 80);
+        this._camera.up.set(0, 0, 1);
+
+        this._controls = new window.OrbitControls(this._camera, this._renderer.domElement);
+        this._controls.enableDamping = true;
+        this._controls.dampingFactor = 0.1;
+
+        this._scene.add(new THREE.AxesHelper(5));
+        this._initialized = true;
+        this._startRenderLoop();
+    }
+
+    _startRenderLoop() {
+        const animate = () => {
+            this._animFrameId = requestAnimationFrame(animate);
+            if (this._controls) this._controls.update();
+            if (this._renderer && this._scene && this._camera) {
+                this._renderer.render(this._scene, this._camera);
+            }
+        };
+        animate();
+    }
+
+    _clearScene() {
+        for (const obj of this._allObjects) {
+            if (this._scene) this._scene.remove(obj);
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) {
+                if (Array.isArray(obj.material)) {
+                    obj.material.forEach(m => m.dispose());
+                } else {
+                    obj.material.dispose();
+                }
+            }
+        }
+        this._allObjects = [];
+        this._pcdObjects = [];
+    }
+
+    _addToScene(obj) {
+        this._scene.add(obj);
+        this._allObjects.push(obj);
+    }
+
+    _makeLine(positions, color) {
+        const THREE = window.THREE;
+        if (window.Line2 && window.LineGeometry && window.LineMaterial) {
+            const geo = new window.LineGeometry();
+            geo.setPositions(positions);
+            const c = document.getElementById('slam-result-canvas-container');
+            const mat = new window.LineMaterial({
+                color,
+                linewidth: 3,
+                resolution: new THREE.Vector2(c ? c.clientWidth : 600, c ? c.clientHeight : 380),
+            });
+            return new window.Line2(geo, mat);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        return new THREE.Line(geo, new THREE.LineBasicMaterial({ color }));
+    }
+
+    _makeNodes(positions, color) {
+        const THREE = window.THREE;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        return new THREE.Points(geo, new THREE.PointsMaterial({ color, size: 8, sizeAttenuation: false }));
+    }
+
+    _posesToFlat(poses) {
+        const flat = [];
+        for (const p of poses) {
+            flat.push(p.x, p.y, p.z);
+        }
+        return flat;
+    }
+
+    async _fetchPoses(path) {
+        try {
+            const resp = await fetch('/api/slam/poses?path=' + encodeURIComponent(path));
+            if (!resp.ok) return [];
+            const data = await resp.json();
+            return data.poses || [];
+        } catch (e) {
+            console.error('SlamResultViewer: failed to fetch poses:', e);
+            return [];
+        }
+    }
+
+    async _loadPCD(path) {
+        const PCDLoaderCls = window.PCDLoader;
+        if (!PCDLoaderCls) {
+            console.error('SlamResultViewer: PCDLoader not available on window');
+            return null;
+        }
+        return new Promise((resolve) => {
+            const loader = new PCDLoaderCls();
+            loader.load(
+                '/api/slam/pcd?path=' + encodeURIComponent(path),
+                (points) => resolve(points),
+                undefined,
+                (err) => { console.error('SlamResultViewer: PCD load error:', err); resolve(null); }
+            );
+        });
+    }
+
+    _fitCamera() {
+        if (!this._scene) return;
+        const THREE = window.THREE;
+        let maxDim = 100;
+        if (this._allObjects.length > 0) {
+            const box = new THREE.Box3();
+            for (const obj of this._allObjects) {
+                box.expandByObject(obj);
+            }
+            if (!box.isEmpty()) {
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                maxDim = Math.max(size.x, size.y, size.z);
+            }
+        }
+        this._camera.position.set(0, -maxDim * 0.8, maxDim * 0.4);
+        this._camera.up.set(0, 0, 1);
+        this._controls.target.set(0, 0, 0);
+        this._controls.update();
+    }
+
+    _applyTopView() {
+        const THREE = window.THREE;
+        let height = 100;
+        if (this._allObjects.length > 0) {
+            const box = new THREE.Box3();
+            for (const obj of this._allObjects) {
+                box.expandByObject(obj);
+            }
+            if (!box.isEmpty()) {
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                height = Math.max(size.x, size.y, 30) * 0.8;
+            }
+        }
+        // Z-up 유지, polar을 거의 0으로 고정해 XY 평면 정면을 바라보도록 함
+        // 정확히 (0,0,height)는 up 벡터와 평행해 Gimbal lock 발생 → 미세 offset 적용
+        this._camera.up.set(0, 0, 1);
+        this._camera.position.set(0.001 * height, 0, height);
+        this._controls.target.set(0, 0, 0);
+        this._controls.enableRotate = true;
+        this._controls.minPolarAngle = 0;
+        this._controls.maxPolarAngle = 0.02;
+        this._controls.mouseButtons = {
+            LEFT: window.THREE.MOUSE.ROTATE,
+            MIDDLE: window.THREE.MOUSE.DOLLY,
+            RIGHT: window.THREE.MOUSE.PAN
+        };
+        this._controls.update();
+    }
+
+    async load() {
+        if (this._loaded || this._loading) return;
+        this._loading = true;
+        const loadingEl = document.getElementById('slam-result-loading');
+        if (loadingEl) loadingEl.style.display = 'block';
+        this._clearScene();
+
+        try {
+            await this._loadAndRender();
+            this._loaded = true;
+        } catch (e) {
+            console.error('SlamResultViewer: load failed:', e);
+        } finally {
+            this._loading = false;
+            if (loadingEl) loadingEl.style.display = 'none';
+        }
+    }
+
+    async _loadAndRender() {
+        const THREE = window.THREE;
+        const paths = await apiCall('/api/slam/result_paths');
+        if (!paths) throw new Error('Failed to fetch result paths');
+
+        const [poses1, poses2, posesOut] = await Promise.all([
+            this._fetchPoses(paths.map1_poses),
+            this._fetchPoses(paths.map2_poses),
+            this._fetchPoses(paths.output_poses),
+        ]);
+
+        const pcd1 = paths.map1_pcd ? await this._loadPCD(paths.map1_pcd) : null;
+        const pcd2 = paths.map2_pcd ? await this._loadPCD(paths.map2_pcd) : null;
+
+        if (pcd1) {
+            pcd1.material = new THREE.PointsMaterial({ color: 0x4488ff, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false });
+            this._addToScene(pcd1);
+            this._pcdObjects.push(pcd1);
+        }
+        if (pcd2) {
+            pcd2.material = new THREE.PointsMaterial({ color: 0x44dd88, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false });
+            this._addToScene(pcd2);
+            this._pcdObjects.push(pcd2);
+        }
+
+        const flat1 = this._posesToFlat(poses1);
+        const flat2 = this._posesToFlat(poses2);
+        const flatOut = this._posesToFlat(posesOut);
+
+        if (flat1.length >= 6) this._addToScene(this._makeLine(flat1, 0x4488ff));
+        if (flat2.length >= 6) this._addToScene(this._makeLine(flat2, 0xff4444));
+        if (flatOut.length >= 6) this._addToScene(this._makeLine(flatOut, 0xffffff));
+
+        if (flat1.length >= 3) this._addToScene(this._makeNodes(flat1, 0xffee44));
+        if (flat2.length >= 3) this._addToScene(this._makeNodes(flat2, 0xff9900));
+        if (flatOut.length >= 3) this._addToScene(this._makeNodes(flatOut, 0x44ffff));
+
+        this._fitCamera();
+    }
+
+    _resizeRenderer() {
+        if (!this._renderer || !this._camera) return;
+        const container = document.getElementById('slam-result-canvas-container');
+        if (!container) return;
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        if (w > 0 && h > 0) {
+            this._renderer.setSize(w, h);
+            this._camera.aspect = w / h;
+            this._camera.updateProjectionMatrix();
+        }
+    }
+
+    async show() {
+        const viewerEl = document.getElementById('slam-result-viewer');
+        if (viewerEl) viewerEl.style.display = 'block';
+        await this._init();
+        this._resizeRenderer();
+        await this.load();
+    }
+
+    hide() {
+        const viewerEl = document.getElementById('slam-result-viewer');
+        if (viewerEl) viewerEl.style.display = 'none';
+    }
+
+    _restoreOrbitControls() {
+        this._controls.enableRotate = true;
+        this._controls.minPolarAngle = 0;
+        this._controls.maxPolarAngle = Math.PI;
+        this._controls.mouseButtons = {
+            LEFT: window.THREE.MOUSE.ROTATE,
+            MIDDLE: window.THREE.MOUSE.DOLLY,
+            RIGHT: window.THREE.MOUSE.PAN
+        };
+    }
+
+    resetView() {
+        const toggle = document.getElementById('slam-viewer-topview-toggle');
+        if (toggle && toggle.checked) {
+            toggle.checked = false;
+            this._topView = false;
+            this._savedCameraPos = null;
+            this._restoreOrbitControls();
+        }
+        this._fitCamera();
+    }
+
+    toggleTopView(enabled) {
+        this._topView = enabled;
+        if (enabled) {
+            this._savedCameraPos = this._camera.position.clone();
+            this._savedCameraUp = this._camera.up.clone();
+            this._savedTarget = this._controls.target.clone();
+            this._applyTopView();
+        } else {
+            this._restoreOrbitControls();
+            if (this._savedCameraPos) {
+                this._camera.position.copy(this._savedCameraPos);
+                this._camera.up.copy(this._savedCameraUp);
+                this._controls.target.copy(this._savedTarget);
+                this._savedCameraPos = null;
+            } else {
+                this._fitCamera();
+            }
+            this._controls.update();
+        }
+    }
+
+    togglePCDs(visible) {
+        for (const obj of this._pcdObjects) {
+            obj.visible = visible;
+        }
+    }
+
+    async _loadDiffPCD(path, color) {
+        const THREE = window.THREE;
+        const points = await this._loadPCD(path);
+        if (!points) return;
+        points.material = new THREE.PointsMaterial({
+            color,
+            size: 5,
+            sizeAttenuation: false,
+            vertexColors: false,
+        });
+        this._scene.add(points);
+        this._diffObjects.push(points);
+    }
+
+    async toggleDiffPCDs(enabled) {
+        const diffLegend = document.getElementById('slam-diff-legend-rows');
+        if (enabled) {
+            if (!this._diffLoaded) {
+                const loadingEl = document.getElementById('slam-result-loading');
+                if (loadingEl) loadingEl.style.display = 'block';
+                try {
+                    if (!this._diffPaths) {
+                        this._diffPaths = await apiCall('/api/slam/result_paths');
+                    }
+                    const paths = this._diffPaths;
+                    if (paths && paths.pd_pcd) await this._loadDiffPCD(paths.pd_pcd, 0xff6600);
+                    if (paths && paths.nd_pcd) await this._loadDiffPCD(paths.nd_pcd, 0xdd00ff);
+                    this._diffLoaded = true;
+                } catch (e) {
+                    console.error('SlamResultViewer: diff PCD load failed:', e);
+                } finally {
+                    if (loadingEl) loadingEl.style.display = 'none';
+                }
+            } else {
+                for (const obj of this._diffObjects) {
+                    obj.visible = true;
+                }
+            }
+            if (diffLegend) diffLegend.style.display = 'block';
+        } else {
+            for (const obj of this._diffObjects) {
+                obj.visible = false;
+            }
+            if (diffLegend) diffLegend.style.display = 'none';
+        }
+    }
+
+    _clearDiff() {
+        for (const obj of this._diffObjects) {
+            if (this._scene) this._scene.remove(obj);
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) obj.material.dispose();
+        }
+        this._diffObjects = [];
+        this._diffLoaded = false;
+        this._diffPaths = null;
+    }
+
+    setPointSize(size) {
+        this._pcdPointSize = size;
+        for (const obj of this._pcdObjects) {
+            if (obj.material) {
+                obj.material.size = size;
+                obj.material.needsUpdate = true;
+            }
+        }
+        const label = document.getElementById('slam-point-size-label');
+        if (label) label.textContent = size.toFixed(2) + ' m';
+    }
+
+    hideAndReset() {
+        this.hide();
+        this._loaded = false;
+        this._loading = false;
+        this._clearScene();
+        this._topView = false;
+        this._savedCameraPos = null;
+        this._savedCameraUp = null;
+        this._savedTarget = null;
+        if (this._controls) {
+            this._restoreOrbitControls();
+        }
+        const topViewToggle = document.getElementById('slam-viewer-topview-toggle');
+        if (topViewToggle) topViewToggle.checked = false;
+        this._clearDiff();
+        const diffToggle = document.getElementById('slam-viewer-diff-toggle');
+        if (diffToggle) diffToggle.checked = false;
+        const diffLegend = document.getElementById('slam-diff-legend-rows');
+        if (diffLegend) diffLegend.style.display = 'none';
+        const slider = document.getElementById('slam-point-size-slider');
+        if (slider) {
+            slider.value = '0.05';
+            this._pcdPointSize = 0.05;
+            const label = document.getElementById('slam-point-size-label');
+            if (label) label.textContent = '0.05 m';
+        }
+    }
+}
+
+const slamResultViewer = new SlamResultViewer();
+
+function resetSlamResultView() {
+    slamResultViewer.resetView();
+}
+
+function toggleSlamPCDs(visible) {
+    slamResultViewer.togglePCDs(visible);
+}
+
+function toggleSlamTopView(checked) {
+    slamResultViewer.toggleTopView(checked);
+}
+
+function toggleSlamDiff(checked) {
+    slamResultViewer.toggleDiffPCDs(checked);
+}
+
+function setSlamPointSize(size) {
+    slamResultViewer.setPointSize(size);
+}
 
 // ==============================================================
 // 페이지 로드 시 초기화

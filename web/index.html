@@ -157,6 +157,45 @@
                             <button id="slam-opt-cancel-btn" onclick="cancelOptimization()" style="display:none; padding:6px 14px; min-width:auto; background:rgba(255,95,109,0.15); border:1px solid rgba(255,95,109,0.5); color:var(--danger); border-radius:8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.2s;">Cancel</button>
                         </div>
                     </div>
+
+                    <div id="slam-result-viewer" style="display:none;">
+                        <div class="slam-viewer-header">
+                            <button onclick="resetSlamResultView()" class="small-button">Reset View</button>
+                            <label class="slam-viewer-toggle">
+                                <input type="checkbox" id="slam-viewer-topview-toggle" onchange="toggleSlamTopView(this.checked)" />
+                                <span>Top View</span>
+                            </label>
+                            <label class="slam-viewer-toggle">
+                                <input type="checkbox" id="slam-viewer-diff-toggle" onchange="toggleSlamDiff(this.checked)" />
+                                <span>Check Difference</span>
+                            </label>
+                        </div>
+                        <div id="slam-result-canvas-container">
+                            <canvas id="slam-result-canvas"></canvas>
+                            <div id="slam-result-loading">Loading...</div>
+                            <div id="slam-pcd-legend">
+                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#4488ff;"></span><span>Map1</span></div>
+                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#44dd88;"></span><span>Map2</span></div>
+                                <div id="slam-diff-legend-rows" style="display:none;">
+                                    <div class="slam-legend-separator"></div>
+                                    <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#ff6600;"></span><span>PD (New)</span></div>
+                                    <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#dd00ff;"></span><span>ND (Del)</span></div>
+                                </div>
+                            </div>
+                            <div id="slam-result-legend">
+                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#ffee44;"></span><span>Map1 Traj</span></div>
+                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#ff9900;"></span><span>Map2 Traj</span></div>
+                                <div class="slam-legend-row"><span class="slam-legend-dot" style="background:#44ffff;"></span><span>Output Traj</span></div>
+                            </div>
+                            <div id="slam-point-size-overlay">
+                                <span class="slam-ps-label-text">Pt Size</span>
+                                <input type="range" id="slam-point-size-slider"
+                                    min="0.01" max="0.5" step="0.01" value="0.05"
+                                    oninput="setSlamPointSize(parseFloat(this.value))" />
+                                <span id="slam-point-size-label">0.05 m</span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -944,10 +983,18 @@
     <script type="module">
         import * as THREE from 'three';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { PCDLoader } from 'three/addons/loaders/PCDLoader.js';
+        import { Line2 } from 'three/addons/lines/Line2.js';
+        import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+        import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
         
         // Make THREE and OrbitControls globally available
         window.THREE = THREE;
         window.OrbitControls = OrbitControls;
+        window.PCDLoader = PCDLoader;
+        window.Line2 = Line2;
+        window.LineGeometry = LineGeometry;
+        window.LineMaterial = LineMaterial;
         window.threeReady = true;
         window.orbitControlsReady = true;
         
