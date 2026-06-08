@@ -5234,6 +5234,7 @@ class SlamResultViewer {
         this._diffLoaded = false;
         this._diffPaths = null;
         this._layers = {};
+        this._lcObjects = [];
     }
 
     _waitForThree() {
@@ -5305,6 +5306,7 @@ class SlamResultViewer {
         }
         this._allObjects = [];
         this._pcdObjects = [];
+        this._lcObjects = [];
         this._layers = {};
     }
 
@@ -5339,7 +5341,27 @@ class SlamResultViewer {
         const THREE = window.THREE;
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-        return new THREE.Points(geo, new THREE.PointsMaterial({ color, size: 8, sizeAttenuation: false }));
+
+        if (!SlamResultViewer._circleTexture) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.beginPath();
+            ctx.arc(32, 32, 30, 0, Math.PI * 2);
+            ctx.fillStyle = '#ffffff';
+            ctx.fill();
+            SlamResultViewer._circleTexture = new THREE.CanvasTexture(canvas);
+        }
+
+        return new THREE.Points(geo, new THREE.PointsMaterial({
+            color,
+            size: 16,
+            sizeAttenuation: false,
+            map: SlamResultViewer._circleTexture,
+            alphaTest: 0.5,
+            transparent: true,
+        }));
     }
 
     _posesToFlat(poses) {
@@ -5481,7 +5503,74 @@ class SlamResultViewer {
         if (flat2.length >= 3) this._addToScene(this._makeNodes(flat2, 0xff9900), 'map2traj');
         if (flatOut.length >= 3) this._addToScene(this._makeNodes(flatOut, 0x44ffff), 'outputtraj');
 
+        if (paths.output_edges && posesOut.length > 0) {
+            await this._loadLoopClosures(paths.output_edges, posesOut);
+        }
+
         this._fitCamera();
+    }
+
+    async _loadLoopClosures(edgesPath, poses) {
+        try {
+            const resp = await fetch('/api/slam/edges?path=' + encodeURIComponent(edgesPath));
+            if (!resp.ok) {
+                console.warn('SlamResultViewer: edges API error', resp.status);
+                return;
+            }
+            const data = await resp.json();
+            if (!data.success || !data.loop_closures || data.loop_closures.length === 0) {
+                console.warn('SlamResultViewer: no loop closures', data);
+                return;
+            }
+            console.log(`SlamResultViewer: ${data.loop_closures.length} loop closures found`);
+
+            const THREE = window.THREE;
+            const maxIdx = poses.length - 1;
+            const positions = [];
+            for (const edge of data.loop_closures) {
+                const fi = edge.from_idx;
+                const ti = edge.to_idx;
+                if (fi < 0 || fi > maxIdx || ti < 0 || ti > maxIdx) continue;
+                const from = poses[fi];
+                const to   = poses[ti];
+                positions.push(from.x, from.y, from.z, to.x, to.y, to.z);
+            }
+            if (positions.length === 0) {
+                console.warn('SlamResultViewer: all loop closure indices out of range');
+                return;
+            }
+
+            let lcLines;
+            if (window.LineSegments2 && window.LineSegmentsGeometry && window.LineMaterial) {
+                const lsGeo = new window.LineSegmentsGeometry();
+                lsGeo.setPositions(positions);
+                const container = document.getElementById('slam-result-canvas-container');
+                const lsMat = new window.LineMaterial({
+                    color: 0xff2266,
+                    linewidth: 3,
+                    transparent: true,
+                    opacity: 0.85,
+                    depthTest: false,
+                    resolution: new THREE.Vector2(
+                        container ? container.clientWidth : 600,
+                        container ? container.clientHeight : 380
+                    ),
+                });
+                lcLines = new window.LineSegments2(lsGeo, lsMat);
+            } else {
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                lcLines = new THREE.LineSegments(
+                    geo,
+                    new THREE.LineBasicMaterial({ color: 0xff2266, transparent: true, opacity: 0.85, depthTest: false })
+                );
+            }
+            lcLines.renderOrder = 2;
+            this._addToScene(lcLines, 'loopclosure');
+            this._lcObjects.push(lcLines);
+        } catch (e) {
+            console.warn('SlamResultViewer: loop closure load failed:', e);
+        }
     }
 
     _resizeRenderer() {

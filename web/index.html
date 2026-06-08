@@ -188,6 +188,8 @@
                                 <div class="slam-legend-row" data-layer="map1traj" data-active="true" onclick="toggleSlamLayer('map1traj')"><span class="slam-legend-dot" style="background:#ffee44;"></span><span>Map1 Traj</span></div>
                                 <div class="slam-legend-row" data-layer="map2traj" data-active="true" onclick="toggleSlamLayer('map2traj')"><span class="slam-legend-dot" style="background:#ff9900;"></span><span>Map2 Traj</span></div>
                                 <div class="slam-legend-row" data-layer="outputtraj" data-active="true" onclick="toggleSlamLayer('outputtraj')"><span class="slam-legend-dot" style="background:#44ffff;"></span><span>Output Traj</span></div>
+                                <div class="slam-legend-separator"></div>
+                                <div class="slam-legend-row" data-layer="loopclosure" data-active="true" onclick="toggleSlamLayer('loopclosure')"><span class="slam-legend-line" style="background:#ff2266;"></span><span>Loop Closure</span></div>
                             </div>
                             <div id="slam-point-size-overlay">
                                 <span class="slam-ps-label-text">Pt Size</span>
@@ -998,6 +1000,8 @@
         import { Line2 } from 'three/addons/lines/Line2.js';
         import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
         import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
+        import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
+        import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
         
         // Make THREE and OrbitControls globally available
         window.THREE = THREE;
@@ -1006,6 +1010,8 @@
         window.Line2 = Line2;
         window.LineGeometry = LineGeometry;
         window.LineMaterial = LineMaterial;
+        window.LineSegments2 = LineSegments2;
+        window.LineSegmentsGeometry = LineSegmentsGeometry;
         window.threeReady = true;
         window.orbitControlsReady = true;
         

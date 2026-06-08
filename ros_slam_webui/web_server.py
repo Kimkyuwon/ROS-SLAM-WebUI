@@ -3380,6 +3380,7 @@ class WebGUINode(Node):
             'nd_pcd': (output_dir + '/Debug/ND.pcd') if output_dir else '',
             'first_ue_pcd': (output_dir + '/Debug/FirstUE.pcd') if output_dir else '',
             'second_ue_pcd': (output_dir + '/Debug/SecondUE.pcd') if output_dir else '',
+            'output_edges': (output_dir + '/edges.txt') if output_dir else '',
             'output_dir': output_dir,
         }
 
@@ -7192,6 +7193,10 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed_path.query)
             file_path = query.get('path', [''])[0]
             self._serve_slam_poses(file_path)
+        elif parsed_path.path == '/api/slam/edges':
+            query = parse_qs(parsed_path.query)
+            file_path = query.get('path', [''])[0]
+            self._serve_slam_edges(file_path)
         elif parsed_path.path == '/api/slam/pcd':
             query = parse_qs(parsed_path.query)
             file_path = query.get('path', [''])[0]
@@ -7777,6 +7782,31 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response({'success': False, 'error': 'File not found', 'poses': []})
         except Exception as e:
             self.send_json_response({'success': False, 'error': str(e), 'poses': []})
+
+    def _serve_slam_edges(self, file_path):
+        """Parse edges.txt and return loop closure edges (|from_idx - to_idx| != 1) as JSON."""
+        if not self._is_allowed_slam_path(file_path):
+            self.send_json_response({'success': False, 'error': 'Invalid or unauthorized path'})
+            return
+        try:
+            loop_closures = []
+            with open(file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+                    from_idx = int(parts[0])
+                    to_idx = int(parts[1])
+                    if abs(from_idx - to_idx) != 1:
+                        loop_closures.append({'from_idx': from_idx, 'to_idx': to_idx})
+            self.send_json_response({'success': True, 'loop_closures': loop_closures})
+        except FileNotFoundError:
+            self.send_json_response({'success': False, 'error': 'File not found', 'loop_closures': []})
+        except Exception as e:
+            self.send_json_response({'success': False, 'error': str(e), 'loop_closures': []})
 
     def _serve_slam_pcd(self, file_path):
         """Serve a PCD file as binary octet-stream."""
