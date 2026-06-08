@@ -2700,3 +2700,49 @@ h3 {
     font-size: 11px;
     min-width: 40px;
 }
+
+#slam-viewer-actions {
+    bottom: 10px;
+    display: flex;
+    gap: 6px;
+    position: absolute;
+    right: 10px;
+    z-index: 10;
+}
+
+.slam-action-btn {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: #ccc;
+    cursor: pointer;
+    display: flex;
+    height: 30px;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+    width: 30px;
+}
+
+.slam-action-btn:hover {
+    background: rgba(74, 214, 255, 0.18);
+    border-color: rgba(74, 214, 255, 0.5);
+    color: #fff;
+}
+
+.slam-action-btn:active {
+    transform: scale(0.93);
+}
+
+#slam-result-canvas-container:fullscreen {
+    border-radius: 0;
+    height: 100vh;
+    width: 100vw;
+}
+
+#slam-result-canvas-container:-webkit-full-screen {
+    border-radius: 0;
+    height: 100vh;
+    width: 100vw;
+}

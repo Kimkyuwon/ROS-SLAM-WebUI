@@ -5260,7 +5260,7 @@ class SlamResultViewer {
         const w = container.clientWidth || 600;
         const h = container.clientHeight || 380;
 
-        this._renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        this._renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
         this._renderer.setPixelRatio(window.devicePixelRatio);
         this._renderer.setSize(w, h);
 
@@ -5671,6 +5671,39 @@ class SlamResultViewer {
         });
     }
 
+    takeSnapshot(scale = 2) {
+        if (!this._renderer || !this._scene || !this._camera) return;
+        const container = document.getElementById('slam-result-canvas-container');
+        if (!container) return;
+
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const filename = `slam_snapshot_${timestamp}.png`;
+
+        this._renderer.setSize(w * scale, h * scale);
+        this._camera.aspect = w / h;
+        this._camera.updateProjectionMatrix();
+        this._renderer.render(this._scene, this._camera);
+
+        const canvas = this._renderer.domElement;
+        canvas.toBlob((blob) => {
+            this._renderer.setSize(w, h);
+            this._camera.aspect = w / h;
+            this._camera.updateProjectionMatrix();
+
+            if (!blob) return;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 'image/png');
+    }
+
     hideAndReset() {
         this.hide();
         this._loaded = false;
@@ -5726,6 +5759,40 @@ function setSlamPointSize(size) {
 function toggleSlamLayer(name) {
     slamResultViewer.toggleLayer(name);
 }
+
+function takeSlamSnapshot() {
+    slamResultViewer.takeSnapshot(2);
+}
+
+function toggleSlamFullscreen() {
+    const container = document.getElementById('slam-result-canvas-container');
+    if (!container) return;
+    const isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (isFullscreen) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+        (container.requestFullscreen || container.webkitRequestFullscreen).call(container);
+    }
+}
+
+function _updateSlamFullscreenIcon(isFullscreen) {
+    const expand = document.getElementById('slam-fullscreen-icon-expand');
+    const collapse = document.getElementById('slam-fullscreen-icon-collapse');
+    if (expand) expand.style.display = isFullscreen ? 'none' : '';
+    if (collapse) collapse.style.display = isFullscreen ? '' : 'none';
+}
+
+document.addEventListener('fullscreenchange', () => {
+    const isFullscreen = !!document.fullscreenElement;
+    _updateSlamFullscreenIcon(isFullscreen);
+    if (slamResultViewer) slamResultViewer._resizeRenderer();
+});
+
+document.addEventListener('webkitfullscreenchange', () => {
+    const isFullscreen = !!document.webkitFullscreenElement;
+    _updateSlamFullscreenIcon(isFullscreen);
+    if (slamResultViewer) slamResultViewer._resizeRenderer();
+});
 
 // ==============================================================
 // 페이지 로드 시 초기화
