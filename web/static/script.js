@@ -5477,10 +5477,6 @@ class SlamResultViewer {
         const flat2 = this._posesToFlat(poses2);
         const flatOut = this._posesToFlat(posesOut);
 
-        if (flat1.length >= 6) this._addToScene(this._makeLine(flat1, 0x4488ff), 'map1traj');
-        if (flat2.length >= 6) this._addToScene(this._makeLine(flat2, 0xff4444), 'map2traj');
-        if (flatOut.length >= 6) this._addToScene(this._makeLine(flatOut, 0xffffff), 'outputtraj');
-
         if (flat1.length >= 3) this._addToScene(this._makeNodes(flat1, 0xffee44), 'map1traj');
         if (flat2.length >= 3) this._addToScene(this._makeNodes(flat2, 0xff9900), 'map2traj');
         if (flatOut.length >= 3) this._addToScene(this._makeNodes(flatOut, 0x44ffff), 'outputtraj');
@@ -5570,8 +5566,8 @@ class SlamResultViewer {
         if (!points) return;
         points.material = new THREE.PointsMaterial({
             color,
-            size: 5,
-            sizeAttenuation: false,
+            size: this._pcdPointSize * 1.2,
+            sizeAttenuation: true,
             vertexColors: false,
         });
         this._scene.add(points);
@@ -5656,6 +5652,12 @@ class SlamResultViewer {
         for (const obj of this._pcdObjects) {
             if (obj.material) {
                 obj.material.size = size;
+                obj.material.needsUpdate = true;
+            }
+        }
+        for (const obj of this._diffObjects) {
+            if (obj.material) {
+                obj.material.size = size * 1.2;
                 obj.material.needsUpdate = true;
             }
         }
