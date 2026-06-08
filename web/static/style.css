@@ -2746,3 +2746,53 @@ h3 {
     height: 100vh;
     width: 100vw;
 }
+
+/* ======================================
+   3D Viewer 풀스크린 버튼
+   ====================================== */
+
+#viewer-3d-actions {
+    bottom: 10px;
+    display: flex;
+    gap: 6px;
+    position: absolute;
+    right: 10px;
+    z-index: 10;
+}
+
+.viewer-3d-action-btn {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 6px;
+    color: #ccc;
+    cursor: pointer;
+    display: flex;
+    height: 30px;
+    justify-content: center;
+    padding: 0;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
+    width: 30px;
+}
+
+.viewer-3d-action-btn:hover {
+    background: rgba(74, 214, 255, 0.18);
+    border-color: rgba(74, 214, 255, 0.5);
+    color: #fff;
+}
+
+.viewer-3d-action-btn:active {
+    transform: scale(0.93);
+}
+
+#3d-viewer-container:fullscreen {
+    border-radius: 0;
+    height: 100vh;
+    width: 100vw;
+}
+
+#3d-viewer-container:-webkit-full-screen {
+    border-radius: 0;
+    height: 100vh;
+    width: 100vw;
+}

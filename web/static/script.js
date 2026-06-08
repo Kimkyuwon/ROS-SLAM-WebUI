@@ -5871,16 +5871,42 @@ function _updateSlamFullscreenIcon(isFullscreen) {
     if (collapse) collapse.style.display = isFullscreen ? '' : 'none';
 }
 
+function toggle3DViewerFullscreen() {
+    const container = document.getElementById('3d-viewer-container');
+    if (!container) return;
+    const isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (isFullscreen) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+        (container.requestFullscreen || container.webkitRequestFullscreen).call(container);
+    }
+}
+
+function _updateViewerFullscreenIcon(isFullscreen) {
+    const expand = document.getElementById('viewer-fullscreen-icon-expand');
+    const collapse = document.getElementById('viewer-fullscreen-icon-collapse');
+    if (expand) expand.style.display = isFullscreen ? 'none' : '';
+    if (collapse) collapse.style.display = isFullscreen ? '' : 'none';
+}
+
 document.addEventListener('fullscreenchange', () => {
     const isFullscreen = !!document.fullscreenElement;
-    _updateSlamFullscreenIcon(isFullscreen);
+    const isSlamFullscreen = isFullscreen && document.fullscreenElement?.id === 'slam-result-canvas-container';
+    const isViewerFullscreen = isFullscreen && document.fullscreenElement?.id === '3d-viewer-container';
+    _updateSlamFullscreenIcon(isSlamFullscreen);
+    _updateViewerFullscreenIcon(isViewerFullscreen);
     if (slamResultViewer) slamResultViewer._resizeRenderer();
+    if (typeof onWindowResize === 'function') onWindowResize();
 });
 
 document.addEventListener('webkitfullscreenchange', () => {
     const isFullscreen = !!document.webkitFullscreenElement;
-    _updateSlamFullscreenIcon(isFullscreen);
+    const isSlamFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'slam-result-canvas-container';
+    const isViewerFullscreen = isFullscreen && document.webkitFullscreenElement?.id === '3d-viewer-container';
+    _updateSlamFullscreenIcon(isSlamFullscreen);
+    _updateViewerFullscreenIcon(isViewerFullscreen);
     if (slamResultViewer) slamResultViewer._resizeRenderer();
+    if (typeof onWindowResize === 'function') onWindowResize();
 });
 
 // ==============================================================

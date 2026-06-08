@@ -27,6 +27,8 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 - One-click start/stop control
 - Async Save Map 
 
+  ![lt_slam](doc/multi_session_slam.gif)
+
 ### 📊 Advanced Data Visualization
 - **PlotJuggler-style Real-time Plotting**
   - Interactive time-series data visualization
