@@ -426,18 +426,6 @@ export ROS_LOCALHOST_ONLY=1
 source /opt/ros/jazzy/setup.bash
 ```
 
-### Network Access Configuration
-
-**Ubuntu/Linux:**
-```bash
-sudo ufw allow 8080/tcp
-sudo ufw reload
-```
-
-**Windows:**
-- Windows Defender Firewall → Advanced Settings → Inbound Rules
-- New Rule → Port → TCP 8080 → Allow
-
 ### Change Server Port
 
 Edit `ros_slam_webui/web_server.py`:
@@ -487,9 +475,9 @@ ros_slam_webui/
 ## 📚 Related Projects
 
 ### SLAM & Localization
-- [FAST-LIO Mapping & Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) - ROS2 FAST-LIO mapping/localization package used by this Web UI
-- [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
-- [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
+- [FAST-LIO Mapping & Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) - LiDAR-Inertial SLAM package with DOP-based scan matching confidence evaluation, supporting both Mapping and Localization modes
+- [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) -  LiDAR-based pose graph optimization backend with loop closure detection and dynamic object removal
+- [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping) - Multi-session LiDAR SLAM for long-term map maintenance with structural change detection
 
 ### Dataset & Tools
 - [ConPR](https://github.com/dongjae0107/ConPR) - ConPR dataset format
