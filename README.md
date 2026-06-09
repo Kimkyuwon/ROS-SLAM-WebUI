@@ -220,18 +220,6 @@ When you click **Start Localization**, an inline 3D viewer appears automatically
 | **Fullscreen** button | Expand canvas to full screen |
 | **Reset View** button | Return camera to default position |
 
-**Subscribed topics:**
-
-| Topic | Type | Visualization |
-|---|---|---|
-| `/cloud_registered` | `PointCloud2` | Current scan — rainbow by intensity |
-| `/Laser_map` | `PointCloud2` (TRANSIENT_LOCAL) | Loaded map — rainbow by Z height; auto-replays to late-joining clients |
-| `/path` | `nav_msgs/Path` | Estimated trajectory — green line |
-| `/tf` | `TFMessage` | Frame axes (odom → base_link → sensor) |
-| `/map` | `OccupancyGrid` | 2-D occupancy grid overlay |
-
-The viewer is automatically hidden when **Stop Localization** is clicked. On page refresh, if localization is still running the viewer restores automatically.
-
 ### 📊 Real-time Plotting
 
 The Plot feature provides PlotJuggler-style visualization directly in your browser:
