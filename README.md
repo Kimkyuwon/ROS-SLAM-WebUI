@@ -25,7 +25,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 - Live YAML configuration editing with instant apply
 - Real-time terminal output monitoring
 - One-click start/stop control
-- Async Save Map 
+- Async Save Map
 
   ![lt_slam](doc/multi_session_slam.gif)
 
@@ -45,9 +45,9 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - Real-time PointCloud2 and Livox CustomMsg visualization
   - Path and odometry display
   - TF tree visualization with Fixed Frame support
-  - Interactive camera controls
+  - Interactive camera controls (Orbit / Top-Down)
   - Image topic streaming
-  - Snapshot export
+  - Snapshot export and **Fullscreen mode**
 
   ![plot](doc/visualization.gif)
 
@@ -198,6 +198,39 @@ Open the URL in your web browser. For network access from another device (e.g. t
 3. **Completion**
    - Status banner turns green on success, red on failure
    - Button label changes to "Exit" after completion — click to reset UI
+
+4. **Optimization Result Viewer** *(auto-shown on completion)*
+   - Inline Three.js 3D viewer shows Map1 / Map2 point clouds and pose trajectory nodes
+   - **Layer legend**: click any legend item to toggle that layer's visibility on/off
+   - **Check Difference**: toggle to load and display difference PCD layers — Positive Differences (PD, orange), Negative Differences (ND, purple), First Unique Elements (FirstUE, hot-pink), Second Unique Elements (SecondUE, lime)
+   - **Loop Closure**: thick edge lines drawn between non-adjacent pose nodes
+   - **Top View** toggle, **Point Size** slider, **Reset View** button
+   - **Snapshot** (📷): exports current 3D view as a high-resolution PNG (2× render scale)
+   - **Fullscreen** (⛶): expand viewer to full screen
+
+### 📡 Localization Live Viewer
+
+When you click **Start Localization**, an inline 3D viewer appears automatically beneath the controls panel.
+
+| Element | Description |
+|---|---|
+| **Display panel** (left) | Toggle individual topic layers on/off via checkboxes |
+| **3D canvas** (right) | Real-time Three.js visualization |
+| **Top View** toggle | Switch between perspective and top-down view |
+| **Fullscreen** button | Expand canvas to full screen |
+| **Reset View** button | Return camera to default position |
+
+**Subscribed topics:**
+
+| Topic | Type | Visualization |
+|---|---|---|
+| `/cloud_registered` | `PointCloud2` | Current scan — rainbow by intensity |
+| `/Laser_map` | `PointCloud2` (TRANSIENT_LOCAL) | Loaded map — rainbow by Z height; auto-replays to late-joining clients |
+| `/path` | `nav_msgs/Path` | Estimated trajectory — green line |
+| `/tf` | `TFMessage` | Frame axes (odom → base_link → sensor) |
+| `/map` | `OccupancyGrid` | 2-D occupancy grid overlay |
+
+The viewer is automatically hidden when **Stop Localization** is clicked. On page refresh, if localization is still running the viewer restores automatically.
 
 ### 📊 Real-time Plotting
 
@@ -402,9 +435,10 @@ Click a display item in the Displays panel to expand its settings:
 - Frames stream via binary WebSocket (port 8081) with GPU-accelerated JPEG decoding
 - Resize the image panel by dragging the separator bar
 
-#### 7. Snapshot & Reset
+#### 7. Snapshot, Fullscreen & Reset
 
 - **Snapshot**: saves the current 3D view as a PNG file
+- **Fullscreen** (⛶): expands the 3D canvas to full screen; click again or press Escape to exit
 - **Reset**: removes all active displays and clears the scene
 
 ---
