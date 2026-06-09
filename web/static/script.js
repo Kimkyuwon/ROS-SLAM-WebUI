@@ -2962,12 +2962,19 @@ async function updateLocalizationState() {
                     }
                 }
                 localizationStatus.textContent = 'Status: ' + statusText;
-                // Add red color for Stopping status
                 if (statusText.includes('Stopping')) {
-                    localizationStatus.style.color = '#F44336'; // Red
+                    localizationStatus.style.color = '#F44336';
                 } else {
-                    localizationStatus.style.color = ''; // Reset to default
+                    localizationStatus.style.color = '';
                 }
+            }
+        }
+        // 재진입 복원: locLiveViewer가 선언된 후에만 실행
+        if (typeof locLiveViewer !== 'undefined') {
+            if (state.is_running && !locLiveViewer._visible) {
+                locLiveViewer.show();
+            } else if (!state.is_running && locLiveViewer._visible) {
+                locLiveViewer.hide();
             }
         }
     }
@@ -2977,13 +2984,12 @@ async function updateLocalizationState() {
 // Localization Start/Stop (terminal output removed)
 // ==============================================================
 async function startLocalizationMapping() {
-    // Immediately update status to Running
     updateLocalizationStatus('Running');
     
     const result = await apiCall('/api/localization/start_mapping', {});
     if (result.success) {
         console.log('Localization mapping started');
-        // Status will be updated by periodic updateLocalizationState() calls if implemented
+        locLiveViewer.show();
     } else {
         alert('Failed to start Localization mapping: ' + (result.message || 'Unknown error'));
         console.error('Failed to start Localization mapping');
@@ -2992,15 +2998,15 @@ async function startLocalizationMapping() {
 }
 
 async function stopLocalizationMapping() {
-    // Immediately update status to Stopping
     updateLocalizationStatus('Stopping...');
     
     console.log('Stopping Localization mapping...');
     const result = await apiCall('/api/localization/stop_mapping', {});
 
+    locLiveViewer.hide();
+
     if (result.success) {
         console.log('Localization mapping stopped');
-        // Wait a bit for process to fully stop, then update to Ready
         setTimeout(() => {
             updateLocalizationStatus('Ready');
         }, 500);
@@ -3152,6 +3158,8 @@ window.addEventListener('load', async () => {
             const activeSubTab = document.querySelector('.subtab-content.active');
             if (activeSubTab && (activeSubTab.id === 'multi-session-slam-subtab' || activeSubTab.id === 'lidar-slam-subtab')) {
                 updateSlamState();
+            } else if (activeSubTab && activeSubTab.id === 'localization-subtab') {
+                updateLocalizationState();
             }
         } else if (activeTab.id === 'player-tab') {
             const activeSubTab = document.querySelector('.subtab-content.active');
@@ -5210,9 +5218,863 @@ function togglePlotDisplayPanel() {
 window.togglePlotDisplayPanel = togglePlotDisplayPanel;
 
 // ==============================================================
+// LocalizationLiveViewer - Localization 실시간 3D 뷰어
+// ==============================================================
+class LocalizationLiveViewer {
+    constructor() {
+        this._scene = null;
+        this._camera = null;
+        this._perspCamera = null;
+        this._orthoCamera = null;
+        this._renderer = null;
+        this._controls = null;
+        this._animFrameId = null;
+        this._initialized = false;
+        this._visible = false;
+        this._ros = null;
+        this._subscriptions = [];
+        this._cloudObj = null;
+        this._mapObj = null;
+        this._pathObj = null;
+        this._tfObjects = {};
+        this._mapMesh = null;
+        this._mapTexture = null;
+        this._layers = {
+            cloud_registered: true,
+            laser_map: true,
+            path: true,
+            tf: true,
+            map: true
+        };
+        this._fixedFrame = 'odom';
+        this._topView = false;
+        this._savedCameraPos = null;
+        this._savedCameraUp = null;
+        this._savedTarget = null;
+        this._knownFrames = new Set();
+        this._resizeObserver = null;
+    }
+
+    _waitForThree() {
+        return new Promise((resolve) => {
+            const check = () => {
+                if (window.THREE && window.OrbitControls) {
+                    resolve();
+                } else {
+                    setTimeout(check, 100);
+                }
+            };
+            check();
+        });
+    }
+
+    async _init() {
+        if (this._initialized) return;
+        await this._waitForThree();
+        const THREE = window.THREE;
+        const canvas = document.getElementById('loc-viewer-canvas');
+        if (!canvas) return;
+
+        const container = document.getElementById('loc-viewer-canvas-container');
+        const w = container.clientWidth || 600;
+        const h = container.clientHeight || 480;
+
+        this._renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+        this._renderer.setPixelRatio(window.devicePixelRatio);
+        this._renderer.setSize(w, h);
+
+        this._scene = new THREE.Scene();
+        this._scene.background = new THREE.Color(0x0a0a18);
+
+        this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
+        this._camera.position.set(0, -30, 20);
+        this._camera.up.set(0, 0, 1);
+        this._perspCamera = this._camera;
+
+        this._controls = new window.OrbitControls(this._camera, this._renderer.domElement);
+        this._controls.enableDamping = true;
+        this._controls.dampingFactor = 0.1;
+
+        this._scene.add(new THREE.AxesHelper(3));
+
+        this._resizeObserver = new ResizeObserver(() => this._resizeRenderer());
+        this._resizeObserver.observe(container);
+
+        this._initialized = true;
+        this._startRenderLoop();
+    }
+
+    _startRenderLoop() {
+        const animate = () => {
+            this._animFrameId = requestAnimationFrame(animate);
+            if (this._controls) this._controls.update();
+            // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신
+            if (this._topView && this._orthoCamera) {
+                this._updateOrthoPointSizes();
+            }
+            if (this._renderer && this._scene && this._camera) {
+                this._renderer.render(this._scene, this._camera);
+            }
+        };
+        animate();
+    }
+
+    /**
+     * OrthographicCamera에서 1 월드단위 = 몇 픽셀인지 계산 (3D Viewer 방식 동일)
+     * OrthographicCamera는 sizeAttenuation 미적용 → material.size를 픽셀 단위로 직접 제어해야 함
+     */
+    _getOrthoPixelsPerUnit() {
+        if (!this._orthoCamera || !this._renderer) return 40;
+        const frustumH = (this._orthoCamera.top - this._orthoCamera.bottom) / (this._orthoCamera.zoom || 1);
+        const pixelH   = this._renderer.domElement.height || 480;
+        return pixelH / frustumH;
+    }
+
+    /**
+     * 탑뷰(OrthographicCamera) 시 모든 포인트 클라우드 material.size를
+     * frustum 스케일 기준으로 갱신 (zoom 변화 반영)
+     */
+    _updateOrthoPointSizes() {
+        const scale = this._getOrthoPixelsPerUnit();
+        const update = (obj) => {
+            if (!obj || !obj.material) return;
+            const baseSize = obj.material._baseSize || 0.1;
+            obj.material.size = Math.max(1, baseSize * scale);
+        };
+        update(this._cloudObj);
+        update(this._mapObj);
+    }
+
+    _resizeRenderer() {
+        if (!this._renderer) return;
+        const container = document.getElementById('loc-viewer-canvas-container');
+        if (!container) return;
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        if (w > 0 && h > 0) {
+            this._renderer.setSize(w, h);
+            const aspect = w / h;
+            if (this._topView && this._orthoCamera) {
+                const halfH = this._orthoCamera.top;
+                this._orthoCamera.left   = -halfH * aspect;
+                this._orthoCamera.right  =  halfH * aspect;
+                this._orthoCamera.updateProjectionMatrix();
+            } else if (this._perspCamera) {
+                this._perspCamera.aspect = aspect;
+                this._perspCamera.updateProjectionMatrix();
+            }
+        }
+    }
+
+    async show() {
+        const viewerEl = document.getElementById('localization-live-viewer');
+        if (viewerEl) viewerEl.style.display = 'block';
+        this._visible = true;
+        await this._init();
+        this._resizeRenderer();
+        this._connectAndSubscribe();
+    }
+
+    hide() {
+        this._visible = false;
+        this._unsubscribeAll();
+        this._clearLiveObjects();
+        const viewerEl = document.getElementById('localization-live-viewer');
+        if (viewerEl) viewerEl.style.display = 'none';
+        const topViewToggle = document.getElementById('loc-viewer-topview-toggle');
+        if (topViewToggle) topViewToggle.checked = false;
+        this._topView = false;
+        this._savedCameraPos = null;
+        this._knownFrames.clear();
+    }
+
+    _clearLiveObjects() {
+        const THREE = window.THREE;
+        if (!this._scene || !THREE) return;
+
+        const removeObj = (obj) => {
+            if (!obj) return;
+            this._scene.remove(obj);
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) {
+                if (obj.material.map) obj.material.map.dispose();
+                obj.material.dispose();
+            }
+        };
+
+        removeObj(this._cloudObj);
+        removeObj(this._mapObj);
+        removeObj(this._pathObj);
+        this._cloudObj = null;
+        this._mapObj = null;
+        this._pathObj = null;
+
+        for (const key of Object.keys(this._tfObjects)) {
+            const entry = this._tfObjects[key];
+            if (entry && entry.group) this._scene.remove(entry.group);
+        }
+        this._tfObjects = {};
+
+        if (this._mapMesh) {
+            this._scene.remove(this._mapMesh);
+            if (this._mapMesh.geometry) this._mapMesh.geometry.dispose();
+            if (this._mapMesh.material) this._mapMesh.material.dispose();
+            this._mapMesh = null;
+        }
+        if (this._mapTexture) {
+            this._mapTexture.dispose();
+            this._mapTexture = null;
+        }
+    }
+
+    _connectAndSubscribe() {
+        const loadingEl = document.getElementById('loc-viewer-loading');
+        if (window.plotState && plotState.ros && plotState.ros.isConnected) {
+            this._ros = plotState.ros;
+            if (loadingEl) loadingEl.style.display = 'none';
+            this._subscribeAll();
+        } else {
+            if (loadingEl) loadingEl.style.display = 'flex';
+            try {
+                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros.on('connection', () => {
+                    console.log('[LocalizationLiveViewer] rosbridge connected');
+                    if (loadingEl) loadingEl.style.display = 'none';
+                    this._subscribeAll();
+                });
+                this._ros.on('error', (err) => {
+                    console.error('[LocalizationLiveViewer] rosbridge error:', err);
+                });
+                this._ros.on('close', () => {
+                    console.warn('[LocalizationLiveViewer] rosbridge connection closed');
+                });
+            } catch (e) {
+                console.error('[LocalizationLiveViewer] failed to init rosbridge:', e);
+            }
+        }
+    }
+
+    _subscribeAll() {
+        this._subscribePointCloud('/cloud_registered', 'cloud_registered');
+        this._subscribePointCloudLatched('/Laser_map', 'laser_map');
+        this._subscribePath('/path');
+        this._subscribeTF('/tf');
+        this._subscribeMap('/map');
+    }
+
+    _unsubscribeAll() {
+        for (const t of this._subscriptions) {
+            try { t.unsubscribe(); } catch (e) { /* ignore */ }
+        }
+        this._subscriptions = [];
+    }
+
+    _parsePC2(msg) {
+        const MAX_PTS = 80000;
+        let binary;
+        try {
+            const raw = atob(msg.data);
+            binary = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) {
+                binary[i] = raw.charCodeAt(i);
+            }
+        } catch (e) {
+            console.error('[LocalizationLiveViewer] PC2 decode error:', e);
+            return null;
+        }
+        const view = new DataView(binary.buffer);
+        const pointStep = msg.point_step;
+        const totalPts = msg.width * msg.height;
+        const fields = {};
+        for (const f of msg.fields) {
+            fields[f.name] = f.offset;
+        }
+        const xOff = fields['x'] !== undefined ? fields['x'] : 0;
+        const yOff = fields['y'] !== undefined ? fields['y'] : 4;
+        const zOff = fields['z'] !== undefined ? fields['z'] : 8;
+
+        const step = Math.max(1, Math.floor(totalPts / MAX_PTS));
+        const outPts = Math.ceil(totalPts / step);
+        const positions = new Float32Array(outPts * 3);
+        const colors = new Float32Array(outPts * 3);
+        const tempZ = new Float32Array(outPts);
+        let minZ = Infinity;
+        let maxZ = -Infinity;
+        let idx = 0;
+
+        for (let i = 0; i < totalPts; i += step) {
+            const base = i * pointStep;
+            if (base + zOff + 4 > binary.length) break;
+            const x = view.getFloat32(base + xOff, true);
+            const y = view.getFloat32(base + yOff, true);
+            const z = view.getFloat32(base + zOff, true);
+            if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+            positions[idx * 3]     = x;
+            positions[idx * 3 + 1] = y;
+            positions[idx * 3 + 2] = z;
+            tempZ[idx] = z;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+            idx++;
+        }
+
+        const range = (maxZ - minZ) || 1;
+        for (let i = 0; i < idx; i++) {
+            const t = (tempZ[i] - minZ) / range;
+            const [r, g, b] = this._rainbowColor(t);
+            colors[i * 3]     = r;
+            colors[i * 3 + 1] = g;
+            colors[i * 3 + 2] = b;
+        }
+
+        return {
+            positions: positions.subarray(0, idx * 3),
+            colors: colors.subarray(0, idx * 3)
+        };
+    }
+
+    _rainbowColor(t) {
+        const h = (1 - t) * 240;
+        const c = 1;
+        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+        let r = 0, g = 0, b = 0;
+        if      (h < 60)  { r = c; g = x; b = 0; }
+        else if (h < 120) { r = x; g = c; b = 0; }
+        else if (h < 180) { r = 0; g = c; b = x; }
+        else if (h < 240) { r = 0; g = x; b = c; }
+        else if (h < 300) { r = x; g = 0; b = c; }
+        else              { r = c; g = 0; b = x; }
+        return [r, g, b];
+    }
+
+    _updatePointCloud(key, parsed) {
+        const THREE = window.THREE;
+        if (!this._scene || !THREE || !parsed) return;
+
+        const newCount = parsed.positions.length / 3;
+        const existing = (key === 'cloud_registered') ? this._cloudObj : this._mapObj;
+        const pointSize = (key === 'laser_map') ? 0.08 : 0.12;
+        const opacity   = (key === 'laser_map') ? 0.5  : 1.0;
+        const transparent = (key === 'laser_map');
+
+        if (existing && existing.geometry) {
+            const posAttr = existing.geometry.getAttribute('position');
+            const colAttr = existing.geometry.getAttribute('color');
+            if (posAttr && posAttr.array.length >= parsed.positions.length) {
+                posAttr.array.set(parsed.positions);
+                posAttr.needsUpdate = true;
+                colAttr.array.set(parsed.colors);
+                colAttr.needsUpdate = true;
+                existing.geometry.setDrawRange(0, newCount);
+                return;
+            }
+            this._scene.remove(existing);
+            existing.geometry.dispose();
+            existing.material.dispose();
+        }
+
+        const MAX_PTS = 80000;
+        const posArray = new Float32Array(MAX_PTS * 3);
+        const colArray = new Float32Array(MAX_PTS * 3);
+        posArray.set(parsed.positions);
+        colArray.set(parsed.colors);
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+        geo.setDrawRange(0, newCount);
+
+        const mat = new THREE.PointsMaterial({
+            size: pointSize,
+            sizeAttenuation: true,
+            vertexColors: true,
+            transparent,
+            opacity
+        });
+        mat._baseSize = pointSize; // 탑뷰 ortho 보정용 기준 크기 저장
+        // 탑뷰 활성 상태에서 새 mesh가 생성되는 경우 즉시 크기 보정
+        if (this._topView && this._orthoCamera) {
+            const scale = this._getOrthoPixelsPerUnit();
+            mat.size = Math.max(1, pointSize * scale);
+        }
+        const points = new THREE.Points(geo, mat);
+        points.visible = this._layers[key];
+
+        if (key === 'cloud_registered') {
+            this._cloudObj = points;
+        } else {
+            this._mapObj = points;
+        }
+        this._scene.add(points);
+    }
+
+    _subscribePointCloud(topic, key) {
+        // Python 백엔드 binary WebSocket (8081) 사용
+        // rosbridge JSON+base64 대비 전송 크기 ~4배 감소, JSON 파싱 오버헤드 제거 → 부드러운 실시간 시각화
+        const hostname = window.location.hostname || 'localhost';
+        const ws = new WebSocket(`ws://${hostname}:8081`);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            ws.send(JSON.stringify({ cmd: 'subscribe', topic }));
+        };
+
+        ws.onmessage = (ev) => {
+            if (!(ev.data instanceof ArrayBuffer)) return; // JSON meta 무시
+            const parsed = this._parseBinaryPC2(ev.data);
+            if (parsed) this._updatePointCloud(key, parsed);
+        };
+
+        ws.onerror = (e) => console.error('[LocalizationLiveViewer] PC2 WS error:', e);
+
+        this._subscriptions.push({
+            unsubscribe: () => {
+                try {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ cmd: 'unsubscribe', topic }));
+                    }
+                    ws.close();
+                } catch (e) { /* ignore */ }
+            }
+        });
+    }
+
+    // /Laser_map 은 TRANSIENT_LOCAL + RELIABLE QoS 로 발행됨
+    // rosbridge는 volatile QoS 구독이라 latched 메시지를 받지 못함
+    // → Python 백엔드(8081)에 subscribe_latched 명령으로 직접 연결
+    _subscribePointCloudLatched(topic, key) {
+        const hostname = window.location.hostname || 'localhost';
+        const ws = new WebSocket(`ws://${hostname}:8081`);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+            ws.send(JSON.stringify({ cmd: 'subscribe_latched', topic }));
+            console.log(`[LocalizationLiveViewer] subscribe_latched 전송: ${topic}`);
+        };
+
+        ws.onmessage = (ev) => {
+            if (!(ev.data instanceof ArrayBuffer)) return; // JSON meta 무시
+            const parsed = this._parseBinaryPC2(ev.data);
+            if (parsed) this._updatePointCloud(key, parsed);
+        };
+
+        ws.onerror = (e) => {
+            console.error('[LocalizationLiveViewer] PC2 WS error:', e);
+        };
+
+        this._subscriptions.push({
+            unsubscribe: () => {
+                try {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ cmd: 'unsubscribe_latched', topic }));
+                    }
+                    ws.close();
+                } catch (e) { /* ignore */ }
+            }
+        });
+    }
+
+    // Python 백엔드 binary PC2 패킷 파싱
+    // 패킷 포맷: [3B]'PC2' [1B]version [1B]flags [4B]topicLen [4B]frameLen [4B]count
+    //            [topicLen]topic [frameLen]frameId [count*12]XYZ [count*4]colorF32 ([count*4]rgb)
+    _parseBinaryPC2(buffer) {
+        try {
+            const view = new DataView(buffer);
+            if (view.getUint8(0) !== 0x50 || view.getUint8(1) !== 0x43 || view.getUint8(2) !== 0x32) return null;
+            let off = 3;
+            /* version = */ view.getUint8(off++);
+            const flags    = view.getUint8(off++);
+            const topicLen = view.getUint32(off, true); off += 4;
+            const frameLen = view.getUint32(off, true); off += 4;
+            const count    = view.getUint32(off, true); off += 4;
+            off += topicLen + frameLen; // skip names
+            if (count === 0) return null;
+
+            const MAX_PTS = 80000;
+            const step    = Math.max(1, Math.floor(count / MAX_PTS));
+            const outPts  = Math.ceil(count / step);
+            const positions = new Float32Array(outPts * 3);
+            const colors    = new Float32Array(outPts * 3);
+            const tempZ     = new Float32Array(outPts);
+            let minZ = Infinity, maxZ = -Infinity, idx = 0;
+
+            const xyzBase = off;
+            for (let i = 0; i < count; i += step) {
+                const b = xyzBase + i * 12;
+                if (b + 12 > buffer.byteLength) break;
+                const x = view.getFloat32(b,     true);
+                const y = view.getFloat32(b + 4, true);
+                const z = view.getFloat32(b + 8, true);
+                if (!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+                positions[idx * 3]     = x;
+                positions[idx * 3 + 1] = y;
+                positions[idx * 3 + 2] = z;
+                tempZ[idx] = z;
+                if (z < minZ) minZ = z;
+                if (z > maxZ) maxZ = z;
+                idx++;
+            }
+
+            const range = (maxZ - minZ) || 1;
+            for (let i = 0; i < idx; i++) {
+                const t = (tempZ[i] - minZ) / range;
+                const [r, g, b] = this._rainbowColor(t);
+                colors[i * 3]     = r;
+                colors[i * 3 + 1] = g;
+                colors[i * 3 + 2] = b;
+            }
+            return {
+                positions: positions.subarray(0, idx * 3),
+                colors:    colors.subarray(0, idx * 3)
+            };
+        } catch (e) {
+            console.error('[LocalizationLiveViewer] binary PC2 parse error:', e);
+            return null;
+        }
+    }
+
+    _subscribePath(topic) {
+        const t = new ROSLIB.Topic({
+            ros: this._ros,
+            name: topic,
+            messageType: 'nav_msgs/msg/Path',
+            throttle_rate: 200,
+            queue_length: 1
+        });
+        t.subscribe((msg) => {
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+            if (this._pathObj) {
+                this._scene.remove(this._pathObj);
+                if (this._pathObj.geometry) this._pathObj.geometry.dispose();
+                if (this._pathObj.material) this._pathObj.material.dispose();
+                this._pathObj = null;
+            }
+            const poses = msg.poses || [];
+            if (poses.length < 2) return;
+            // TubeGeometry로 굵은 선 렌더링 (WebGL linewidth 제한 우회)
+            const points3d = poses.map(p => new THREE.Vector3(
+                p.pose.position.x, p.pose.position.y, p.pose.position.z
+            ));
+            const curve = new THREE.CatmullRomCurve3(points3d);
+            const segments = Math.min(poses.length * 2, 400);
+            const geo = new THREE.TubeGeometry(curve, segments, 0.08, 5, false);
+            const mat = new THREE.MeshBasicMaterial({ color: 0x00ff44, side: THREE.DoubleSide });
+            this._pathObj = new THREE.Mesh(geo, mat);
+            this._pathObj.visible = this._layers.path;
+            this._scene.add(this._pathObj);
+        });
+        this._subscriptions.push(t);
+    }
+
+    _subscribeTF(topic) {
+        const t = new ROSLIB.Topic({
+            ros: this._ros,
+            name: topic,
+            messageType: 'tf2_msgs/msg/TFMessage',
+            throttle_rate: 200,
+            queue_length: 1
+        });
+        t.subscribe((msg) => {
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+            for (const transform of (msg.transforms || [])) {
+                const childId = transform.child_frame_id;
+                const parentId = transform.header.frame_id;
+                const trans = transform.transform.translation;
+                const rot = transform.transform.rotation;
+
+                this._knownFrames.add(childId);
+                this._knownFrames.add(parentId);
+
+                if (!this._tfObjects[childId]) {
+                    const group = new THREE.Group();
+                    group.add(new THREE.AxesHelper(0.5));
+                    this._tfObjects[childId] = { group };
+                    group.visible = this._layers.tf;
+                    this._scene.add(group);
+                }
+
+                const entry = this._tfObjects[childId];
+                entry.group.position.set(trans.x, trans.y, trans.z);
+                entry.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+            }
+        });
+        this._subscriptions.push(t);
+    }
+
+    _subscribeMap(topic) {
+        const t = new ROSLIB.Topic({
+            ros: this._ros,
+            name: topic,
+            messageType: 'nav_msgs/msg/OccupancyGrid',
+            throttle_rate: 1000,
+            queue_length: 1
+        });
+        t.subscribe((msg) => {
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+            const { resolution, width, height, origin } = msg.info;
+            let raw;
+            try {
+                if (Array.isArray(msg.data)) {
+                    raw = new Int8Array(msg.data);
+                } else if (typeof msg.data === 'string') {
+                    raw = new Int8Array(Uint8Array.from(atob(msg.data), c => c.charCodeAt(0)).buffer);
+                } else {
+                    console.error('[LocalizationLiveViewer] Unknown OccupancyGrid data type:', typeof msg.data);
+                    return;
+                }
+            } catch (e) {
+                console.error('[LocalizationLiveViewer] OccupancyGrid decode error:', e);
+                return;
+            }
+
+            const cvs = document.createElement('canvas');
+            cvs.width = width;
+            cvs.height = height;
+            const ctx = cvs.getContext('2d');
+            const img = ctx.createImageData(width, height);
+            for (let i = 0; i < raw.length; i++) {
+                const v = raw[i];
+                let r, g, b, a = 255;
+                if (v < 0)       { r = 100; g = 100; b = 100; a = 160; }  // unknown: gray
+                else if (v > 50) { r = 10;  g = 10;  b = 10;  }           // occupied: near-black
+                else             { r = 255; g = 255; b = 255; a = 220; }  // free: bright white
+                img.data[i * 4]     = r;
+                img.data[i * 4 + 1] = g;
+                img.data[i * 4 + 2] = b;
+                img.data[i * 4 + 3] = a;
+            }
+            ctx.putImageData(img, 0, 0);
+
+            if (this._mapMesh) {
+                this._scene.remove(this._mapMesh);
+                if (this._mapMesh.geometry) this._mapMesh.geometry.dispose();
+                if (this._mapMesh.material) this._mapMesh.material.dispose();
+                this._mapMesh = null;
+            }
+            if (this._mapTexture) {
+                this._mapTexture.dispose();
+                this._mapTexture = null;
+            }
+
+            this._mapTexture = new THREE.CanvasTexture(cvs);
+            this._mapTexture.magFilter = THREE.NearestFilter;
+            this._mapTexture.minFilter = THREE.NearestFilter;
+            this._mapTexture.flipY = false;
+            const geo = new THREE.PlaneGeometry(width * resolution, height * resolution);
+            const mat = new THREE.MeshBasicMaterial({
+                map: this._mapTexture,
+                transparent: true,
+                opacity: 0.7,
+                depthWrite: false
+            });
+            this._mapMesh = new THREE.Mesh(geo, mat);
+            this._mapMesh.position.set(
+                origin.position.x + width * resolution / 2,
+                origin.position.y + height * resolution / 2,
+                0
+            );
+            this._mapMesh.visible = this._layers.map;
+            this._scene.add(this._mapMesh);
+        });
+        this._subscriptions.push(t);
+    }
+
+    toggleLayer(key) {
+        this._layers[key] = !this._layers[key];
+        const visible = this._layers[key];
+        if (key === 'cloud_registered' && this._cloudObj) {
+            this._cloudObj.visible = visible;
+        } else if (key === 'laser_map' && this._mapObj) {
+            this._mapObj.visible = visible;
+        } else if (key === 'path' && this._pathObj) {
+            this._pathObj.visible = visible;
+        } else if (key === 'tf') {
+            for (const entry of Object.values(this._tfObjects)) {
+                if (entry && entry.group) entry.group.visible = visible;
+            }
+        } else if (key === 'map' && this._mapMesh) {
+            this._mapMesh.visible = visible;
+        }
+    }
+
+    resetView() {
+        if (!this._camera || !this._controls) return;
+        this._camera.position.set(0, -30, 20);
+        this._camera.up.set(0, 0, 1);
+        this._controls.target.set(0, 0, 0);
+        this._restoreOrbitControls();
+        this._controls.update();
+        const toggle = document.getElementById('loc-viewer-topview-toggle');
+        if (toggle && toggle.checked) {
+            toggle.checked = false;
+            this._topView = false;
+            this._savedCameraPos = null;
+        }
+    }
+
+    _restoreOrbitControls() {
+        if (!this._controls) return;
+        this._controls.enableDamping = true;
+        this._controls.enableRotate = true;
+        this._controls.minPolarAngle = 0;
+        this._controls.maxPolarAngle = Math.PI;
+        if (window.THREE) {
+            this._controls.mouseButtons = {
+                LEFT: window.THREE.MOUSE.ROTATE,
+                MIDDLE: window.THREE.MOUSE.DOLLY,
+                RIGHT: window.THREE.MOUSE.PAN
+            };
+        }
+    }
+
+    toggleTopView(enable) {
+        this._topView = enable;
+        if (!this._perspCamera || !this._controls) return;
+        const THREE = window.THREE;
+
+        if (enable) {
+            // PerspectiveCamera 현재 상태 저장
+            this._savedCameraPos = this._perspCamera.position.clone();
+            this._savedCameraUp  = this._perspCamera.up.clone();
+            this._savedTarget    = this._controls.target.clone();
+
+            const cx     = this._controls.target.x || 0;
+            const cy     = this._controls.target.y || 0;
+            const dist   = this._perspCamera.position.distanceTo(this._controls.target) || 100;
+            const halfH  = Math.max(dist * 0.6, 30);
+
+            const container = document.getElementById('loc-viewer-canvas-container');
+            const cw = container ? container.clientWidth  : 600;
+            const ch = container ? container.clientHeight : 480;
+            const aspect = cw / ch;
+
+            // OrthographicCamera: 완전 수직 XY 평면 탑뷰 (투시 왜곡 없음)
+            if (!this._orthoCamera) {
+                this._orthoCamera = new THREE.OrthographicCamera(
+                    -halfH * aspect, halfH * aspect,
+                    halfH, -halfH,
+                    -10000, 10000
+                );
+            } else {
+                this._orthoCamera.left   = -halfH * aspect;
+                this._orthoCamera.right  =  halfH * aspect;
+                this._orthoCamera.top    =  halfH;
+                this._orthoCamera.bottom = -halfH;
+            }
+            // 카메라를 씬 정중앙 바로 위에 배치, Y-up으로 짐벌락 방지
+            this._orthoCamera.position.set(cx, cy, 1000);
+            this._orthoCamera.up.set(0, 1, 0);
+            this._orthoCamera.lookAt(cx, cy, 0);
+            this._orthoCamera.updateProjectionMatrix();
+
+            // OrbitControls를 OrthographicCamera로 전환 (회전 불가, 팬/줌만 허용)
+            this._controls.object = this._orthoCamera;
+            this._controls.target.set(cx, cy, 0);
+            this._controls.enableRotate = false;
+            this._controls.enablePan    = true;
+            this._controls.enableZoom   = true;
+            this._controls.enableDamping = true;
+            this._controls.update();
+
+            this._camera = this._orthoCamera;
+            // 전환 즉시 포인트 크기 보정 (렌더 루프 첫 프레임 전에 적용)
+            this._updateOrthoPointSizes();
+        } else {
+            // PerspectiveCamera 복원
+            this._camera = this._perspCamera;
+            this._controls.object = this._perspCamera;
+            this._restoreOrbitControls();
+
+            // Perspective 복원 시 포인트 크기를 원래 월드 단위 크기로 되돌림
+            const restoreSize = (obj) => {
+                if (obj && obj.material && obj.material._baseSize !== undefined) {
+                    obj.material.size = obj.material._baseSize;
+                }
+            };
+            restoreSize(this._cloudObj);
+            restoreSize(this._mapObj);
+
+            if (this._savedCameraPos) {
+                this._perspCamera.position.copy(this._savedCameraPos);
+                this._perspCamera.up.copy(this._savedCameraUp);
+                this._controls.target.copy(this._savedTarget);
+                this._savedCameraPos = null;
+            } else {
+                this._perspCamera.position.set(0, -30, 20);
+                this._perspCamera.up.set(0, 0, 1);
+                this._controls.target.set(0, 0, 0);
+            }
+            this._controls.update();
+        }
+    }
+
+    toggleFullscreen() {
+        const container = document.getElementById('loc-viewer-canvas-container');
+        if (!container) return;
+        const isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+        if (isFullscreen) {
+            (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        } else {
+            (container.requestFullscreen || container.webkitRequestFullscreen).call(container);
+        }
+    }
+
+    _updateFixedFrameDropdown() {
+        const dropdown = document.getElementById('loc-fixed-frame-dropdown');
+        if (!dropdown || dropdown.style.display === 'none') return;
+        const input = document.getElementById('loc-fixed-frame-input');
+        const filter = input ? input.value.toLowerCase() : '';
+        dropdown.innerHTML = '';
+        for (const frame of this._knownFrames) {
+            if (filter && !frame.toLowerCase().includes(filter)) continue;
+            const item = document.createElement('div');
+            item.className = 'fixed-frame-dropdown-item';
+            item.textContent = frame;
+            item.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                this._fixedFrame = frame;
+                if (input) input.value = frame;
+                dropdown.style.display = 'none';
+            });
+            dropdown.appendChild(item);
+        }
+    }
+
+    onFixedFrameFocus() {
+        const dropdown = document.getElementById('loc-fixed-frame-dropdown');
+        if (dropdown) {
+            dropdown.style.display = 'block';
+            this._updateFixedFrameDropdown();
+        }
+    }
+
+    onFixedFrameInput(value) {
+        this._fixedFrame = value;
+        this._updateFixedFrameDropdown();
+    }
+
+    onFixedFrameBlur(event) {
+        setTimeout(() => {
+            const dropdown = document.getElementById('loc-fixed-frame-dropdown');
+            if (dropdown) dropdown.style.display = 'none';
+        }, 150);
+    }
+
+    toggleFixedFrameDropdown() {
+        const dropdown = document.getElementById('loc-fixed-frame-dropdown');
+        if (!dropdown) return;
+        const isVisible = dropdown.style.display !== 'none';
+        dropdown.style.display = isVisible ? 'none' : 'block';
+        if (!isVisible) this._updateFixedFrameDropdown();
+    }
+}
+
+// ==============================================================
 // SLAM Result Viewer
 // ==============================================================
-
 class SlamResultViewer {
     constructor() {
         this._scene = null;
@@ -5423,9 +6285,9 @@ class SlamResultViewer {
     }
 
     _applyTopView() {
-        const THREE = window.THREE;
-        let height = 100;
+        let dist = 200;
         if (this._allObjects.length > 0) {
+            const THREE = window.THREE;
             const box = new THREE.Box3();
             for (const obj of this._allObjects) {
                 box.expandByObject(obj);
@@ -5433,19 +6295,16 @@ class SlamResultViewer {
             if (!box.isEmpty()) {
                 const size = new THREE.Vector3();
                 box.getSize(size);
-                height = Math.max(size.x, size.y, 30) * 0.8;
+                dist = Math.max(size.x, size.y, size.z) * 1.2;
             }
         }
-        // Z-up 유지, polar을 거의 0으로 고정해 XY 평면 정면을 바라보도록 함
-        // 정확히 (0,0,height)는 up 벡터와 평행해 Gimbal lock 발생 → 미세 offset 적용
-        this._camera.up.set(0, 0, 1);
-        this._camera.position.set(0.001 * height, 0, height);
+        this._camera.position.set(0, 0, dist);
+        this._camera.up.set(0, 1, 0);
         this._controls.target.set(0, 0, 0);
-        this._controls.enableRotate = true;
         this._controls.minPolarAngle = 0;
-        this._controls.maxPolarAngle = 0.02;
+        this._controls.maxPolarAngle = 0.01;
         this._controls.mouseButtons = {
-            LEFT: window.THREE.MOUSE.ROTATE,
+            LEFT: window.THREE.MOUSE.PAN,
             MIDDLE: window.THREE.MOUSE.DOLLY,
             RIGHT: window.THREE.MOUSE.PAN
         };
@@ -5574,7 +6433,7 @@ class SlamResultViewer {
     }
 
     _resizeRenderer() {
-        if (!this._renderer || !this._camera) return;
+        if (!this._renderer) return;
         const container = document.getElementById('slam-result-canvas-container');
         if (!container) return;
         const w = container.clientWidth;
@@ -5615,9 +6474,9 @@ class SlamResultViewer {
         if (toggle && toggle.checked) {
             toggle.checked = false;
             this._topView = false;
-            this._savedCameraPos = null;
             this._restoreOrbitControls();
         }
+        this._savedCameraPos = null;
         this._fitCamera();
     }
 
@@ -5625,8 +6484,8 @@ class SlamResultViewer {
         this._topView = enabled;
         if (enabled) {
             this._savedCameraPos = this._camera.position.clone();
-            this._savedCameraUp = this._camera.up.clone();
-            this._savedTarget = this._controls.target.clone();
+            this._savedCameraUp  = this._camera.up.clone();
+            this._savedTarget    = this._controls.target.clone();
             this._applyTopView();
         } else {
             this._restoreOrbitControls();
@@ -5637,6 +6496,7 @@ class SlamResultViewer {
                 this._savedCameraPos = null;
             } else {
                 this._fitCamera();
+                return;
             }
             this._controls.update();
         }
@@ -5853,6 +6713,20 @@ function takeSlamSnapshot() {
     slamResultViewer.takeSnapshot(2);
 }
 
+// ==============================================================
+// LocalizationLiveViewer 전역 인스턴스 및 래퍼 함수
+// ==============================================================
+const locLiveViewer = new LocalizationLiveViewer();
+
+function resetLocViewer()              { locLiveViewer.resetView(); }
+function toggleLocTopView(checked)     { locLiveViewer.toggleTopView(checked); }
+function toggleLocLayer(key)           { locLiveViewer.toggleLayer(key); }
+function toggleLocViewerFullscreen()   { locLiveViewer.toggleFullscreen(); }
+function onLocFixedFrameFocus()        { locLiveViewer.onFixedFrameFocus(); }
+function onLocFixedFrameInput(value)   { locLiveViewer.onFixedFrameInput(value); }
+function onLocFixedFrameBlur(event)    { locLiveViewer.onFixedFrameBlur(event); }
+function toggleLocFixedFrameDropdown() { locLiveViewer.toggleFixedFrameDropdown(); }
+
 function toggleSlamFullscreen() {
     const container = document.getElementById('slam-result-canvas-container');
     if (!container) return;
@@ -5896,6 +6770,7 @@ document.addEventListener('fullscreenchange', () => {
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
     if (slamResultViewer) slamResultViewer._resizeRenderer();
+    if (locLiveViewer) locLiveViewer._resizeRenderer();
     if (typeof onWindowResize === 'function') onWindowResize();
 });
 
@@ -5906,6 +6781,7 @@ document.addEventListener('webkitfullscreenchange', () => {
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
     if (slamResultViewer) slamResultViewer._resizeRenderer();
+    if (locLiveViewer) locLiveViewer._resizeRenderer();
     if (typeof onWindowResize === 'function') onWindowResize();
 });
 

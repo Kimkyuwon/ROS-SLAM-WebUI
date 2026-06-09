@@ -1255,6 +1255,11 @@ class PC2WebSocketServer:
         self._pc2_sending: dict = {}    # topic_name → bool
         self._img_sending: dict = {}    # topic_name → bool
         self._livox_sending: dict = {}  # topic_name → bool
+        # ── Latched (TRANSIENT_LOCAL) 토픽 전용 ─────────────────────────────────
+        self._latched_subs: dict = {}        # topic → rclpy Subscription
+        self._latched_clients: dict = {}     # topic → set[websocket]
+        self._latched_cache: dict = {}       # topic → bytes  (마지막 binary payload)
+        self._latched_meta_cache: dict = {}  # topic → str    (마지막 JSON meta)
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -1290,9 +1295,10 @@ class PC2WebSocketServer:
 
     async def _handler(self, websocket):
         """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot/subscribe_image 명령 수신."""
-        my_pc2_topics: set   = set()   # PointCloud2 binary 구독
-        my_plot_topics: set  = set()   # 범용 plot JSON 구독
-        my_img_topics: set   = set()   # Image JPEG binary 구독
+        my_pc2_topics: set      = set()   # PointCloud2 binary 구독
+        my_plot_topics: set     = set()   # 범용 plot JSON 구독
+        my_img_topics: set      = set()   # Image JPEG binary 구독
+        my_latched_topics: set  = set()   # TRANSIENT_LOCAL PointCloud2 구독
         # 전체 클라이언트 집합에 등록 (broadcast용)
         with self._lock:
             self._all_clients.add(websocket)
@@ -1334,6 +1340,13 @@ class PC2WebSocketServer:
                 elif cmd == 'unsubscribe_image':
                     self._remove_image_client(topic, websocket)
                     my_img_topics.discard(topic)
+                elif cmd == 'subscribe_latched':
+                    # TRANSIENT_LOCAL QoS 구독 (latched 토픽용)
+                    self._add_latched_client(topic, websocket)
+                    my_latched_topics.add(topic)
+                elif cmd == 'unsubscribe_latched':
+                    self._remove_latched_client(topic, websocket)
+                    my_latched_topics.discard(topic)
         except Exception:
             pass
         finally:
@@ -1345,6 +1358,8 @@ class PC2WebSocketServer:
                 self._remove_plot_client(t, websocket, None)
             for t in list(my_img_topics):
                 self._remove_image_client(t, websocket)
+            for t in list(my_latched_topics):
+                self._remove_latched_client(t, websocket)
 
     # ── 클라이언트 / 구독 관리 ────────────────────────────────────────────────
 
@@ -1433,6 +1448,98 @@ class PC2WebSocketServer:
                 self._subs[topic] = sub
                 self._last_sent[topic] = 0.0
                 self._node.get_logger().info(f'[PC2WS] pre-subscribed (DDS warmup) → {topic}')
+
+    # ── TRANSIENT_LOCAL (latched) 토픽 ─────────────────────────────────────────
+
+    def _add_latched_client(self, topic: str, ws):
+        """TRANSIENT_LOCAL + RELIABLE QoS로 구독 생성 후 캐시된 마지막 메시지를 즉시 재전송.
+
+        /Laser_map 같은 latched 토픽은 publisher가 한 번 발행 후 업데이트가 드물 수 있다.
+        TRANSIENT_LOCAL QoS로 구독해야 늦게 연결한 subscriber도 마지막 메시지를 수신한다.
+        """
+        cached_bin  = None
+        cached_meta = None
+        with self._lock:
+            if topic not in self._latched_clients:
+                self._latched_clients[topic] = set()
+            self._latched_clients[topic].add(ws)
+            if topic not in self._latched_subs:
+                qos = QoSProfile(
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                )
+                sub = self._node.create_subscription(
+                    PointCloud2, topic,
+                    lambda m, t=topic: self._on_pc2_latched(m, t),
+                    qos,
+                )
+                self._latched_subs[topic] = sub
+                self._node.get_logger().info(
+                    f'[PC2WS] subscribed (TRANSIENT_LOCAL) → {topic}')
+            cached_bin  = self._latched_cache.get(topic)
+            cached_meta = self._latched_meta_cache.get(topic)
+
+        # 이미 캐시된 메시지가 있으면 이 클라이언트에게 즉시 재전송
+        if cached_bin and cached_meta:
+            loop = self._loop
+            if loop and loop.is_running():
+                async def _replay(b=cached_bin, m=cached_meta, w=ws):
+                    try:
+                        await w.send(m)
+                        await w.send(b)
+                    except Exception:
+                        pass
+                asyncio.run_coroutine_threadsafe(_replay(), loop)
+
+    def _remove_latched_client(self, topic: str, ws):
+        with self._lock:
+            s = self._latched_clients.get(topic)
+            if s:
+                s.discard(ws)
+
+    def _on_pc2_latched(self, msg: PointCloud2, topic_name: str):
+        """TRANSIENT_LOCAL 토픽 콜백 — 페이로드 빌드 후 캐시 저장 + 브로드캐스트."""
+        with self._lock:
+            clients = self._latched_clients.get(topic_name, set()).copy()
+        if not clients:
+            return
+        stamp = msg.header.stamp
+        meta_json = json.dumps({
+            'type':          'pc2meta',
+            'topic':         topic_name,
+            'stamp_sec':     stamp.sec,
+            'stamp_nanosec': stamp.nanosec,
+            'frame_id':      msg.header.frame_id,
+            'point_count':   msg.width * msg.height,
+        }, separators=(',', ':'))
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._build_and_broadcast_latched(msg, topic_name, clients, meta_json), loop)
+
+    async def _build_and_broadcast_latched(
+            self, msg: 'PointCloud2', topic_name: str, clients: set, meta_json: str):
+        """_build_payload를 executor에서 실행, 결과를 캐시 저장 후 클라이언트에 전송."""
+        try:
+            loop = asyncio.get_running_loop()
+            payload = await loop.run_in_executor(None, self._build_payload, msg, topic_name)
+            if not payload:
+                return
+            # 캐시 갱신 (새 클라이언트 재전송용)
+            with self._lock:
+                self._latched_cache[topic_name]      = payload
+                self._latched_meta_cache[topic_name] = meta_json
+            for ws in list(clients):
+                try:
+                    await ws.send(meta_json)
+                    await ws.send(payload)
+                except Exception:
+                    pass
+        except Exception as e:
+            self._node.get_logger().error(
+                f'[PC2WS] latched broadcast error ({topic_name}): {e}')
 
     def _presubscribe_image(self, topic: str):
         """Image 토픽을 미리 구독해 DDS 발견을 워밍업한다.

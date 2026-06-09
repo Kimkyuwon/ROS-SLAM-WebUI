@@ -113,6 +113,97 @@
                     </div>
 
                 </div>
+
+                <!-- Localization Live Viewer -->
+                <div id="localization-live-viewer" style="display:none;">
+                    <div class="slam-viewer-header">
+                        <label class="slam-viewer-toggle">
+                            <input type="checkbox" id="loc-viewer-topview-toggle"
+                                   onchange="toggleLocTopView(this.checked)" />
+                            <span>Top View</span>
+                        </label>
+                        <button onclick="resetLocViewer()" class="small-button">Reset View</button>
+                    </div>
+                    <div class="loc-live-viewer-layout">
+                        <!-- 왼쪽: Display 패널 -->
+                        <div id="loc-display-panel" class="viewer-display-panel">
+                            <div class="viewer-display-panel-header views-panel-header">
+                                <h3>Displays</h3>
+                            </div>
+                            <div id="loc-display-panel-body" class="viewer-display-panel-body">
+                                <!-- Fixed Frame -->
+                                <div class="fixed-frame-row">
+                                    <label class="fixed-frame-label">Fixed Frame:</label>
+                                    <div class="fixed-frame-combo" id="loc-fixed-frame-combo">
+                                        <input id="loc-fixed-frame-input" class="fixed-frame-input"
+                                               value="odom"
+                                               onfocus="onLocFixedFrameFocus()"
+                                               oninput="onLocFixedFrameInput(this.value)"
+                                               onblur="onLocFixedFrameBlur(event)" />
+                                        <button class="fixed-frame-dropdown-btn"
+                                                onclick="toggleLocFixedFrameDropdown()">▾</button>
+                                        <div id="loc-fixed-frame-dropdown"
+                                             class="fixed-frame-dropdown" style="display:none;"></div>
+                                    </div>
+                                </div>
+                                <!-- 토픽 체크박스 5종 -->
+                                <div class="loc-display-check-item">
+                                    <input type="checkbox" id="loc-chk-cloud" checked
+                                           onchange="toggleLocLayer('cloud_registered')" />
+                                    <span class="loc-color-dot" style="background:#44aaff;"></span>
+                                    <span>/cloud_registered</span>
+                                    <small>PointCloud2</small>
+                                </div>
+                                <div class="loc-display-check-item">
+                                    <input type="checkbox" id="loc-chk-lasermap" checked
+                                           onchange="toggleLocLayer('laser_map')" />
+                                    <span class="loc-color-dot" style="background:#88ff44;"></span>
+                                    <span>/Laser_map</span>
+                                    <small>PointCloud2</small>
+                                </div>
+                                <div class="loc-display-check-item">
+                                    <input type="checkbox" id="loc-chk-path" checked
+                                           onchange="toggleLocLayer('path')" />
+                                    <span class="loc-color-dot" style="background:#25ff00;"></span>
+                                    <span>/path</span>
+                                    <small>Path</small>
+                                </div>
+                                <div class="loc-display-check-item">
+                                    <input type="checkbox" id="loc-chk-tf" checked
+                                           onchange="toggleLocLayer('tf')" />
+                                    <span class="loc-color-dot" style="background:#ffcc00;"></span>
+                                    <span>/tf</span>
+                                    <small>TF</small>
+                                </div>
+                                <div class="loc-display-check-item">
+                                    <input type="checkbox" id="loc-chk-map" checked
+                                           onchange="toggleLocLayer('map')" />
+                                    <span class="loc-color-dot" style="background:#aaaaaa;"></span>
+                                    <span>/map</span>
+                                    <small>OccupancyGrid</small>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 오른쪽: Three.js 캔버스 -->
+                        <div class="loc-viewer-canvas-panel">
+                            <div id="loc-viewer-canvas-container">
+                                <canvas id="loc-viewer-canvas"></canvas>
+                                <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
+                                <div id="loc-viewer-actions">
+                                    <button class="slam-action-btn" id="loc-fullscreen-btn"
+                                            onclick="toggleLocViewerFullscreen()" title="풀스크린">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="15 3 21 3 21 9"/>
+                                            <polyline points="9 21 3 21 3 15"/>
+                                            <line x1="21" y1="3" x2="14" y2="10"/>
+                                            <line x1="3" y1="21" x2="10" y2="14"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Multi-Session SLAM Sub-Tab -->

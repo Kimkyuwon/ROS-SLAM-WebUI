@@ -2796,3 +2796,85 @@ h3 {
     height: 100vh;
     width: 100vw;
 }
+
+/* ======================================
+   Localization Live Viewer
+   ====================================== */
+.loc-live-viewer-layout {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 12px;
+    height: 520px;
+}
+
+.loc-viewer-canvas-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+#loc-viewer-canvas-container {
+    background: #0a0a18;
+    border-radius: 8px;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+#loc-viewer-canvas {
+    display: block;
+    height: 100%;
+    width: 100%;
+}
+
+#loc-viewer-loading {
+    align-items: center;
+    color: #666;
+    display: flex;
+    inset: 0;
+    justify-content: center;
+    pointer-events: none;
+    position: absolute;
+}
+
+#loc-viewer-actions {
+    bottom: 8px;
+    display: flex;
+    gap: 6px;
+    position: absolute;
+    right: 8px;
+}
+
+#loc-viewer-canvas-container:fullscreen {
+    background: #0a0a18;
+    height: 100%;
+    width: 100%;
+}
+
+#loc-viewer-canvas-container:-webkit-full-screen {
+    background: #0a0a18;
+    height: 100%;
+    width: 100%;
+}
+
+.loc-display-check-item {
+    align-items: center;
+    color: #ccc;
+    display: flex;
+    font-size: 12px;
+    gap: 6px;
+    padding: 4px 2px;
+}
+
+.loc-display-check-item small {
+    color: var(--muted);
+    font-size: 10px;
+    margin-left: auto;
+}
+
+.loc-color-dot {
+    border-radius: 50%;
+    flex-shrink: 0;
+    height: 10px;
+    width: 10px;
+}
