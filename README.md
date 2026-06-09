@@ -202,7 +202,7 @@ Open the URL in your web browser. For network access from another device (e.g. t
 4. **Optimization Result Viewer** *(auto-shown on completion)*
    - Inline Three.js 3D viewer shows Map1 / Map2 point clouds and pose trajectory nodes
    - **Layer legend**: click any legend item to toggle that layer's visibility on/off
-   - **Check Difference**: toggle to load and display difference PCD layers — Positive Differences (PD, orange), Negative Differences (ND, purple), First Unique Elements (FirstUE, hot-pink), Second Unique Elements (SecondUE, lime)
+   - **Check Difference**: toggle to load and display difference PCD layers — Positive Differences (PD, orange), Negative Differences (ND, purple), First Unexplored area (FirstUE, hot-pink), Second Unexplored area (SecondUE, lime)
    - **Loop Closure**: thick edge lines drawn between non-adjacent pose nodes
    - **Top View** toggle, **Point Size** slider, **Reset View** button
    - **Snapshot** (📷): exports current 3D view as a high-resolution PNG (2× render scale)
