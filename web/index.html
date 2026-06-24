@@ -72,6 +72,47 @@
                         </div>
                     </div>
 
+                    <!-- Save Map Result Viewer -->
+                    <div id="savemap-result-viewer" style="display:none;">
+                        <div class="slam-viewer-header">
+                            <button onclick="resetSaveMapResultView()" class="small-button">Reset View</button>
+                            <label class="slam-viewer-toggle">
+                                <input type="checkbox" id="savemap-viewer-topview-toggle" onchange="toggleSaveMapTopView(this.checked)" />
+                                <span>Top View</span>
+                            </label>
+                        </div>
+                        <div id="savemap-result-canvas-container">
+                            <canvas id="savemap-result-canvas"></canvas>
+                            <div id="savemap-result-loading">Loading...</div>
+                            <div id="savemap-pcd-legend">
+                                <div class="slam-legend-row" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
+                                <div class="slam-legend-row" data-layer="static" data-active="true" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
+                            </div>
+                            <div id="savemap-result-legend">
+                                <div class="slam-legend-row" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="background:#ff8800;"></span><span>LIO</span></div>
+                                <div class="slam-legend-row" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="background:#ffffff;"></span><span>PGO</span></div>
+                                <div class="slam-legend-separator"></div>
+                                <div class="slam-legend-row" data-layer="loopclosure" data-active="true" onclick="toggleSaveMapLayer('loopclosure')"><span class="slam-legend-line" style="background:#2288ff;"></span><span>Loop Closure</span></div>
+                            </div>
+                            <div id="savemap-point-size-overlay">
+                                <span class="slam-ps-label-text">Pt Size</span>
+                                <input type="range" id="savemap-point-size-slider"
+                                    min="0.01" max="0.5" step="0.01" value="0.05"
+                                    oninput="setSaveMapPointSize(parseFloat(this.value))" />
+                                <span id="savemap-point-size-label">0.05 m</span>
+                            </div>
+                            <div id="savemap-viewer-actions">
+                                <button class="slam-action-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                                </button>
+                                <button class="slam-action-btn" id="savemap-fullscreen-btn" onclick="toggleSaveMapResultFullscreen()" title="풀스크린">
+                                    <svg id="savemap-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                                    <svg id="savemap-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="separator"></div>
 
                     <div class="status">

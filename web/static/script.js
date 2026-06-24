@@ -588,6 +588,8 @@ async function updateSlamState() {
         if (lidarSlamStatus) {
             const lidarSlamTab = document.getElementById('lidar-slam-subtab');
             if (lidarSlamTab && lidarSlamTab.classList.contains('active')) {
+                // 페이지 재진입 시 Save Map 결과가 이미 완료된 상태면 뷰어 복원
+                _maybeRestoreSaveMapViewer();
                 // Determine status based on SLAM state
                 let statusText = 'Ready';
                 if (state.is_running !== undefined) {
@@ -2741,6 +2743,10 @@ function toggleLocalizationConfig() {
 // SLAM Map Functions
 // ==============================================================
 async function saveSlamMap() {
+    // 새 Save Map 시작 시 이전 결과 뷰어 즉시 숨김
+    if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
+        saveMapResultViewer.hideAndReset();
+    }
     // Open save map modal
     domCache.get('save-map-modal').style.display = 'block';
     domCache.get('save-map-directory').value = '';
@@ -2752,6 +2758,7 @@ function closeSaveMapModal() {
 }
 
 let _saveMapPollTimer = null;
+let _saveMapDirectory = null;
 
 async function confirmSaveMap() {
     const directoryName = domCache.get('save-map-directory').value.trim();
@@ -2762,6 +2769,13 @@ async function confirmSaveMap() {
     }
 
     closeSaveMapModal();
+
+    // 새 Save Map 시작 시 이전 결과 뷰어 초기화 + 디렉토리명 보관
+    _saveMapDirectory = directoryName;
+    _saveMapRestoreChecked = false;
+    if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
+        saveMapResultViewer.hideAndReset();
+    }
 
     const result = await apiCall('/api/slam/save_map', { directory: directoryName });
 
@@ -2841,6 +2855,41 @@ function _startSaveMapPolling() {
     _saveMapPollTimer = setInterval(_pollSaveMapStatus, 2000);
 }
 
+// 저장 성공 메시지("Map saved successfully to directory: {name}")에서 디렉토리명 추출
+function _parseSaveMapDirectory(message) {
+    if (!message) return null;
+    const marker = 'directory:';
+    const idx = message.indexOf(marker);
+    if (idx === -1) return null;
+    const name = message.slice(idx + marker.length).trim();
+    return name || null;
+}
+
+let _saveMapRestoreChecked = false;
+
+// 페이지/탭 재진입 시 직전 Save Map 결과가 완료(done+success)면 결과 뷰어 자동 복원
+async function _maybeRestoreSaveMapViewer() {
+    if (_saveMapRestoreChecked) return;
+    if (_saveMapPollTimer) return;  // 진행 중이면 폴링이 처리
+    if (typeof saveMapResultViewer === 'undefined' || !saveMapResultViewer) return;
+
+    const viewerEl = document.getElementById('savemap-result-viewer');
+    if (!viewerEl || viewerEl.style.display !== 'none') return;
+
+    _saveMapRestoreChecked = true;
+    try {
+        const status = await apiCall('/api/slam/save_map_status');
+        if (status && status.done && status.success) {
+            const directory = _saveMapDirectory || _parseSaveMapDirectory(status.message);
+            if (directory) {
+                saveMapResultViewer.show({ directory: directory });
+            }
+        }
+    } catch (e) {
+        console.error('Failed to restore save map viewer:', e);
+    }
+}
+
 async function _pollSaveMapStatus() {
     try {
         const status = await apiCall('/api/slam/save_map_status');
@@ -2886,6 +2935,10 @@ async function cancelSaveMap() {
 // SLAM Start/Stop (terminal output removed)
 // ==============================================================
 async function startSlamMapping() {
+    // 새 SLAM 시작 시 이전 Save Map 결과 뷰어 숨김
+    if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
+        saveMapResultViewer.hideAndReset();
+    }
     // Immediately update status to Running
     updateLidarSlamStatus('Running');
     
@@ -2901,6 +2954,10 @@ async function startSlamMapping() {
 }
 
 async function stopSlamMapping() {
+    // SLAM 중지 시 이전 Save Map 결과 뷰어 숨김
+    if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
+        saveMapResultViewer.hideAndReset();
+    }
     // Immediately update status to Stopping
     updateLidarSlamStatus('Stopping...');
     
@@ -6076,9 +6133,19 @@ class LocalizationLiveViewer {
 // SLAM Result Viewer
 // ==============================================================
 class SlamResultViewer {
-    constructor() {
+    constructor(opts) {
+        opts = opts || {};
+        // 주입형 element-id 매핑 (인스턴스별로 다른 DOM 사용)
+        this._ids = opts.ids || {};
+        // 로드 사양 (pathsEndpoint, pcdLayers, trajLayers, edges, diff)
+        this._spec = opts.spec || {};
+        // show(context)로 전달되는 디렉토리 (Save Map 전용)
+        this._directory = null;
+
         this._scene = null;
         this._camera = null;
+        this._perspCamera = null;
+        this._orthoCamera = null;
         this._renderer = null;
         this._controls = null;
         this._animFrameId = null;
@@ -6099,6 +6166,18 @@ class SlamResultViewer {
         this._lcObjects = [];
     }
 
+    _legendRow(name) {
+        const root = this._ids.viewer ? document.getElementById(this._ids.viewer) : null;
+        if (!root) return null;
+        return root.querySelector(`.slam-legend-row[data-layer="${name}"]`);
+    }
+
+    _allLegendRows() {
+        const root = this._ids.viewer ? document.getElementById(this._ids.viewer) : null;
+        if (!root) return [];
+        return root.querySelectorAll('.slam-legend-row[data-layer]');
+    }
+
     _waitForThree() {
         return new Promise((resolve) => {
             const check = () => {
@@ -6116,10 +6195,10 @@ class SlamResultViewer {
         if (this._initialized) return;
         await this._waitForThree();
         const THREE = window.THREE;
-        const canvas = document.getElementById('slam-result-canvas');
+        const canvas = document.getElementById(this._ids.canvas);
         if (!canvas) return;
 
-        const container = document.getElementById('slam-result-canvas-container');
+        const container = document.getElementById(this._ids.container);
         const w = container.clientWidth || 600;
         const h = container.clientHeight || 380;
 
@@ -6133,6 +6212,7 @@ class SlamResultViewer {
         this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
         this._camera.position.set(0, -100, 80);
         this._camera.up.set(0, 0, 1);
+        this._perspCamera = this._camera;
 
         this._controls = new window.OrbitControls(this._camera, this._renderer.domElement);
         this._controls.enableDamping = true;
@@ -6147,11 +6227,42 @@ class SlamResultViewer {
         const animate = () => {
             this._animFrameId = requestAnimationFrame(animate);
             if (this._controls) this._controls.update();
+            // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신
+            if (this._topView && this._orthoCamera) {
+                this._updateOrthoPointSizes();
+            }
             if (this._renderer && this._scene && this._camera) {
                 this._renderer.render(this._scene, this._camera);
             }
         };
         animate();
+    }
+
+    /**
+     * OrthographicCamera에서 1 월드단위 = 몇 픽셀인지 계산.
+     * OrthographicCamera는 sizeAttenuation 미적용 → material.size를 픽셀 단위로 직접 제어해야 함.
+     */
+    _getOrthoPixelsPerUnit() {
+        if (!this._orthoCamera || !this._renderer) return 40;
+        const frustumH = (this._orthoCamera.top - this._orthoCamera.bottom) / (this._orthoCamera.zoom || 1);
+        const pixelH = this._renderer.domElement.height || 380;
+        if (frustumH <= 0) return 40;
+        return pixelH / frustumH;
+    }
+
+    /**
+     * 탑뷰(OrthographicCamera) 시 모든 PCD material.size를 현재 zoom 기준 픽셀 크기로 갱신.
+     * baseSize(_baseSize, 월드 단위 = Pt Size 슬라이더 값)에 비례 → 줌에 따라 자연스럽게 확대/축소.
+     */
+    _updateOrthoPointSizes() {
+        const scale = this._getOrthoPixelsPerUnit();
+        const apply = (obj, fallback) => {
+            if (!obj || !obj.material) return;
+            const baseSize = (obj.material._baseSize !== undefined) ? obj.material._baseSize : fallback;
+            obj.material.size = Math.max(1, Math.min(baseSize * scale, 64));
+        };
+        for (const obj of this._pcdObjects) apply(obj, this._pcdPointSize);
+        for (const obj of this._diffObjects) apply(obj, this._pcdPointSize * 1.2);
     }
 
     _clearScene() {
@@ -6186,7 +6297,7 @@ class SlamResultViewer {
         if (window.Line2 && window.LineGeometry && window.LineMaterial) {
             const geo = new window.LineGeometry();
             geo.setPositions(positions);
-            const c = document.getElementById('slam-result-canvas-container');
+            const c = document.getElementById(this._ids.container);
             const mat = new window.LineMaterial({
                 color,
                 linewidth: 3,
@@ -6263,9 +6374,9 @@ class SlamResultViewer {
         });
     }
 
-    _fitCamera() {
-        if (!this._scene) return;
+    _computeBounds() {
         const THREE = window.THREE;
+        const center = new THREE.Vector3(0, 0, 0);
         let maxDim = 100;
         if (this._allObjects.length > 0) {
             const box = new THREE.Box3();
@@ -6275,46 +6386,77 @@ class SlamResultViewer {
             if (!box.isEmpty()) {
                 const size = new THREE.Vector3();
                 box.getSize(size);
-                maxDim = Math.max(size.x, size.y, size.z);
+                maxDim = Math.max(size.x, size.y, size.z) || maxDim;
+                box.getCenter(center);
             }
         }
-        this._camera.position.set(0, -maxDim * 0.8, maxDim * 0.4);
+        return { center, maxDim };
+    }
+
+    _fitCamera() {
+        if (!this._scene) return;
+        const { center, maxDim } = this._computeBounds();
+        // FOV 기반으로 맵이 화면에 가깝게 들어오도록 거리 계산 (factor < 1 → 더 가까이)
+        const fov = (this._camera.fov || 60) * Math.PI / 180;
+        const dist = ((maxDim / 2) / Math.tan(fov / 2)) * 0.6;
+        this._camera.position.set(center.x, center.y - dist * 0.85, center.z + dist * 0.5);
         this._camera.up.set(0, 0, 1);
-        this._controls.target.set(0, 0, 0);
+        this._controls.target.copy(center);
         this._controls.update();
     }
 
+    // OrthographicCamera 기반 탑뷰: 완전 수직 XY 평면 투영(투시 왜곡 없음)
     _applyTopView() {
-        let dist = 200;
-        if (this._allObjects.length > 0) {
-            const THREE = window.THREE;
-            const box = new THREE.Box3();
-            for (const obj of this._allObjects) {
-                box.expandByObject(obj);
-            }
-            if (!box.isEmpty()) {
-                const size = new THREE.Vector3();
-                box.getSize(size);
-                dist = Math.max(size.x, size.y, size.z) * 1.2;
-            }
+        const THREE = window.THREE;
+        const { center, maxDim } = this._computeBounds();
+        const halfH = Math.max((maxDim * 0.5) * 0.55, 5);
+
+        const container = document.getElementById(this._ids.container);
+        const cw = container ? (container.clientWidth || 600) : 600;
+        const ch = container ? (container.clientHeight || 380) : 380;
+        const aspect = cw / ch;
+
+        if (!this._orthoCamera) {
+            this._orthoCamera = new THREE.OrthographicCamera(
+                -halfH * aspect, halfH * aspect, halfH, -halfH, -10000, 10000
+            );
+        } else {
+            this._orthoCamera.left = -halfH * aspect;
+            this._orthoCamera.right = halfH * aspect;
+            this._orthoCamera.top = halfH;
+            this._orthoCamera.bottom = -halfH;
+            this._orthoCamera.zoom = 1;
         }
-        this._camera.position.set(0, 0, dist);
-        this._camera.up.set(0, 1, 0);
-        this._controls.target.set(0, 0, 0);
-        this._controls.minPolarAngle = 0;
-        this._controls.maxPolarAngle = 0.01;
-        this._controls.mouseButtons = {
-            LEFT: window.THREE.MOUSE.PAN,
-            MIDDLE: window.THREE.MOUSE.DOLLY,
-            RIGHT: window.THREE.MOUSE.PAN
-        };
+        // 씬 정중앙 바로 위에 배치, Y-up으로 짐벌락 방지 (loc 뷰어 방식)
+        this._orthoCamera.position.set(center.x, center.y, center.z + 1000);
+        this._orthoCamera.up.set(0, 1, 0);
+        this._orthoCamera.lookAt(center.x, center.y, center.z);
+        this._orthoCamera.updateProjectionMatrix();
+
+        // OrbitControls를 OrthographicCamera로 전환 (수직 탑뷰 → 회전 비활성, 팬/줌만)
+        this._controls.object = this._orthoCamera;
+        this._controls.target.set(center.x, center.y, center.z);
+        this._controls.enableRotate = false;
+        this._controls.enablePan = true;
+        this._controls.enableZoom = true;
+        this._controls.panSpeed = 1.5;
         this._controls.update();
+
+        this._camera = this._orthoCamera;
+        // PCD 머티리얼을 픽셀 단위 제어로 전환 후 즉시 보정
+        for (const obj of this._pcdObjects) {
+            if (obj.material) obj.material.sizeAttenuation = false;
+        }
+        for (const obj of this._diffObjects) {
+            if (obj.material) obj.material.sizeAttenuation = false;
+        }
+        this._updateOrthoPointSizes();
     }
 
     async load() {
         if (this._loaded || this._loading) return;
         this._loading = true;
-        const loadingEl = document.getElementById('slam-result-loading');
+        const loadingEl = document.getElementById(this._ids.loading);
         if (loadingEl) loadingEl.style.display = 'block';
         this._clearScene();
 
@@ -6329,47 +6471,62 @@ class SlamResultViewer {
         }
     }
 
+    _buildPathsEndpoint() {
+        const spec = this._spec;
+        let endpoint = spec.pathsEndpoint || '/api/slam/result_paths';
+        if (this._directory) {
+            endpoint += (endpoint.indexOf('?') >= 0 ? '&' : '?') + 'directory=' + encodeURIComponent(this._directory);
+        }
+        return endpoint;
+    }
+
     async _loadAndRender() {
         const THREE = window.THREE;
-        const paths = await apiCall('/api/slam/result_paths');
+        const spec = this._spec;
+        const paths = await apiCall(this._buildPathsEndpoint());
         if (!paths) throw new Error('Failed to fetch result paths');
 
-        const [poses1, poses2, posesOut] = await Promise.all([
-            this._fetchPoses(paths.map1_poses),
-            this._fetchPoses(paths.map2_poses),
-            this._fetchPoses(paths.output_poses),
-        ]);
-
-        const pcd1 = paths.map1_pcd ? await this._loadPCD(paths.map1_pcd) : null;
-        const pcd2 = paths.map2_pcd ? await this._loadPCD(paths.map2_pcd) : null;
-
-        if (pcd1) {
-            pcd1.material = new THREE.PointsMaterial({ color: 0x4488ff, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false });
-            this._addToScene(pcd1, 'map1');
-            this._pcdObjects.push(pcd1);
-        }
-        if (pcd2) {
-            pcd2.material = new THREE.PointsMaterial({ color: 0x44dd88, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false });
-            this._addToScene(pcd2, 'map2');
-            this._pcdObjects.push(pcd2);
+        // PCD 레이어 로드
+        for (const pl of (spec.pcdLayers || [])) {
+            const path = paths[pl.pathKey];
+            if (!path) continue;
+            const pcd = await this._loadPCD(path);
+            if (!pcd) continue;
+            pcd.material = new THREE.PointsMaterial({
+                color: pl.color, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false,
+            });
+            pcd.material._baseSize = this._pcdPointSize;
+            this._addToScene(pcd, pl.layer);
+            this._pcdObjects.push(pcd);
         }
 
-        const flat1 = this._posesToFlat(poses1);
-        const flat2 = this._posesToFlat(poses2);
-        const flatOut = this._posesToFlat(posesOut);
+        // 궤적 레이어 로드 (라인 또는 노드)
+        const posesByKey = {};
+        for (const tl of (spec.trajLayers || [])) {
+            const path = paths[tl.pathKey];
+            if (!path) continue;
+            const poses = await this._fetchPoses(path);
+            posesByKey[tl.pathKey] = poses;
+            const flat = this._posesToFlat(poses);
+            if (flat.length >= 3) {
+                const obj = tl.asNodes ? this._makeNodes(flat, tl.color) : this._makeLine(flat, tl.color);
+                this._addToScene(obj, tl.layer);
+            }
+        }
 
-        if (flat1.length >= 3) this._addToScene(this._makeNodes(flat1, 0xffee44), 'map1traj');
-        if (flat2.length >= 3) this._addToScene(this._makeNodes(flat2, 0xff9900), 'map2traj');
-        if (flatOut.length >= 3) this._addToScene(this._makeNodes(flatOut, 0x44ffff), 'outputtraj');
-
-        if (paths.output_edges && posesOut.length > 0) {
-            await this._loadLoopClosures(paths.output_edges, posesOut);
+        // 루프 클로저 (edges)
+        if (spec.edges) {
+            const edgesPath = paths[spec.edges.pathKey];
+            const poses = posesByKey[spec.edges.posesFromKey];
+            if (edgesPath && poses && poses.length > 0) {
+                await this._loadLoopClosures(edgesPath, poses, spec.edges.color);
+            }
         }
 
         this._fitCamera();
     }
 
-    async _loadLoopClosures(edgesPath, poses) {
+    async _loadLoopClosures(edgesPath, poses, color = 0xff2266) {
         try {
             const resp = await fetch('/api/slam/edges?path=' + encodeURIComponent(edgesPath));
             if (!resp.ok) {
@@ -6403,9 +6560,9 @@ class SlamResultViewer {
             if (window.LineSegments2 && window.LineSegmentsGeometry && window.LineMaterial) {
                 const lsGeo = new window.LineSegmentsGeometry();
                 lsGeo.setPositions(positions);
-                const container = document.getElementById('slam-result-canvas-container');
+                const container = document.getElementById(this._ids.container);
                 const lsMat = new window.LineMaterial({
-                    color: 0xff2266,
+                    color,
                     linewidth: 3,
                     transparent: true,
                     opacity: 0.85,
@@ -6421,7 +6578,7 @@ class SlamResultViewer {
                 geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
                 lcLines = new THREE.LineSegments(
                     geo,
-                    new THREE.LineBasicMaterial({ color: 0xff2266, transparent: true, opacity: 0.85, depthTest: false })
+                    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85, depthTest: false })
                 );
             }
             lcLines.renderOrder = 2;
@@ -6434,19 +6591,30 @@ class SlamResultViewer {
 
     _resizeRenderer() {
         if (!this._renderer) return;
-        const container = document.getElementById('slam-result-canvas-container');
+        const container = document.getElementById(this._ids.container);
         if (!container) return;
         const w = container.clientWidth;
         const h = container.clientHeight;
         if (w > 0 && h > 0) {
             this._renderer.setSize(w, h);
-            this._camera.aspect = w / h;
-            this._camera.updateProjectionMatrix();
+            const aspect = w / h;
+            if (this._topView && this._orthoCamera) {
+                const halfH = this._orthoCamera.top;
+                this._orthoCamera.left = -halfH * aspect;
+                this._orthoCamera.right = halfH * aspect;
+                this._orthoCamera.updateProjectionMatrix();
+            } else if (this._perspCamera) {
+                this._perspCamera.aspect = aspect;
+                this._perspCamera.updateProjectionMatrix();
+            }
         }
     }
 
-    async show() {
-        const viewerEl = document.getElementById('slam-result-viewer');
+    async show(context) {
+        if (context && context.directory) {
+            this._directory = context.directory;
+        }
+        const viewerEl = document.getElementById(this._ids.viewer);
         if (viewerEl) viewerEl.style.display = 'block';
         await this._init();
         this._resizeRenderer();
@@ -6454,12 +6622,29 @@ class SlamResultViewer {
     }
 
     hide() {
-        const viewerEl = document.getElementById('slam-result-viewer');
+        const viewerEl = document.getElementById(this._ids.viewer);
         if (viewerEl) viewerEl.style.display = 'none';
     }
 
     _restoreOrbitControls() {
+        // PerspectiveCamera로 복귀 + PCD 머티리얼 sizeAttenuation(월드 크기) 복원
+        if (this._perspCamera) {
+            this._camera = this._perspCamera;
+            this._controls.object = this._perspCamera;
+        }
+        const restoreMat = (obj, fallback) => {
+            if (!obj || !obj.material) return;
+            obj.material.sizeAttenuation = true;
+            obj.material.size = (obj.material._baseSize !== undefined) ? obj.material._baseSize : fallback;
+            obj.material.needsUpdate = true;
+        };
+        for (const obj of this._pcdObjects) restoreMat(obj, this._pcdPointSize);
+        for (const obj of this._diffObjects) restoreMat(obj, this._pcdPointSize * 1.2);
+
         this._controls.enableRotate = true;
+        this._controls.enablePan = true;
+        this._controls.enableZoom = true;
+        this._controls.panSpeed = 1.0;
         this._controls.minPolarAngle = 0;
         this._controls.maxPolarAngle = Math.PI;
         this._controls.mouseButtons = {
@@ -6470,7 +6655,7 @@ class SlamResultViewer {
     }
 
     resetView() {
-        const toggle = document.getElementById('slam-viewer-topview-toggle');
+        const toggle = document.getElementById(this._ids.topViewToggle);
         if (toggle && toggle.checked) {
             toggle.checked = false;
             this._topView = false;
@@ -6483,22 +6668,22 @@ class SlamResultViewer {
     toggleTopView(enabled) {
         this._topView = enabled;
         if (enabled) {
-            this._savedCameraPos = this._camera.position.clone();
-            this._savedCameraUp  = this._camera.up.clone();
+            // 전환 직전의 PerspectiveCamera 상태 저장
+            this._savedCameraPos = this._perspCamera.position.clone();
+            this._savedCameraUp  = this._perspCamera.up.clone();
             this._savedTarget    = this._controls.target.clone();
             this._applyTopView();
         } else {
             this._restoreOrbitControls();
             if (this._savedCameraPos) {
-                this._camera.position.copy(this._savedCameraPos);
-                this._camera.up.copy(this._savedCameraUp);
+                this._perspCamera.position.copy(this._savedCameraPos);
+                this._perspCamera.up.copy(this._savedCameraUp);
                 this._controls.target.copy(this._savedTarget);
                 this._savedCameraPos = null;
+                this._controls.update();
             } else {
                 this._fitCamera();
-                return;
             }
-            this._controls.update();
         }
     }
 
@@ -6519,6 +6704,7 @@ class SlamResultViewer {
             sizeAttenuation: true,
             vertexColors: false,
         });
+        points.material._baseSize = this._pcdPointSize * 1.2;
         this._scene.add(points);
         this._diffObjects.push(points);
         if (layerName) {
@@ -6528,14 +6714,14 @@ class SlamResultViewer {
     }
 
     async toggleDiffPCDs(enabled) {
-        const diffLegend = document.getElementById('slam-diff-legend-rows');
+        const diffLegend = document.getElementById(this._ids.diffLegend);
         if (enabled) {
             if (!this._diffLoaded) {
-                const loadingEl = document.getElementById('slam-result-loading');
+                const loadingEl = document.getElementById(this._ids.loading);
                 if (loadingEl) loadingEl.style.display = 'block';
                 try {
                     if (!this._diffPaths) {
-                        this._diffPaths = await apiCall('/api/slam/result_paths');
+                        this._diffPaths = await apiCall(this._buildPathsEndpoint());
                     }
                     const paths = this._diffPaths;
                     // PD / ND — 없을 수 있으므로 각각 독립 try
@@ -6565,7 +6751,7 @@ class SlamResultViewer {
 
     _restoreDiffLayerVisuals() {
         for (const name of ['pd', 'nd', 'firstue', 'secondue']) {
-            const row = document.querySelector(`.slam-legend-row[data-layer="${name}"]`);
+            const row = this._legendRow(name);
             if (row) {
                 const active = row.dataset.active !== 'false';
                 const objs = this._layers[name] || [];
@@ -6588,7 +6774,7 @@ class SlamResultViewer {
 
     toggleLayer(name) {
         const objs = this._layers[name];
-        const row = document.querySelector(`.slam-legend-row[data-layer="${name}"]`);
+        const row = this._legendRow(name);
         if (!objs || objs.length === 0) return;
         const nowVisible = objs[0].visible;
         const newVisible = !nowVisible;
@@ -6598,31 +6784,39 @@ class SlamResultViewer {
 
     setPointSize(size) {
         this._pcdPointSize = size;
+        // baseSize(월드 단위)는 항상 갱신. 퍼스펙티브일 때만 size 직접 반영
+        // (탑뷰 ortho는 렌더 루프 _updateOrthoPointSizes가 zoom 기준으로 매 프레임 보정)
         for (const obj of this._pcdObjects) {
             if (obj.material) {
-                obj.material.size = size;
-                obj.material.needsUpdate = true;
+                obj.material._baseSize = size;
+                if (!this._topView) {
+                    obj.material.size = size;
+                    obj.material.needsUpdate = true;
+                }
             }
         }
         for (const obj of this._diffObjects) {
             if (obj.material) {
-                obj.material.size = size * 1.2;
-                obj.material.needsUpdate = true;
+                obj.material._baseSize = size * 1.2;
+                if (!this._topView) {
+                    obj.material.size = size * 1.2;
+                    obj.material.needsUpdate = true;
+                }
             }
         }
-        const label = document.getElementById('slam-point-size-label');
+        const label = document.getElementById(this._ids.pointSizeLabel);
         if (label) label.textContent = size.toFixed(2) + ' m';
     }
 
     _resetAllLegendRows() {
-        document.querySelectorAll('.slam-legend-row[data-layer]').forEach(row => {
+        this._allLegendRows().forEach(row => {
             row.dataset.active = 'true';
         });
     }
 
     takeSnapshot(scale = 2) {
         if (!this._renderer || !this._scene || !this._camera) return;
-        const container = document.getElementById('slam-result-canvas-container');
+        const container = document.getElementById(this._ids.container);
         if (!container) return;
 
         const w = container.clientWidth;
@@ -6666,24 +6860,51 @@ class SlamResultViewer {
         if (this._controls) {
             this._restoreOrbitControls();
         }
-        const topViewToggle = document.getElementById('slam-viewer-topview-toggle');
+        const topViewToggle = document.getElementById(this._ids.topViewToggle);
         if (topViewToggle) topViewToggle.checked = false;
         this._clearDiff();
-        const diffToggle = document.getElementById('slam-viewer-diff-toggle');
+        const diffToggle = document.getElementById(this._ids.diffToggle);
         if (diffToggle) diffToggle.checked = false;
-        const diffLegend = document.getElementById('slam-diff-legend-rows');
+        const diffLegend = document.getElementById(this._ids.diffLegend);
         if (diffLegend) diffLegend.style.display = 'none';
-        const slider = document.getElementById('slam-point-size-slider');
+        const slider = document.getElementById(this._ids.pointSizeSlider);
         if (slider) {
             slider.value = '0.05';
             this._pcdPointSize = 0.05;
-            const label = document.getElementById('slam-point-size-label');
+            const label = document.getElementById(this._ids.pointSizeLabel);
             if (label) label.textContent = '0.05 m';
         }
     }
 }
 
-const slamResultViewer = new SlamResultViewer();
+// Multi-Session SLAM Optimization 결과 뷰어
+const slamResultViewer = new SlamResultViewer({
+    ids: {
+        viewer: 'slam-result-viewer',
+        canvas: 'slam-result-canvas',
+        container: 'slam-result-canvas-container',
+        loading: 'slam-result-loading',
+        topViewToggle: 'slam-viewer-topview-toggle',
+        pointSizeSlider: 'slam-point-size-slider',
+        pointSizeLabel: 'slam-point-size-label',
+        diffToggle: 'slam-viewer-diff-toggle',
+        diffLegend: 'slam-diff-legend-rows',
+    },
+    spec: {
+        pathsEndpoint: '/api/slam/result_paths',
+        pcdLayers: [
+            { pathKey: 'map1_pcd', color: 0x4488ff, layer: 'map1' },
+            { pathKey: 'map2_pcd', color: 0x44dd88, layer: 'map2' },
+        ],
+        trajLayers: [
+            { pathKey: 'map1_poses', color: 0xffee44, layer: 'map1traj', asNodes: true },
+            { pathKey: 'map2_poses', color: 0xff9900, layer: 'map2traj', asNodes: true },
+            { pathKey: 'output_poses', color: 0x44ffff, layer: 'outputtraj', asNodes: true },
+        ],
+        edges: { pathKey: 'output_edges', posesFromKey: 'output_poses', color: 0xff2266 },
+        diff: true,
+    },
+});
 
 function resetSlamResultView() {
     slamResultViewer.resetView();
@@ -6711,6 +6932,71 @@ function toggleSlamLayer(name) {
 
 function takeSlamSnapshot() {
     slamResultViewer.takeSnapshot(2);
+}
+
+// ==============================================================
+// Save Map 결과 뷰어 (LiDAR SLAM 서브탭)
+// ==============================================================
+const saveMapResultViewer = new SlamResultViewer({
+    ids: {
+        viewer: 'savemap-result-viewer',
+        canvas: 'savemap-result-canvas',
+        container: 'savemap-result-canvas-container',
+        loading: 'savemap-result-loading',
+        topViewToggle: 'savemap-viewer-topview-toggle',
+        pointSizeSlider: 'savemap-point-size-slider',
+        pointSizeLabel: 'savemap-point-size-label',
+    },
+    spec: {
+        pathsEndpoint: '/api/slam/save_map_result',
+        pcdLayers: [
+            { pathKey: 'optimized_map_pcd', color: 0xff3333, layer: 'optimized' },
+            { pathKey: 'static_map_pcd', color: 0x44ff88, layer: 'static' },
+        ],
+        trajLayers: [
+            { pathKey: 'lio_poses', color: 0xff8800, layer: 'lio', asNodes: false },
+            { pathKey: 'pgo_poses', color: 0xffffff, layer: 'pgo', asNodes: false },
+        ],
+        edges: { pathKey: 'edges', posesFromKey: 'pgo_poses', color: 0x2288ff },
+    },
+});
+
+function resetSaveMapResultView() {
+    saveMapResultViewer.resetView();
+}
+
+function toggleSaveMapTopView(checked) {
+    saveMapResultViewer.toggleTopView(checked);
+}
+
+function toggleSaveMapLayer(name) {
+    saveMapResultViewer.toggleLayer(name);
+}
+
+function setSaveMapPointSize(size) {
+    saveMapResultViewer.setPointSize(size);
+}
+
+function takeSaveMapSnapshot() {
+    saveMapResultViewer.takeSnapshot(2);
+}
+
+function toggleSaveMapResultFullscreen() {
+    const container = document.getElementById('savemap-result-canvas-container');
+    if (!container) return;
+    const isFullscreen = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (isFullscreen) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    } else {
+        (container.requestFullscreen || container.webkitRequestFullscreen).call(container);
+    }
+}
+
+function _updateSaveMapFullscreenIcon(isFullscreen) {
+    const expand = document.getElementById('savemap-fullscreen-icon-expand');
+    const collapse = document.getElementById('savemap-fullscreen-icon-collapse');
+    if (expand) expand.style.display = isFullscreen ? 'none' : '';
+    if (collapse) collapse.style.display = isFullscreen ? '' : 'none';
 }
 
 // ==============================================================
@@ -6766,10 +7052,13 @@ function _updateViewerFullscreenIcon(isFullscreen) {
 document.addEventListener('fullscreenchange', () => {
     const isFullscreen = !!document.fullscreenElement;
     const isSlamFullscreen = isFullscreen && document.fullscreenElement?.id === 'slam-result-canvas-container';
+    const isSaveMapFullscreen = isFullscreen && document.fullscreenElement?.id === 'savemap-result-canvas-container';
     const isViewerFullscreen = isFullscreen && document.fullscreenElement?.id === '3d-viewer-container';
     _updateSlamFullscreenIcon(isSlamFullscreen);
+    _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
     if (slamResultViewer) slamResultViewer._resizeRenderer();
+    if (saveMapResultViewer) saveMapResultViewer._resizeRenderer();
     if (locLiveViewer) locLiveViewer._resizeRenderer();
     if (typeof onWindowResize === 'function') onWindowResize();
 });
@@ -6777,10 +7066,13 @@ document.addEventListener('fullscreenchange', () => {
 document.addEventListener('webkitfullscreenchange', () => {
     const isFullscreen = !!document.webkitFullscreenElement;
     const isSlamFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'slam-result-canvas-container';
+    const isSaveMapFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'savemap-result-canvas-container';
     const isViewerFullscreen = isFullscreen && document.webkitFullscreenElement?.id === '3d-viewer-container';
     _updateSlamFullscreenIcon(isSlamFullscreen);
+    _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
     if (slamResultViewer) slamResultViewer._resizeRenderer();
+    if (saveMapResultViewer) saveMapResultViewer._resizeRenderer();
     if (locLiveViewer) locLiveViewer._resizeRenderer();
     if (typeof onWindowResize === 'function') onWindowResize();
 });

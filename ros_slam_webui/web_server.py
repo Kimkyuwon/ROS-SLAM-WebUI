@@ -2195,6 +2195,8 @@ class WebGUINode(Node):
         self.slam_map_saving = False
         self.slam_map_save_cancelled = False
         self.slam_map_save_status = {'saving': False, 'done': False, 'success': None, 'message': ''}
+        # Last requested save directory (used by Save Map Result Viewer / path whitelist)
+        self.slam_last_saved_dir = ""
 
         # Localization state
         self.localization_process = None
@@ -3073,6 +3075,9 @@ class WebGUINode(Node):
         if self.slam_map_saving:
             return False, 'Map save already in progress'
 
+        # 저장 디렉토리 보관 (결과 뷰어 및 경로 화이트리스트에서 사용)
+        self.slam_last_saved_dir = directory
+
         self.slam_map_saving = True
         self.slam_map_save_cancelled = False
         self.slam_map_save_status = {'saving': True, 'done': False, 'success': None, 'message': 'Initializing...'}
@@ -3489,6 +3494,36 @@ class WebGUINode(Node):
             'second_ue_pcd': (output_dir + '/Debug/SecondUE.pcd') if output_dir else '',
             'output_edges': (output_dir + '/edges.txt') if output_dir else '',
             'output_dir': output_dir,
+        }
+
+    def get_save_map_result_paths(self, directory):
+        """Return file paths for the LiDAR SLAM Save Map result visualization.
+
+        Args:
+            directory (str): The save directory name passed to save_trajectory
+                             (pose_graph_optimization/{directory}).
+
+        Returns:
+            dict: Existing file paths only (missing files are returned as '').
+        """
+        pgo_dir = _find_sibling_package_dir('pose_graph_optimization')
+        if not pgo_dir or not directory:
+            return {'success': False, 'message': 'pose_graph_optimization directory or save directory not found'}
+
+        saved = pgo_dir / directory
+
+        def _path_if_exists(name):
+            candidate = saved / name
+            return str(candidate) if candidate.is_file() else ''
+
+        return {
+            'success': True,
+            'optimized_map_pcd': _path_if_exists('OptimizedMap.pcd'),
+            'static_map_pcd': _path_if_exists('StaticMap.pcd'),
+            'lio_poses': _path_if_exists('odom_poses.txt'),
+            'pgo_poses': _path_if_exists('optimized_poses.txt'),
+            'edges': _path_if_exists('edges.txt'),
+            'output_dir': str(saved),
         }
 
     def get_localization_state(self):
@@ -7296,6 +7331,10 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response(get_sibling_package_dirs())
         elif parsed_path.path == '/api/slam/result_paths':
             self.send_json_response(self.node.get_slam_result_paths())
+        elif parsed_path.path == '/api/slam/save_map_result':
+            query = parse_qs(parsed_path.query)
+            directory = query.get('directory', [''])[0]
+            self.send_json_response(self.node.get_save_map_result_paths(directory))
         elif parsed_path.path == '/api/slam/poses':
             query = parse_qs(parsed_path.query)
             file_path = query.get('path', [''])[0]
@@ -7858,6 +7897,14 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.node.slam_map2,
             result_paths.get('output_dir', ''),
         ]
+
+        # Save Map 결과 저장 디렉토리 (pose_graph_optimization/{directory})도 허용
+        saved_dir = getattr(self.node, 'slam_last_saved_dir', '')
+        if saved_dir:
+            pgo_dir = _find_sibling_package_dir('pose_graph_optimization')
+            if pgo_dir:
+                allowed_dirs.append(str(pgo_dir / saved_dir))
+
         return any(allowed and file_path.startswith(allowed) for allowed in allowed_dirs)
 
     def _serve_slam_poses(self, file_path):

@@ -2518,11 +2518,13 @@ h3 {
 }
 
 /* SLAM Result Viewer */
-#slam-result-viewer {
+#slam-result-viewer,
+#savemap-result-viewer {
     margin: 12px 0;
 }
 
-#slam-result-canvas-container {
+#slam-result-canvas-container,
+#savemap-result-canvas-container {
     background: #1a1a2e;
     border-radius: 8px;
     height: 380px;
@@ -2531,13 +2533,15 @@ h3 {
     width: 100%;
 }
 
-#slam-result-canvas {
+#slam-result-canvas,
+#savemap-result-canvas {
     display: block;
     height: 100%;
     width: 100%;
 }
 
-#slam-result-loading {
+#slam-result-loading,
+#savemap-result-loading {
     color: #aaa;
     font-size: 13px;
     left: 50%;
@@ -2603,7 +2607,8 @@ h3 {
     width: 13px;
 }
 
-#slam-pcd-legend {
+#slam-pcd-legend,
+#savemap-pcd-legend {
     background: rgba(0, 0, 0, 0.55);
     border-radius: 6px;
     display: flex;
@@ -2616,7 +2621,8 @@ h3 {
     z-index: 10;
 }
 
-#slam-result-legend {
+#slam-result-legend,
+#savemap-result-legend {
     background: rgba(0, 0, 0, 0.55);
     border-radius: 6px;
     display: flex;
@@ -2670,7 +2676,8 @@ h3 {
     margin: 3px 0;
 }
 
-#slam-point-size-overlay {
+#slam-point-size-overlay,
+#savemap-point-size-overlay {
     align-items: center;
     background: rgba(0, 0, 0, 0.55);
     border-radius: 6px;
@@ -2689,19 +2696,22 @@ h3 {
     white-space: nowrap;
 }
 
-#slam-point-size-slider {
+#slam-point-size-slider,
+#savemap-point-size-slider {
     accent-color: var(--accent, #4ad6ff);
     cursor: pointer;
     width: 130px;
 }
 
-#slam-point-size-label {
+#slam-point-size-label,
+#savemap-point-size-label {
     color: var(--accent, #4ad6ff);
     font-size: 11px;
     min-width: 40px;
 }
 
-#slam-viewer-actions {
+#slam-viewer-actions,
+#savemap-viewer-actions {
     bottom: 10px;
     display: flex;
     gap: 6px;
@@ -2735,13 +2745,15 @@ h3 {
     transform: scale(0.93);
 }
 
-#slam-result-canvas-container:fullscreen {
+#slam-result-canvas-container:fullscreen,
+#savemap-result-canvas-container:fullscreen {
     border-radius: 0;
     height: 100vh;
     width: 100vw;
 }
 
-#slam-result-canvas-container:-webkit-full-screen {
+#slam-result-canvas-container:-webkit-full-screen,
+#savemap-result-canvas-container:-webkit-full-screen {
     border-radius: 0;
     height: 100vh;
     width: 100vw;
