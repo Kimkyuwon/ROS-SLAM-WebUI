@@ -2754,6 +2754,11 @@ async function saveSlamMap() {
     if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
         saveMapResultViewer.hideAndReset();
     }
+    // Phase 4.10: 대쉬보드 숨김 + 구독 해제
+    if (typeof slamAnalyticsDashboard !== 'undefined') {
+        slamAnalyticsDashboard.hide();
+        slamAnalyticsDashboard.unsubscribe();
+    }
     // Open save map modal
     domCache.get('save-map-modal').style.display = 'block';
     domCache.get('save-map-directory').value = '';
@@ -2948,6 +2953,11 @@ async function startSlamMapping() {
     }
     // Immediately update status to Running
     updateLidarSlamStatus('Running');
+    // Phase 4.10: 대쉬보드 표시 + 구독 시작
+    if (typeof slamAnalyticsDashboard !== 'undefined') {
+        slamAnalyticsDashboard.show();
+        slamAnalyticsDashboard.subscribe();
+    }
     
     const result = await apiCall('/api/slam/start_mapping', {});
     if (result.success) {
@@ -2964,6 +2974,11 @@ async function stopSlamMapping() {
     // SLAM 중지 시 이전 Save Map 결과 뷰어 숨김
     if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
         saveMapResultViewer.hideAndReset();
+    }
+    // Phase 4.10: 대쉬보드 숨김 + 구독 해제
+    if (typeof slamAnalyticsDashboard !== 'undefined') {
+        slamAnalyticsDashboard.hide();
+        slamAnalyticsDashboard.unsubscribe();
     }
     // Immediately update status to Stopping
     updateLidarSlamStatus('Stopping...');
@@ -7557,3 +7572,619 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 300);
 });
+
+// ═══════════════════════════════════════════════════════════
+// Phase 4.10 — SlamAnalyticsDashboard
+// ═══════════════════════════════════════════════════════════
+
+class SlamAnalyticsDashboard {
+    constructor() {
+        this._ros = null;
+        this._subscription = null;
+        this._plotsInitialized = false;
+        this._ringBuffer = {
+            timestamps: [],
+            imu_time: [],
+            state_time: [],
+            map_time: [],
+            total_time: [],
+            scan_dop: [],
+            matching_dop: []
+        };
+        this._WINDOW_SEC = 10;
+        this._sysInfo = { total_ram_mb: 0, cpu_cores: 1 };
+        this._fetchSysInfo();
+    }
+
+    async _fetchSysInfo() {
+        try {
+            const r = await fetch('/api/system/info');
+            const d = await r.json();
+            this._sysInfo = d;
+        } catch (e) {
+            console.warn('SlamAnalyticsDashboard: /api/system/info 실패', e);
+        }
+    }
+
+    show() {
+        const el = document.getElementById('slam-analytics-dashboard');
+        if (el) {
+            el.style.display = 'block';
+        }
+        this._ensurePlotsInitialized();
+    }
+
+    hide() {
+        const el = document.getElementById('slam-analytics-dashboard');
+        if (el) {
+            el.style.display = 'none';
+        }
+    }
+
+    subscribe() {
+        if (this._subscription) {
+            return;
+        }
+        // plotState.ros 연결된 경우 재사용, 없으면 자체 연결 생성 (LocalizationLiveViewer 패턴 동일)
+        if (window.plotState && plotState.ros && plotState.ros.isConnected) {
+            this._ros = plotState.ros;
+            this._doSubscribe();
+        } else {
+            try {
+                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros.on('connection', () => {
+                    console.log('[SlamAnalyticsDashboard] rosbridge connected');
+                    this._doSubscribe();
+                });
+                this._ros.on('error', (err) => {
+                    console.error('[SlamAnalyticsDashboard] rosbridge error:', err);
+                });
+                this._ros.on('close', () => {
+                    console.warn('[SlamAnalyticsDashboard] rosbridge connection closed');
+                });
+            } catch (e) {
+                console.error('[SlamAnalyticsDashboard] failed to init rosbridge:', e);
+            }
+        }
+    }
+
+    _doSubscribe() {
+        if (this._subscription) {
+            return;
+        }
+        if (!this._ros) {
+            console.warn('[SlamAnalyticsDashboard] _doSubscribe: ros not ready');
+            return;
+        }
+        this._subscription = new ROSLIB.Topic({
+            ros: this._ros,
+            name: '/lio_analytics',
+            messageType: 'fast_lio/msg/LioAnalytics',
+            queue_length: 1
+        });
+        this._subscription.subscribe((msg) => {
+            console.log('[SlamAnalyticsDashboard] received /lio_analytics');
+            this._onMessage(msg);
+        });
+        console.log('[SlamAnalyticsDashboard] subscribed to /lio_analytics');
+    }
+
+    unsubscribe() {
+        if (this._subscription) {
+            this._subscription.unsubscribe();
+            this._subscription = null;
+        }
+        // 자체 생성한 ros 연결이면 닫기 (plotState.ros는 닫지 않음)
+        if (this._ros && this._ros !== (window.plotState && plotState.ros)) {
+            try { this._ros.close(); } catch (e) { /* ignore */ }
+        }
+        this._ros = null;
+        this._resetWidgets();
+        this._ringBuffer = {
+            timestamps: [],
+            imu_time: [],
+            state_time: [],
+            map_time: [],
+            total_time: [],
+            scan_dop: [],
+            matching_dop: []
+        };
+    }
+
+    _onMessage(msg) {
+        const now = Date.now() / 1000;
+        const buf = this._ringBuffer;
+
+        buf.timestamps.push(now);
+        buf.imu_time.push((msg.imu_time || 0) * 1000);
+        buf.state_time.push((msg.state_time || 0) * 1000);
+        buf.map_time.push((msg.map_time || 0) * 1000);
+        buf.total_time.push((msg.total_time || 0) * 1000);
+        buf.scan_dop.push(msg.scan_dop || 0);
+        buf.matching_dop.push(msg.matching_dop || 0);
+
+        // 10초 초과 항목 제거
+        while (buf.timestamps.length > 0 && (now - buf.timestamps[0]) > this._WINDOW_SEC) {
+            buf.timestamps.shift();
+            buf.imu_time.shift();
+            buf.state_time.shift();
+            buf.map_time.shift();
+            buf.total_time.shift();
+            buf.scan_dop.shift();
+            buf.matching_dop.shift();
+        }
+
+        this._updateWidgets(msg);
+    }
+
+    _ensurePlotsInitialized() {
+        if (this._plotsInitialized) {
+            return;
+        }
+        this._plotsInitialized = true;
+        this._initProcTimePlot();
+        this._initDopPlot();
+        this._initRamPlot(0, this._sysInfo.total_ram_mb || 32768);
+        this._resetCumulTable();
+    }
+
+    _initProcTimePlot() {
+        const layout = {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'rgba(13,13,26,0.5)',
+            margin: { t: 4, b: 30, l: 42, r: 8 },
+            xaxis: {
+                showgrid: false,
+                color: '#556',
+                tickfont: { size: 9, color: '#556' },
+                nticks: 5,
+                type: 'date'
+            },
+            yaxis: {
+                gridcolor: '#2d2d4e',
+                color: '#556',
+                tickfont: { size: 9, color: '#8899aa' },
+                title: { text: 'ms', font: { size: 10, color: '#556' } }
+            },
+            legend: {
+                orientation: 'h',
+                y: -0.22,
+                x: 0,
+                font: { size: 9, color: '#c8d6e5' },
+                bgcolor: 'transparent'
+            },
+            hovermode: 'x unified',
+            hoverlabel: {
+                bgcolor: '#1a1a35',
+                bordercolor: '#4a4a6e',
+                font: { color: '#e8f0fe', size: 11, family: 'Segoe UI, sans-serif' },
+                align: 'left'
+            }
+        };
+        Plotly.newPlot('analytics-chart-proctime', [
+            {
+                x: [],
+                y: [],
+                name: 'IMU Undistort',
+                type: 'scatter',
+                mode: 'lines',
+                fill: 'tozeroy',
+                fillcolor: 'rgba(0,210,106,0.35)',
+                line: { color: '#00d26a', width: 1.5 }
+            },
+            {
+                x: [],
+                y: [],
+                name: 'EKF State Update',
+                type: 'scatter',
+                mode: 'lines',
+                fill: 'tonexty',
+                fillcolor: 'rgba(126,207,244,0.35)',
+                line: { color: '#7ecff4', width: 1.5 }
+            },
+            {
+                x: [],
+                y: [],
+                name: 'Map Increment',
+                type: 'scatter',
+                mode: 'lines',
+                fill: 'tonexty',
+                fillcolor: 'rgba(233,69,96,0.35)',
+                line: { color: '#e94560', width: 1.5 }
+            },
+            {
+                x: [],
+                y: [],
+                name: 'Total Pipeline',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#ffd32a', width: 2, dash: 'dot' }
+            }
+        ], layout, { responsive: true, displayModeBar: false });
+    }
+
+    _initDopPlot() {
+        const layout = {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'rgba(13,13,26,0.5)',
+            margin: { t: 4, b: 30, l: 36, r: 8 },
+            xaxis: {
+                showgrid: false,
+                color: '#556',
+                tickfont: { size: 9, color: '#556' },
+                nticks: 5,
+                type: 'date'
+            },
+            yaxis: {
+                gridcolor: '#2d2d4e',
+                color: '#556',
+                tickfont: { size: 9, color: '#8899aa' },
+                title: { text: 'DOP', font: { size: 10, color: '#556' } },
+                range: [0, 10]
+            },
+            legend: {
+                orientation: 'h',
+                y: -0.22,
+                x: 0,
+                font: { size: 9, color: '#c8d6e5' },
+                bgcolor: 'transparent'
+            },
+            hovermode: 'x unified',
+            hoverlabel: {
+                bgcolor: '#1a1a35',
+                bordercolor: '#4a4a6e',
+                font: { color: '#e8f0fe', size: 11, family: 'Segoe UI, sans-serif' },
+                align: 'left'
+            }
+        };
+        Plotly.newPlot('analytics-chart-dop', [
+            {
+                x: [],
+                y: [],
+                name: 'Scan PDOP',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#00d26a', width: 2 }
+            },
+            {
+                x: [],
+                y: [],
+                name: 'Matching PDOP',
+                type: 'scatter',
+                mode: 'lines',
+                line: { color: '#a29bfe', width: 2 }
+            }
+        ], layout, { responsive: true, displayModeBar: false });
+    }
+
+    _initRamPlot(used, total) {
+        const free = Math.max(0, total - used);
+        const usedLabel = used < 1024 ? `${used} MB` : `${(used / 1024).toFixed(1)} GB`;
+        const totalLabel = total < 1024 ? `${total} MB` : `${(total / 1024).toFixed(0)} GB`;
+        Plotly.newPlot('analytics-chart-ram', [{
+            type: 'pie',
+            hole: 0.65,
+            values: [used || 0.001, free || total],
+            labels: ['Used', 'Free'],
+            marker: { colors: ['#e94560', '#1a1a35'] },
+            textinfo: 'none',
+            hoverinfo: 'label+value+percent',
+            showlegend: false
+        }], {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'transparent',
+            margin: { t: 0, b: 0, l: 0, r: 0 },
+            annotations: [{
+                text: `<b>${usedLabel}</b><br><span style="font-size:10px">${totalLabel}</span>`,
+                x: 0.5,
+                y: 0.5,
+                showarrow: false,
+                font: { color: '#c8d6e5', size: 13 }
+            }]
+        }, { responsive: true, displayModeBar: false });
+    }
+
+    _resetCumulTable() {
+        const tbody = document.getElementById('analytics-cumul-tbody');
+        if (!tbody) {
+            return;
+        }
+        const rows = [
+            { id: 'cumul-imu', label: 'IMU Undistort' },
+            { id: 'cumul-state', label: 'EKF State Update' },
+            { id: 'cumul-map', label: 'Map Increment' },
+            { id: 'cumul-total', label: 'Total Pipeline' }
+        ];
+        tbody.innerHTML = rows.map((r) => `
+            <tr>
+                <td class="analytics-cumul-row-label">${r.label}</td>
+                <td class="analytics-right analytics-cumul-mean" id="${r.id}-mean">—</td>
+                <td class="analytics-right analytics-cumul-max" id="${r.id}-max">—</td>
+                <td style="width:140px; padding: 0 8px;">
+                    <div style="position:relative;">
+                        <div style="height:8px; background:#1a1a35; border-radius:4px; overflow:hidden; margin-top:3px;">
+                            <div id="${r.id}-bar-mean" style="height:100%; border-radius:4px; background:#7ecff4; transition:width 0.4s; width:0%;"></div>
+                        </div>
+                        <div id="${r.id}-bar-max" style="position:absolute;top:3px;left:0%;width:2px;height:8px;background:#e94560;border-radius:1px;transform:translateX(-1px);"></div>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:8px;color:#556;margin-top:2px;">
+                        <span style="color:#7ecff4">■ Mean</span><span style="color:#e94560">▎Max</span>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    _updateWidgets(msg) {
+        this._ensurePlotsInitialized();
+        this._updateHzCard(msg);
+        this._updateTrajCard(msg);
+        this._updateCpuCard(msg);
+        this._updateRamChart(msg);
+        this._updateProcTimePlot(msg);
+        this._updateDopPlot(msg);
+        this._updateCumulTable(msg);
+        this._updateDetailSection(msg);
+    }
+
+    _updateHzCard(msg) {
+        const imuEl = document.getElementById('analytics-imu-hz');
+        const lidEl = document.getElementById('analytics-lid-hz');
+        if (!imuEl || !lidEl) {
+            return;
+        }
+        const setHz = (el, val) => {
+            el.textContent = val;
+            el.className = 'analytics-hz-value';
+            if (val <= 0) {
+                el.classList.add('analytics-hz-err');
+            } else if (val < 10) {
+                el.classList.add('analytics-hz-warn');
+            } else {
+                el.classList.add('analytics-hz-ok');
+            }
+        };
+        setHz(imuEl, msg.imu_freq || 0);
+        setHz(lidEl, msg.lid_freq || 0);
+    }
+
+    _updateTrajCard(msg) {
+        const distEl = document.getElementById('analytics-traj-dist');
+        const timeEl = document.getElementById('analytics-run-time');
+        const speedEl = document.getElementById('analytics-avg-speed');
+        if (!distEl || !timeEl || !speedEl) {
+            return;
+        }
+
+        const dist = msg.traj_dist || 0;
+        const runSec = msg.run_time || 0;
+        distEl.textContent = (typeof dist === 'number' ? dist.toFixed(1) : dist);
+
+        const h = Math.floor(runSec / 3600);
+        const m = Math.floor((runSec % 3600) / 60);
+        const s = runSec % 60;
+        timeEl.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+
+        const speed = (runSec > 0) ? (dist / runSec) : 0;
+        speedEl.textContent = speed.toFixed(2);
+    }
+
+    _updateCpuCard(msg) {
+        const pctEl = document.getElementById('analytics-cpu-percent');
+        const coreEl = document.getElementById('analytics-cpu-cores-equiv');
+        const barEl = document.getElementById('analytics-cpu-bar-fill');
+        if (!pctEl || !barEl) {
+            return;
+        }
+
+        // cpu_usage = 사용 중인 코어 수 (float, e.g. 1.5 cores)
+        const usedCores = msg.cpu_usage || 0;
+        const totalCores = this._sysInfo.cpu_cores || 1;
+        const barPct = Math.min(usedCores / totalCores * 100, 100);
+
+        pctEl.innerHTML = `${usedCores.toFixed(1)}<span class="analytics-cpu-pct-sym"> cores</span>`;
+        if (coreEl) {
+            const pct = (barPct).toFixed(1);
+            coreEl.innerHTML = `<span style="color:#ffd32a;font-weight:700">${pct}%</span> of ${totalCores} cores`;
+        }
+        barEl.style.width = `${barPct}%`;
+    }
+
+    _updateRamChart(msg) {
+        const used = msg.ram_usage || 0;
+        const total = this._sysInfo.total_ram_mb || 32768;
+        const free = Math.max(0, total - used);
+        const usedLabel = used < 1024 ? `${used} MB` : `${(used / 1024).toFixed(1)} GB`;
+        const totalLabel = total < 1024 ? `${total} MB` : `${(total / 1024).toFixed(0)} GB`;
+
+        Plotly.react('analytics-chart-ram', [{
+            type: 'pie',
+            hole: 0.65,
+            values: [used || 0.001, free || total],
+            labels: ['Used', 'Free'],
+            marker: { colors: ['#e94560', '#1a1a35'] },
+            textinfo: 'none',
+            hoverinfo: 'label+value+percent',
+            showlegend: false
+        }], {
+            paper_bgcolor: 'transparent',
+            plot_bgcolor: 'transparent',
+            margin: { t: 0, b: 0, l: 0, r: 0 },
+            annotations: [{
+                text: `<b>${usedLabel}</b><br><span style="font-size:10px">${totalLabel}</span>`,
+                x: 0.5,
+                y: 0.5,
+                showarrow: false,
+                font: { color: '#c8d6e5', size: 13 }
+            }]
+        });
+    }
+
+    _updateProcTimePlot(msg) {
+        const now = Date.now();
+        const x = new Date(now);
+        const imu = (msg.imu_time || 0) * 1000;
+        const stateStacked = imu + ((msg.state_time || 0) * 1000);
+        const mapStacked = stateStacked + ((msg.map_time || 0) * 1000);
+        const total = (msg.total_time || 0) * 1000;
+
+        Plotly.extendTraces('analytics-chart-proctime', {
+            x: [[x], [x], [x], [x]],
+            y: [[imu], [stateStacked], [mapStacked], [total]]
+        }, [0, 1, 2, 3]);
+        Plotly.relayout('analytics-chart-proctime', {
+            'xaxis.range': [new Date(now - (this._WINDOW_SEC * 1000)), x]
+        });
+    }
+
+    _updateDopPlot(msg) {
+        const buf = this._ringBuffer;
+        const now = Date.now();
+        const x = new Date(now);
+        const scan = msg.scan_dop || 0;
+        const matching = msg.matching_dop || 0;
+
+        Plotly.extendTraces('analytics-chart-dop', {
+            x: [[x], [x]],
+            y: [[scan], [matching]]
+        }, [0, 1]);
+
+        const allDop = [...buf.scan_dop, ...buf.matching_dop].filter((v) => Number.isFinite(v));
+        const dopMax = allDop.length > 0 ? Math.max(...allDop) : 10;
+        const dopYmax = Math.min(dopMax * 1.15, 100);
+        Plotly.relayout('analytics-chart-dop', {
+            'xaxis.range': [new Date(now - (this._WINDOW_SEC * 1000)), x],
+            'yaxis.range': [0, dopYmax]
+        });
+    }
+
+    _updateCumulTable(msg) {
+        const rows = [
+            { id: 'cumul-imu', mean: (msg.imu_mean || 0) * 1000, max: (msg.imu_max || 0) * 1000 },
+            { id: 'cumul-state', mean: (msg.state_mean || 0) * 1000, max: (msg.state_max || 0) * 1000 },
+            { id: 'cumul-map', mean: (msg.map_mean || 0) * 1000, max: (msg.map_max || 0) * 1000 },
+            { id: 'cumul-total', mean: (msg.total_mean || 0) * 1000, max: (msg.total_max || 0) * 1000 }
+        ];
+        const maxVal = Math.max(...rows.map((r) => r.max), 1);
+
+        rows.forEach((r) => {
+            const meanEl = document.getElementById(`${r.id}-mean`);
+            const maxEl = document.getElementById(`${r.id}-max`);
+            const barMeanEl = document.getElementById(`${r.id}-bar-mean`);
+            const barMaxEl = document.getElementById(`${r.id}-bar-max`);
+
+            if (meanEl) {
+                meanEl.textContent = r.mean.toFixed(2);
+            }
+            if (maxEl) {
+                maxEl.textContent = r.max.toFixed(2);
+            }
+            if (barMeanEl) {
+                barMeanEl.style.width = `${(r.mean / maxVal * 100).toFixed(1)}%`;
+            }
+            if (barMaxEl) {
+                barMaxEl.style.left = `${(r.max / maxVal * 100).toFixed(1)}%`;
+            }
+        });
+    }
+
+    _updateDetailSection(msg) {
+        const fields = [
+            ['scan_size', (v) => `${v.toLocaleString()} pts`],
+            ['down_size', (v) => `${v.toLocaleString()} pts`],
+            ['map_size', (v) => `${v.toLocaleString()} pts`],
+            ['map_valid_size', (v) => `${v.toLocaleString()} pts`],
+            ['new_idxs', (v) => `${v.toLocaleString()} pts`],
+            ['map_delete_size', (v) => `${v.toLocaleString()} pts`],
+            ['buffer_size', (v) => `${v}`],
+            ['imu_buffer_size', (v) => `${v}`],
+            ['scan_time', (v) => `${v.toFixed(4)} s`],
+            ['num_feats', (v) => `${v.toLocaleString()}`],
+            ['num_reject', (v) => `${v.toLocaleString()}`],
+            ['match_ratio', (v) => `${v.toFixed(4)}`],
+            ['res_mean', (v) => `${v.toFixed(5)} m`],
+            ['res_std', (v) => `${v.toFixed(5)} m`],
+            ['kf_iterations', (v) => `${v}`],
+            ['pos_cov', (v) => `${v.toExponential(3)}`],
+            ['rot_cov', (v) => `${v.toExponential(3)}`],
+            ['vel_norm', (v) => `${v.toFixed(3)} m/s`],
+            ['acc_bias_norm', (v) => `${v.toFixed(4)}`],
+            ['gyr_bias_norm', (v) => `${v.toFixed(5)}`],
+            ['lid_offset', (v) => `${v.toFixed(4)} s`],
+            ['imu_offset', (v) => `${v.toFixed(5)} s`],
+            ['search_time', (v) => `${(v * 1000).toFixed(1)} ms`],
+            ['delete_time', (v) => `${(v * 1000).toFixed(1)} ms`],
+            ['kf_count', (v) => `${v}`],
+            ['kf_dist_last', (v) => `${v.toFixed(2)} m`]
+        ];
+
+        fields.forEach(([key, fmt]) => {
+            const el = document.getElementById(`ad-${key}`);
+            if (!el) {
+                return;
+            }
+            const val = msg[key];
+            if (val === undefined || val === null) {
+                return;
+            }
+            try {
+                el.textContent = fmt(val);
+            } catch (e) {
+                el.textContent = val;
+            }
+        });
+    }
+
+    _resetWidgets() {
+        const textIds = [
+            'analytics-imu-hz',
+            'analytics-lid-hz',
+            'analytics-traj-dist',
+            'analytics-run-time',
+            'analytics-avg-speed',
+            'analytics-cpu-percent',
+            'analytics-cpu-cores-equiv'
+        ];
+        textIds.forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = '—';
+            }
+        });
+        const barFill = document.getElementById('analytics-cpu-bar-fill');
+        if (barFill) {
+            barFill.style.width = '0%';
+        }
+
+        // 상세 섹션 닫기 및 버튼 텍스트 초기화
+        const detailSection = document.getElementById('slam-analytics-detail');
+        const detailBtn = document.getElementById('slam-analytics-detail-toggle');
+        if (detailSection) {
+            detailSection.classList.remove('open');
+        }
+        if (detailBtn) {
+            detailBtn.classList.remove('open');
+            detailBtn.textContent = 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)';
+        }
+
+        this._plotsInitialized = false;
+    }
+}
+
+// SlamAnalyticsDashboard 전역 인스턴스
+const slamAnalyticsDashboard = new SlamAnalyticsDashboard();
+
+// Phase 4.10.6 — detail toggle
+function toggleSlamAnalyticsDetail() {
+    const section = document.getElementById('slam-analytics-detail');
+    const btn = document.getElementById('slam-analytics-detail-toggle');
+    if (!section || !btn) {
+        return;
+    }
+    const isOpen = section.classList.toggle('open');
+    btn.classList.toggle('open', isOpen);
+    // 버튼 텍스트: arrow는 CSS ::after로 처리
+    btn.textContent = isOpen
+        ? 'Collapse Statistics'
+        : 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)';
+}

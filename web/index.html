@@ -64,6 +64,169 @@
                         <button id="slam-stop-button" onclick="stopSlamMapping()">Stop SLAM</button>
                     </div>
 
+                    <!-- SLAM Analytics Dashboard (Phase 4.10) -->
+                    <div id="slam-analytics-dashboard" style="display:none; margin-bottom: 12px;">
+                        <!-- 대쉬보드 헤더 -->
+                        <div class="analytics-dashboard-header">
+                            <h3 class="analytics-dashboard-title">SLAM Analytics Dashboard</h3>
+                            <span class="analytics-live-badge">● LIVE</span>
+                        </div>
+
+                        <!-- 상단 행: 4열 (Hz / Traj / CPU / RAM) -->
+                        <div class="analytics-grid analytics-row-top">
+                            <div class="analytics-card" id="widget-sensor-hz">
+                                <div class="analytics-card-title">Sensor Frequency</div>
+                                <div class="analytics-hz-grid">
+                                    <div class="analytics-hz-item">
+                                        <div class="analytics-hz-label">IMU</div>
+                                        <div class="analytics-hz-value analytics-hz-ok" id="analytics-imu-hz">—</div>
+                                        <div class="analytics-hz-unit">Hz</div>
+                                    </div>
+                                    <div class="analytics-hz-item">
+                                        <div class="analytics-hz-label">LiDAR</div>
+                                        <div class="analytics-hz-value analytics-hz-ok" id="analytics-lid-hz">—</div>
+                                        <div class="analytics-hz-unit">Hz</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="analytics-card" id="widget-traj">
+                                <div class="analytics-card-title">Trajectory</div>
+                                <div class="analytics-traj-grid">
+                                    <div class="analytics-traj-item">
+                                        <span class="analytics-traj-label">Distance</span>
+                                        <span><span class="analytics-traj-value" id="analytics-traj-dist">—</span><span class="analytics-traj-unit">m</span></span>
+                                    </div>
+                                    <div class="analytics-traj-item">
+                                        <span class="analytics-traj-label">Uptime</span>
+                                        <span class="analytics-traj-time" id="analytics-run-time">—</span>
+                                    </div>
+                                    <div class="analytics-traj-item">
+                                        <span class="analytics-traj-label">Avg Speed</span>
+                                        <span><span class="analytics-traj-derived" id="analytics-avg-speed">—</span><span class="analytics-traj-unit">m/s</span></span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="analytics-card" id="widget-cpu">
+                                <div class="analytics-card-title">CPU Usage</div>
+                                <div class="analytics-cpu-wrap">
+                                    <div class="analytics-cpu-top-row">
+                                        <span class="analytics-cpu-percent" id="analytics-cpu-percent">—<span class="analytics-cpu-pct-sym">%</span></span>
+                                        <span class="analytics-cpu-cores-equiv" id="analytics-cpu-cores-equiv"></span>
+                                    </div>
+                                    <div class="analytics-cpu-bar-bg">
+                                        <div class="analytics-cpu-bar-fill" id="analytics-cpu-bar-fill" style="width:0%"></div>
+                                    </div>
+                                    <div class="analytics-cpu-ticks">
+                                        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="analytics-card" id="widget-ram">
+                                <div class="analytics-card-title">RAM Usage</div>
+                                <div id="analytics-chart-ram" style="height:130px;"></div>
+                            </div>
+                        </div>
+
+                        <!-- 중간 행: 2열 (Processing Time / Geometry Quality) -->
+                        <div class="analytics-grid analytics-row-middle">
+                            <div class="analytics-card" id="widget-proc-time">
+                                <div class="analytics-card-title">Per-frame Processing Time
+                                    <span class="analytics-card-subtitle">last 10s — stacked area</span>
+                                </div>
+                                <div id="analytics-chart-proctime" class="analytics-plot-container"></div>
+                            </div>
+
+                            <div class="analytics-card" id="widget-geometry">
+                                <div class="analytics-card-title">Geometry Quality (DOP)
+                                    <span class="analytics-card-subtitle">lower is better — last 10s</span>
+                                </div>
+                                <div id="analytics-chart-dop" class="analytics-plot-container"></div>
+                            </div>
+                        </div>
+
+                        <!-- 하단 행: 전체 너비 (Cumulative Timing) -->
+                        <div class="analytics-grid analytics-row-bottom">
+                            <div class="analytics-card" id="widget-cumul-timing">
+                                <div class="analytics-card-title">Cumulative Timing Statistics
+                                    <span class="analytics-card-subtitle">Mean / Max comparison + inline bar</span>
+                                </div>
+                                <table class="analytics-cumul-table">
+                                    <thead>
+                                        <tr>
+                                            <th style="width:140px;">Component</th>
+                                            <th class="analytics-right">Mean (ms)</th>
+                                            <th class="analytics-right">Max (ms)</th>
+                                            <th>Mean / Max Ratio</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="analytics-cumul-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- 상세정보 토글 -->
+                        <div class="analytics-detail-toggle-bar">
+                            <button class="analytics-detail-toggle-btn" id="slam-analytics-detail-toggle" onclick="toggleSlamAnalyticsDetail()">
+                                Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)
+                            </button>
+                            <div class="analytics-detail-section" id="slam-analytics-detail">
+                                <div class="analytics-detail-cat-title">Scan / Map Statistics</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_size</span><span class="analytics-detail-val" id="ad-scan_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">down_size</span><span class="analytics-detail-val" id="ad-down_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_size</span><span class="analytics-detail-val" id="ad-map_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_valid_size</span><span class="analytics-detail-val" id="ad-map_valid_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">new_idxs</span><span class="analytics-detail-val" id="ad-new_idxs">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_delete_size</span><span class="analytics-detail-val" id="ad-map_delete_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">buffer_size</span><span class="analytics-detail-val" id="ad-buffer_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_buffer_size</span><span class="analytics-detail-val" id="ad-imu_buffer_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_time</span><span class="analytics-detail-val" id="ad-scan_time">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Feature Matching</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">num_feats</span><span class="analytics-detail-val" id="ad-num_feats">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">num_reject</span><span class="analytics-detail-val" id="ad-num_reject">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">match_ratio</span><span class="analytics-detail-val" id="ad-match_ratio">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Residual Statistics</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">res_mean</span><span class="analytics-detail-val" id="ad-res_mean">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">res_std</span><span class="analytics-detail-val" id="ad-res_std">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">IESEKF Optimization</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_iterations</span><span class="analytics-detail-val" id="ad-kf_iterations">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">pos_cov</span><span class="analytics-detail-val" id="ad-pos_cov">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">rot_cov</span><span class="analytics-detail-val" id="ad-rot_cov">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">IMU State Estimates</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">vel_norm</span><span class="analytics-detail-val" id="ad-vel_norm">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">acc_bias_norm</span><span class="analytics-detail-val" id="ad-acc_bias_norm">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">gyr_bias_norm</span><span class="analytics-detail-val" id="ad-gyr_bias_norm">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Time Sync Offsets</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lid_offset</span><span class="analytics-detail-val" id="ad-lid_offset">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_offset</span><span class="analytics-detail-val" id="ad-imu_offset">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Timing Breakdown</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">search_time</span><span class="analytics-detail-val" id="ad-search_time">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">delete_time</span><span class="analytics-detail-val" id="ad-delete_time">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Keyframe Info</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_count</span><span class="analytics-detail-val" id="ad-kf_count">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_dist_last</span><span class="analytics-detail-val" id="ad-kf_dist_last">—</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <div id="slam-save-map-status-area" class="status-banner" style="display:none; margin-bottom: 12px;">
                         <div style="display:flex; align-items:center; gap:10px;">
                             <span id="slam-save-map-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>

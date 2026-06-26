@@ -24,6 +24,11 @@ import time
 import socketserver
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
+try:
+    import psutil as _psutil
+except ImportError:
+    _psutil = None
+
 
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     """HTTP 서버: 요청마다 새 스레드로 처리해 저장 작업 중 폴링 응답 지연 제거"""
@@ -7319,7 +7324,17 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed_path = urlparse(self.path)
 
-        if parsed_path.path == '/api/slam/state':
+        if parsed_path.path == '/api/system/info':
+            total_ram_mb = 0
+            cpu_cores = 1
+            if _psutil is not None:
+                try:
+                    total_ram_mb = int(_psutil.virtual_memory().total / (1024 * 1024))
+                    cpu_cores = _psutil.cpu_count(logical=True) or 1
+                except Exception:
+                    pass
+            self.send_json_response({'total_ram_mb': total_ram_mb, 'cpu_cores': cpu_cores})
+        elif parsed_path.path == '/api/slam/state':
             self.send_json_response(self.node.get_slam_state())
         elif parsed_path.path == '/api/slam/save_map_status':
             self.send_json_response(self.node.get_save_map_status())
