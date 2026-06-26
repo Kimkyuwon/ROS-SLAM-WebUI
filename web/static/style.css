@@ -2745,6 +2745,31 @@ h3 {
     transform: scale(0.93);
 }
 
+/* 풀스크린 전용 토글 버튼 (기본 숨김, 풀스크린 진입 시에만 표시) */
+.slam-fs-toggle-btn {
+    display: none;
+}
+
+#slam-result-canvas-container:fullscreen .slam-fs-toggle-btn,
+#savemap-result-canvas-container:fullscreen .slam-fs-toggle-btn {
+    display: flex;
+}
+
+#slam-result-canvas-container:-webkit-full-screen .slam-fs-toggle-btn,
+#savemap-result-canvas-container:-webkit-full-screen .slam-fs-toggle-btn {
+    display: flex;
+}
+
+.slam-fs-toggle-btn.active {
+    background: rgba(74, 214, 255, 0.22);
+    border-color: rgba(74, 214, 255, 0.65);
+    color: #4ad6ff;
+}
+
+.slam-fs-toggle-btn.active:hover {
+    background: rgba(74, 214, 255, 0.35);
+}
+
 #slam-result-canvas-container:fullscreen,
 #savemap-result-canvas-container:fullscreen {
     border-radius: 0;

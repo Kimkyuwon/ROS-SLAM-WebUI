@@ -381,6 +381,7 @@ async function setOutput() {
 
 let _optPollTimer = null;
 let _optComplete = false;
+let _optRunning = false;
 
 function handleOptBtnClick() {
     if (_optComplete) {
@@ -391,6 +392,7 @@ function handleOptBtnClick() {
 }
 
 async function runOptimization() {
+    _optRunning = true;
     slamResultViewer.hideAndReset();
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = true;
@@ -400,6 +402,7 @@ async function runOptimization() {
         _showOptStatus('Starting optimization...', true);
         _startOptPolling();
     } else {
+        _optRunning = false;
         runBtn.disabled = false;
         alert('Failed to start optimization: ' + (result.message || result.status || 'Unknown error'));
     }
@@ -450,6 +453,7 @@ function _showOptSuccess() {
         area.style.transition = '';
     }, 620);
 
+    _optRunning = false;
     _optComplete = true;
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = false;
@@ -464,6 +468,7 @@ function _showOptError(message, autoHide = false) {
     const spinner = domCache.get('slam-opt-spinner');
     const cancelBtn = domCache.get('slam-opt-cancel-btn');
 
+    _optRunning = false;
     msgEl.textContent = message;
     spinner.style.display = 'none';
     cancelBtn.style.display = 'none';
@@ -551,6 +556,7 @@ async function exitOptimization() {
     clearTimeout(_optPollTimer);
     _optPollTimer = null;
 
+    _optRunning = false;
     updateSlamStatus('Optimization exited');
     slamResultViewer.hideAndReset();
     _resetOptBtn();
@@ -576,7 +582,8 @@ async function updateSlamState() {
         updateSlamStatus(state.status || 'Ready');
 
         // Show result viewer if optimization is already complete (e.g. on subtab re-entry)
-        if (state.status === 'Optimization complete!') {
+        // _optRunning이 true이면 최적화 진행 중 → 뷰어를 강제 복원하지 않음
+        if (!_optRunning && state.status === 'Optimization complete!') {
             const viewerEl = document.getElementById('slam-result-viewer');
             if (viewerEl && viewerEl.style.display === 'none') {
                 slamResultViewer.show();
@@ -5658,6 +5665,9 @@ class LocalizationLiveViewer {
         points.visible = this._layers[key];
 
         if (key === 'cloud_registered') {
+            // 스캔 클라우드는 맵 클라우드와 공간적으로 겹침 → z-파이팅 방지
+            // renderOrder=1로 맵(renderOrder=0)보다 나중에 그려 depth 우선권 부여
+            points.renderOrder = 1;
             this._cloudObj = points;
         } else {
             this._mapObj = points;
@@ -6161,9 +6171,21 @@ class SlamResultViewer {
         this._savedTarget = null;
         this._diffObjects = [];
         this._diffLoaded = false;
+        this._diffEnabled = false;  // 풀스크린 버튼 상태 동기화용
         this._diffPaths = null;
         this._layers = {};
         this._lcObjects = [];
+        // 탑뷰 yaw 회전(커스텀 roll) 상태
+        this._topViewYaw = 0;
+        this._yawDragging = false;
+        this._yawLastX = 0;
+
+        // EDL(Eye-Dome Lighting) 2-pass 렌더 파이프라인 상태
+        this._edlEnabled = false;
+        this._edlTarget = null;
+        this._edlScene = null;
+        this._edlQuad = null;
+        this._edlCamera = null;
     }
 
     _legendRow(name) {
@@ -6217,25 +6239,333 @@ class SlamResultViewer {
         this._controls = new window.OrbitControls(this._camera, this._renderer.domElement);
         this._controls.enableDamping = true;
         this._controls.dampingFactor = 0.1;
+        this._controls.zoomSpeed = 2.0;
+        // 좌: 회전 / 우·휠클릭: 이동(pan) / 휠 스크롤: 줌
+        this._controls.mouseButtons = {
+            LEFT: THREE.MOUSE.ROTATE,
+            MIDDLE: THREE.MOUSE.PAN,
+            RIGHT: THREE.MOUSE.PAN
+        };
 
         this._scene.add(new THREE.AxesHelper(5));
         this._initialized = true;
+        this._bindYawDrag();
         this._startRenderLoop();
+    }
+
+    /**
+     * 탑뷰에서 마우스 좌드래그 → yaw 회전(커스텀 roll) 핸들러 바인딩.
+     * 우드래그(pan)·휠클릭(pan)·휠(zoom)은 OrbitControls가 처리하고, 좌버튼만 전담한다.
+     */
+    _bindYawDrag() {
+        const dom = this._renderer ? this._renderer.domElement : null;
+        if (!dom) return;
+        const YAW_SENSITIVITY = 0.005; // rad/px
+
+        // OrbitControls가 pointerdown 시 캔버스에 pointer capture를 걸므로,
+        // 이후 pointermove는 window가 아닌 캔버스(dom)로 리타게팅된다.
+        // → window가 아닌 dom에 pointer 이벤트를 바인딩해야 yaw 드래그가 동작한다.
+        dom.addEventListener('pointerdown', (e) => {
+            if (!this._topView || e.button !== 0) return;
+            this._yawDragging = true;
+            this._yawLastX = e.clientX;
+        });
+        dom.addEventListener('pointermove', (e) => {
+            if (!this._yawDragging) return;
+            const dx = e.clientX - this._yawLastX;
+            this._topViewYaw += dx * YAW_SENSITIVITY;
+            this._yawLastX = e.clientX;
+        });
+        const endDrag = () => { this._yawDragging = false; };
+        dom.addEventListener('pointerup', endDrag);
+        dom.addEventListener('pointercancel', endDrag);
+        window.addEventListener('pointerup', endDrag);
     }
 
     _startRenderLoop() {
         const animate = () => {
             this._animFrameId = requestAnimationFrame(animate);
             if (this._controls) this._controls.update();
-            // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신
+            // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신 + yaw(roll) 적용
             if (this._topView && this._orthoCamera) {
                 this._updateOrthoPointSizes();
+                const THREE = window.THREE;
+                // 시선축(-Z) 기준으로 기준 up(0,1,0)을 yaw만큼 회전 → 화면 roll
+                const up = new THREE.Vector3(0, 1, 0).applyAxisAngle(
+                    new THREE.Vector3(0, 0, -1), this._topViewYaw);
+                this._orthoCamera.up.copy(up);
+                this._orthoCamera.lookAt(this._controls.target);
             }
             if (this._renderer && this._scene && this._camera) {
-                this._renderer.render(this._scene, this._camera);
+                if (this._edlEnabled) {
+                    this._renderEDL();
+                } else {
+                    this._renderer.render(this._scene, this._camera);
+                }
             }
         };
         animate();
+    }
+
+    /**
+     * EDL 렌더 타깃 및 풀스크린 쿼드를 최초 1회 생성한다.
+     *
+     * CloudCompare qEDL 플러그인(edl_shade.frag + edl_mix.frag) 알고리즘 충실 구현:
+     *  CloudCompare EDL(edl_shade.frag + ccEDLFilter.cpp) 완전 재현:
+     *  - fixDepth : NDC → 선형 깊이 → [Zm,ZM] 범위 정규화 → 반전(near=1, far=0)
+     *    · perspective: (2·near·far)/(far+near - z_ndc·(far-near)) 역변환
+     *    · orthographic: rawDepth·(far-near)+near  (선형 역변환)
+     *    · Zm/ZM = 씬 바운딩 박스 8코너를 카메라 공간 투영 → 실제 min/max 깊이
+     *  - computeObscurance : Znp = Zn - depth  (CC Light_dir=(0,0,1) 특수 경우)
+     *    화면 밖 이웃은 기여 0 (clamp 아닌 범위 체크 → 가장자리 아티팩트 방지)
+     *  - 3스케일(1x, 2x, 4x) 각각 계산 후 가중 평균 합성 (edl_mix: A0=1, A1=0.5, A2=0.25)
+     *  - Exp_scale(uStr) = 100.0, Dist_to_neighbor_pix = 2.0 (perspective) / 1.2 (ortho)
+     *  - 렌더 타깃을 devicePixelRatio 기반 물리 픽셀로 생성 (엣지 깨짐 방지)
+     */
+    _ensureEDL() {
+        if (this._edlTarget) return;
+        const THREE = window.THREE;
+        const container = document.getElementById(this._ids.container);
+        const cssW = container ? (container.clientWidth  || 600) : 600;
+        const cssH = container ? (container.clientHeight || 380) : 380;
+        // devicePixelRatio 적용: 실제 캔버스 물리 픽셀로 렌더 타깃 생성
+        // CSS 픽셀 크기로 만들면 dpr>1 환경에서 UV가 [0,1]을 초과 → 가장자리 깨짐 발생
+        const dpr   = this._renderer ? this._renderer.getPixelRatio() : 1;
+        const physW = Math.round(cssW * dpr);
+        const physH = Math.round(cssH * dpr);
+
+        // depthTexture 타입을 FloatType(32-bit)으로 지정:
+        //   기본 UnsignedShortType(16-bit)은 near=0.1/far=10000 구성에서
+        //   100m 거리의 0.3m LiDAR 포인트 간격이 0.25 LSB → 구분 불가 → EDL 대비 제로.
+        //   FloatType(32-bit)이면 같은 조건에서 약 60 LSB → 명확히 구분 가능.
+        const depthTex  = new THREE.DepthTexture(physW, physH);
+        depthTex.type   = THREE.FloatType;
+        this._edlTarget = new THREE.WebGLRenderTarget(physW, physH, {
+            minFilter:    THREE.NearestFilter,
+            magFilter:    THREE.NearestFilter,
+            format:       THREE.RGBAFormat,
+            depthBuffer:  true,
+            depthTexture: depthTex,
+        });
+
+        this._edlCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        this._edlScene  = new THREE.Scene();
+
+        const edlMat = new THREE.ShaderMaterial({
+            uniforms: {
+                uColor:       { value: this._edlTarget.texture },
+                uDepth:       { value: this._edlTarget.depthTexture },
+                uSx:          { value: physW },      // 물리 픽셀 너비
+                uSy:          { value: physH },      // 물리 픽셀 높이
+                uStr:         { value: 200.0 },      // CC Exp_scale (100 기본값 × 2 = 더 강한 대비)
+                uRadius:      { value: 3.0 },        // CC Dist_to_neighbor_pix (perspective 기본 3.0, ortho 1.2)
+                uCameraNear:  { value: 0.1 },        // 카메라 near (선형화용, 매 프레임 갱신)
+                uCameraFar:   { value: 10000.0 },    // 카메라 far  (선형화용, 매 프레임 갱신)
+                uZm:          { value: 1.0 },        // 씬 최소 선형 깊이 (정규화용, 매 프레임 갱신)
+                uZM:          { value: 100.0 },      // 씬 최대 선형 깊이 (정규화용, 매 프레임 갱신)
+                uPerspective: { value: 1.0 },        // 1.0=perspective, 0.0=orthographic
+                uA0:          { value: 1.0 },        // 1x 스케일 가중치 (CC A0)
+                uA1:          { value: 0.5 },        // 2x 스케일 가중치 (CC A1)
+                uA2:          { value: 0.25 },       // 4x 스케일 가중치 (CC A2)
+            },
+            vertexShader: /* glsl */`
+                void main() {
+                    gl_Position = vec4(position.xy, 0.0, 1.0);
+                }
+            `,
+            fragmentShader: /* glsl */`
+                precision highp float;
+
+                uniform sampler2D uColor;
+                uniform sampler2D uDepth;
+                uniform float uSx;
+                uniform float uSy;
+                uniform float uStr;
+                uniform float uRadius;
+                uniform float uCameraNear;
+                uniform float uCameraFar;
+                uniform float uZm;
+                uniform float uZM;
+                uniform float uPerspective;
+                uniform float uA0;
+                uniform float uA1;
+                uniform float uA2;
+
+                // CloudCompare edl_shade.frag 완전 재현
+                // fixDepth(): NDC 깊이 → 뷰-스페이스 거리(m) → [Zm,ZM] 정규화 → 반전
+                //   perspective : (2·near·far)/(far+near - z_ndc·(far-near))
+                //   orthographic: rawDepth·(far-near) + near  (Three.js 부호 규칙)
+                //   배경(rawDepth≥0.9999999)은 0 반환 → main()에서 원본 출력
+                //   임계값 근거: near=0.1, far=10000 기준 909m→rawDepth≈0.9999,
+                //   float DepthTexture 배경(cleared)=정확히 1.0이므로 0.9999999 사용.
+                //   0.9999 기준이면 909m 이상 지오메트리(diff 클라우드, 원거리 궤적)가
+                //   배경으로 오판정되어 EDL이 전혀 적용 안 됨.
+                float fixDepth(float rawDepth) {
+                    if (rawDepth >= 0.9999999) return 0.0;
+                    float d;
+                    if (uPerspective > 0.5) {
+                        // 원근 역변환: NDC → 양수 뷰-스페이스 거리(m)
+                        float z_ndc = rawDepth * 2.0 - 1.0;
+                        d = (2.0 * uCameraFar * uCameraNear)
+                          / (uCameraFar + uCameraNear - z_ndc * (uCameraFar - uCameraNear));
+                    } else {
+                        // 직교 역변환: rawDepth·(far-near)+near = -z_eye → 양수 거리
+                        // Three.js 카메라 Z 부호: 앞쪽 z_eye < 0, distance = -z_eye
+                        // = rawDepth·(far-near)+near  (near<0 포함 올바른 공식)
+                        d = rawDepth * (uCameraFar - uCameraNear) + uCameraNear;
+                    }
+                    // [Zm, ZM] 정규화 후 반전 (CC: clamp(1-depth, 0, 1))
+                    d = clamp((d - uZm) / max(uZM - uZm, 1e-4), 0.0, 1.0);
+                    return 1.0 - d;
+                }
+
+                // 이웃 한 방향의 obscurance 기여값 계산.
+                // CloudCompare Light_dir=(0,0,1) 특수 경우:
+                //   P = (0,0,1,-depth), Znp = dot((N_rel,Zn,1),P) = Zn - depth
+                // 화면 밖 이웃은 기여 0 (clamp 대신 범위 체크 → 가장자리 아티팩트 방지)
+                float neighborObs(vec2 uv, float depth, vec2 nRelPos, float scale) {
+                    vec2 nAbs = uv + nRelPos;
+                    if (nAbs.x < 0.0 || nAbs.x > 1.0 || nAbs.y < 0.0 || nAbs.y > 1.0)
+                        return 0.0;
+                    float Zn  = fixDepth(texture2D(uDepth, nAbs).r);
+                    return max(0.0, Zn - depth) / scale;
+                }
+
+                // CloudCompare computeObscurance: 8방향 이웃 합산
+                // Neigh_pos_2D[c] = (cos(c·π/4), sin(c·π/4)) for c=0..7
+                float computeObscurance(vec2 uv, float depth, float scale) {
+                    float px = scale * uRadius / uSx;
+                    float py = scale * uRadius / uSy;
+                    float d  = 0.7071;
+                    float s  = 0.0;
+                    s += neighborObs(uv, depth, vec2( px,    0.0 ), scale);
+                    s += neighborObs(uv, depth, vec2( d*px,  d*py), scale);
+                    s += neighborObs(uv, depth, vec2( 0.0,   py  ), scale);
+                    s += neighborObs(uv, depth, vec2(-d*px,  d*py), scale);
+                    s += neighborObs(uv, depth, vec2(-px,    0.0 ), scale);
+                    s += neighborObs(uv, depth, vec2(-d*px, -d*py), scale);
+                    s += neighborObs(uv, depth, vec2( 0.0,  -py  ), scale);
+                    s += neighborObs(uv, depth, vec2( d*px, -d*py), scale);
+                    return s;
+                }
+
+                void main() {
+                    vec2  uv       = gl_FragCoord.xy / vec2(uSx, uSy);
+                    vec4  color    = texture2D(uColor, uv);
+                    float rawDepth = texture2D(uDepth, uv).r;
+                    float depth    = fixDepth(rawDepth);
+
+                    // 배경 판정: rawDepth로 체크 (float DepthTexture cleared=1.0 정확)
+                    // 0.9999999 사용 → 909m 이상 지오메트리를 배경으로 오판정하던 버그 수정
+                    if (rawDepth >= 0.9999999) {
+                        gl_FragColor = vec4(color.rgb, 1.0);
+                        return;
+                    }
+
+                    // 3스케일 obscurance → 각 스케일에 CC Exp_scale 적용 → 가중 평균
+                    // CC edl_mix: C = (A0·C1 + A1·C2 + A2·C4) / (A0+A1+A2)
+                    float f1 = exp(-uStr * computeObscurance(uv, depth, 1.0));
+                    float f2 = exp(-uStr * computeObscurance(uv, depth, 2.0));
+                    float f4 = exp(-uStr * computeObscurance(uv, depth, 4.0));
+                    float totalW = uA0 + uA1 + uA2;
+                    float shade  = (uA0 * f1 + uA1 * f2 + uA2 * f4) / totalW;
+
+                    // 대비 강화: pow(shade, 2.0) → 중간 음영을 제곱으로 압축
+                    // shade=0.7 → 0.49, shade=0.5 → 0.25, shade=0.1 → 0.01
+                    shade = pow(clamp(shade, 0.0, 1.0), 2.0);
+
+                    // CC: gl_FragData[0] = vec4(shade * rgb, 1.0)
+                    gl_FragColor = vec4(color.rgb * shade, 1.0);
+                }
+            `,
+            depthTest:  false,
+            depthWrite: false,
+        });
+
+        this._edlQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), edlMat);
+        this._edlScene.add(this._edlQuad);
+    }
+
+    /**
+     * EDL 2-pass 렌더. CloudCompare ccEDLFilter::shade() 완전 재현.
+     * Pass1: 씬 → _edlTarget (color + depth)
+     * Pass2: EDL 풀스크린 쿼드 → 스크린
+     */
+    _renderEDL() {
+        if (!this._edlTarget || !this._edlScene || !this._edlCamera) return;
+        const renderer = this._renderer;
+        const u = this._edlQuad.material.uniforms;
+
+        // 카메라 타입: perspective vs orthographic
+        const isPerspective = this._camera.isPerspectiveCamera || false;
+        u.uPerspective.value = isPerspective ? 1.0 : 0.0;
+        // CC 기본값: perspective=3.0, ortho=1.2
+        u.uRadius.value = isPerspective ? 3.0 : 1.2;
+
+        // 카메라 near/far (깊이 선형화용)
+        u.uCameraNear.value = this._camera.near;
+        u.uCameraFar.value  = this._camera.far;
+
+        // Zm/ZM: 씬 구(sphere) 기반 깊이 범위 (뷰포인트 독립적, stale 없음)
+        //   bbox 8코너 방식은 카메라가 씬에 가깝거나 내부일 때 뒤쪽 코너가 제외되어
+        //   dMin=near(0.1), dMax=150m+ 처럼 range가 15배 이상 과대해져 대비가 소실됨.
+        //   구 방식(카메라-씬 중심 거리 ± 씬 반경)은 항상 안정적인 범위를 보장.
+        //   또한 matrixWorldInverse를 쓰지 않으므로 1프레임 lag 버그도 없음.
+        {
+            const { center, maxDim } = this._computeBounds();
+            const sceneRadius = Math.max(maxDim * 0.5, 1.0);
+            const camDist     = this._camera.position.distanceTo(center);
+            const zmRaw = camDist - sceneRadius;
+            const zMRaw = camDist + sceneRadius;
+            // near 아래로 내려가지 않도록 보정 (near가 음수인 ortho 포함)
+            const nearFloor = Math.max(0.01, this._camera.near);
+            const zm = Math.max(nearFloor, zmRaw);
+            const zM = Math.max(zm + 0.1, Math.min(this._camera.far, zMRaw));
+            u.uZm.value = zm;
+            u.uZM.value = zM;
+        }
+
+        // Pass 1: scene → off-screen render target
+        renderer.setRenderTarget(this._edlTarget);
+        renderer.render(this._scene, this._camera);
+
+        // Pass 2: EDL quad → screen
+        renderer.setRenderTarget(null);
+        renderer.render(this._edlScene, this._edlCamera);
+    }
+
+    /**
+     * EDL ON/OFF 토글. 최초 활성화 시 리소스를 생성한다.
+     * @param {boolean} enabled
+     */
+    setEDL(enabled) {
+        this._edlEnabled = enabled;
+        if (enabled) {
+            this._ensureEDL();
+        }
+        this._syncControlStates();
+    }
+
+    /**
+     * 헤더 체크박스와 풀스크린 오버레이 버튼 등 컨트롤 UI 상태를 현재 뷰어 상태와 동기화.
+     * 풀스크린 오버레이 버튼은 추후 Task 3에서 ids에 추가된 후 활성화된다.
+     */
+    _syncControlStates() {
+        const edlToggle = document.getElementById(this._ids.edlToggle);
+        if (edlToggle) edlToggle.checked = this._edlEnabled;
+
+        const topViewToggle = document.getElementById(this._ids.topViewToggle);
+        if (topViewToggle) topViewToggle.checked = this._topView;
+
+        // 풀스크린 오버레이 버튼 동기화 (DOM이 존재할 때만)
+        const fsEdlBtn = document.getElementById(this._ids.fsEdlBtn);
+        if (fsEdlBtn) fsEdlBtn.classList.toggle('active', this._edlEnabled);
+
+        const fsTopViewBtn = document.getElementById(this._ids.fsTopViewBtn);
+        if (fsTopViewBtn) fsTopViewBtn.classList.toggle('active', this._topView);
+
+        const fsDiffBtn = document.getElementById(this._ids.fsDiffBtn);
+        if (fsDiffBtn) fsDiffBtn.classList.toggle('active', this._diffEnabled);
     }
 
     /**
@@ -6327,14 +6657,21 @@ class SlamResultViewer {
             SlamResultViewer._circleTexture = new THREE.CanvasTexture(canvas);
         }
 
-        return new THREE.Points(geo, new THREE.PointsMaterial({
+        // renderOrder=2: PCD(0) → diff 클라우드(1) → trajectory(2) 순서로 렌더링
+        // depthTest: true(기본, LEQUAL) — diff(renderOrder=1)가 먼저 depth 기록,
+        //   trajectory(renderOrder=2)는 같은 깊이라도 LEQUAL(<=)로 통과 → 항상 diff 위에 표시
+        // transparent:true + depthWrite:true(기본) → EDL depth 텍스처 정상 기록
+        const pts = new THREE.Points(geo, new THREE.PointsMaterial({
             color,
             size: 16,
             sizeAttenuation: false,
             map: SlamResultViewer._circleTexture,
             alphaTest: 0.5,
             transparent: true,
+            // depthTest: true (기본, LEQUAL) → EDL 정확한 깊이 기록 + trajectory 항상 위에 표시
         }));
+        pts.renderOrder = 2;
+        return pts;
     }
 
     _posesToFlat(poses) {
@@ -6408,6 +6745,7 @@ class SlamResultViewer {
     // OrthographicCamera 기반 탑뷰: 완전 수직 XY 평면 투영(투시 왜곡 없음)
     _applyTopView() {
         const THREE = window.THREE;
+        this._topViewYaw = 0;
         const { center, maxDim } = this._computeBounds();
         const halfH = Math.max((maxDim * 0.5) * 0.55, 5);
 
@@ -6440,6 +6778,12 @@ class SlamResultViewer {
         this._controls.enablePan = true;
         this._controls.enableZoom = true;
         this._controls.panSpeed = 1.5;
+        // 좌버튼은 자체 yaw 핸들러가 전담 → OrbitControls는 좌버튼 무시. 우/휠클릭은 이동(pan)
+        this._controls.mouseButtons = {
+            LEFT: null,
+            MIDDLE: THREE.MOUSE.PAN,
+            RIGHT: THREE.MOUSE.PAN
+        };
         this._controls.update();
 
         this._camera = this._orthoCamera;
@@ -6509,8 +6853,15 @@ class SlamResultViewer {
             posesByKey[tl.pathKey] = poses;
             const flat = this._posesToFlat(poses);
             if (flat.length >= 3) {
-                const obj = tl.asNodes ? this._makeNodes(flat, tl.color) : this._makeLine(flat, tl.color);
-                this._addToScene(obj, tl.layer);
+                if (tl.asNodes) {
+                    this._addToScene(this._makeNodes(flat, tl.color), tl.layer);
+                } else {
+                    this._addToScene(this._makeLine(flat, tl.color), tl.layer);
+                    // 라인 + 노드(구) 동시 표시: 노드 색은 궤적 색과 동일, 크기는 라인과 구별
+                    if (tl.withNodes) {
+                        this._addToScene(this._makeNodes(flat, tl.color), tl.layer);
+                    }
+                }
             }
         }
 
@@ -6607,6 +6958,18 @@ class SlamResultViewer {
                 this._perspCamera.aspect = aspect;
                 this._perspCamera.updateProjectionMatrix();
             }
+            // EDL 렌더 타깃: devicePixelRatio 반영한 물리 픽셀 크기로 동기화
+            if (this._edlTarget) {
+                const dpr   = this._renderer.getPixelRatio();
+                const physW = Math.round(w * dpr);
+                const physH = Math.round(h * dpr);
+                this._edlTarget.setSize(physW, physH);
+                if (this._edlQuad) {
+                    const u = this._edlQuad.material.uniforms;
+                    u.uSx.value = physW;
+                    u.uSy.value = physH;
+                }
+            }
         }
     }
 
@@ -6627,6 +6990,9 @@ class SlamResultViewer {
     }
 
     _restoreOrbitControls() {
+        // 탑뷰 yaw(roll) 상태 초기화
+        this._topViewYaw = 0;
+        this._yawDragging = false;
         // PerspectiveCamera로 복귀 + PCD 머티리얼 sizeAttenuation(월드 크기) 복원
         if (this._perspCamera) {
             this._camera = this._perspCamera;
@@ -6644,12 +7010,14 @@ class SlamResultViewer {
         this._controls.enableRotate = true;
         this._controls.enablePan = true;
         this._controls.enableZoom = true;
-        this._controls.panSpeed = 1.0;
+        this._controls.panSpeed = 3.0;
+        this._controls.zoomSpeed = 2.0;
         this._controls.minPolarAngle = 0;
         this._controls.maxPolarAngle = Math.PI;
+        // 좌: 회전 / 우·휠클릭: 이동(pan) / 휠 스크롤: 줌
         this._controls.mouseButtons = {
             LEFT: window.THREE.MOUSE.ROTATE,
-            MIDDLE: window.THREE.MOUSE.DOLLY,
+            MIDDLE: window.THREE.MOUSE.PAN,
             RIGHT: window.THREE.MOUSE.PAN
         };
     }
@@ -6685,6 +7053,7 @@ class SlamResultViewer {
                 this._fitCamera();
             }
         }
+        this._syncControlStates();
     }
 
     togglePCDs(visible) {
@@ -6698,13 +7067,21 @@ class SlamResultViewer {
         if (!path) return;
         const points = await this._loadPCD(path);
         if (!points) return;
+        // Z-파이팅 방지: depthTest:false는 EDL depth 텍스처 기록을 방해하므로 사용하지 않음.
+        //   대신 renderOrder=1 + Three.js 기본 LEQUAL depth test 활용:
+        //   base PCD(renderOrder=0) 이후 렌더링 시 same_depth(50m) <= same_depth(50m) = true
+        //   → diff PCD가 항상 base PCD를 덮어써 z-파이팅 제거.
+        //   transparent:false(기본) → opaque 큐, depth 정상 기록 → EDL 정상 동작.
         points.material = new THREE.PointsMaterial({
             color,
             size: this._pcdPointSize * 1.2,
             sizeAttenuation: true,
             vertexColors: false,
+            // depthTest: true (기본, LEQUAL) — renderOrder=1로 base 이후 렌더링, 같은 깊이 LEQUAL 통과
+            // transparent: false (기본) — opaque 큐, EDL depth 텍스처 올바르게 기록
         });
         points.material._baseSize = this._pcdPointSize * 1.2;
+        points.renderOrder = 1;   // base 클라우드(renderOrder=0) 이후 렌더링
         this._scene.add(points);
         this._diffObjects.push(points);
         if (layerName) {
@@ -6714,6 +7091,7 @@ class SlamResultViewer {
     }
 
     async toggleDiffPCDs(enabled) {
+        this._diffEnabled = enabled;
         const diffLegend = document.getElementById(this._ids.diffLegend);
         if (enabled) {
             if (!this._diffLoaded) {
@@ -6747,6 +7125,7 @@ class SlamResultViewer {
             }
             if (diffLegend) diffLegend.style.display = 'none';
         }
+        this._syncControlStates();
     }
 
     _restoreDiffLayerVisuals() {
@@ -6768,6 +7147,7 @@ class SlamResultViewer {
         }
         this._diffObjects = [];
         this._diffLoaded = false;
+        this._diffEnabled = false;
         this._diffPaths = null;
         ['pd', 'nd', 'firstue', 'secondue'].forEach(k => delete this._layers[k]);
     }
@@ -6821,19 +7201,49 @@ class SlamResultViewer {
 
         const w = container.clientWidth;
         const h = container.clientHeight;
+        const sw = w * scale;
+        const sh = h * scale;
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         const filename = `slam_snapshot_${timestamp}.png`;
 
-        this._renderer.setSize(w * scale, h * scale);
-        this._camera.aspect = w / h;
-        this._camera.updateProjectionMatrix();
-        this._renderer.render(this._scene, this._camera);
+        this._renderer.setSize(sw, sh);
+        if (this._perspCamera) {
+            this._perspCamera.aspect = w / h;
+            this._perspCamera.updateProjectionMatrix();
+        }
+
+        if (this._edlEnabled && this._edlTarget) {
+            // EDL ON: 고해상도 타깃으로 확장 후 2-pass 렌더
+            this._edlTarget.setSize(sw, sh);
+            if (this._edlQuad) {
+                const u = this._edlQuad.material.uniforms;
+                u.uSx.value = sw;
+                u.uSy.value = sh;
+            }
+            this._renderEDL();
+        } else {
+            this._renderer.render(this._scene, this._camera);
+        }
 
         const canvas = this._renderer.domElement;
         canvas.toBlob((blob) => {
+            // 원래 해상도로 복원
             this._renderer.setSize(w, h);
-            this._camera.aspect = w / h;
-            this._camera.updateProjectionMatrix();
+            if (this._perspCamera) {
+                this._perspCamera.aspect = w / h;
+                this._perspCamera.updateProjectionMatrix();
+            }
+            if (this._edlTarget) {
+                const dpr   = this._renderer.getPixelRatio();
+                const physW = Math.round(w * dpr);
+                const physH = Math.round(h * dpr);
+                this._edlTarget.setSize(physW, physH);
+                if (this._edlQuad) {
+                    const u = this._edlQuad.material.uniforms;
+                    u.uSx.value = physW;
+                    u.uSy.value = physH;
+                }
+            }
 
             if (!blob) return;
             const url = URL.createObjectURL(blob);
@@ -6854,6 +7264,8 @@ class SlamResultViewer {
         this._clearScene();
         this._resetAllLegendRows();
         this._topView = false;
+        this._topViewYaw = 0;
+        this._yawDragging = false;
         this._savedCameraPos = null;
         this._savedCameraUp = null;
         this._savedTarget = null;
@@ -6874,6 +7286,9 @@ class SlamResultViewer {
             const label = document.getElementById(this._ids.pointSizeLabel);
             if (label) label.textContent = '0.05 m';
         }
+        // EDL 상태 초기화 (리소스는 재사용을 위해 보존)
+        this._edlEnabled = false;
+        this._syncControlStates();
     }
 }
 
@@ -6885,6 +7300,10 @@ const slamResultViewer = new SlamResultViewer({
         container: 'slam-result-canvas-container',
         loading: 'slam-result-loading',
         topViewToggle: 'slam-viewer-topview-toggle',
+        edlToggle: 'slam-viewer-edl-toggle',
+        fsTopViewBtn: 'slam-fs-topview-btn',
+        fsEdlBtn: 'slam-fs-edl-btn',
+        fsDiffBtn: 'slam-fs-diff-btn',
         pointSizeSlider: 'slam-point-size-slider',
         pointSizeLabel: 'slam-point-size-label',
         diffToggle: 'slam-viewer-diff-toggle',
@@ -6922,6 +7341,10 @@ function toggleSlamDiff(checked) {
     slamResultViewer.toggleDiffPCDs(checked);
 }
 
+function toggleSlamEDL(checked) {
+    slamResultViewer.setEDL(checked);
+}
+
 function setSlamPointSize(size) {
     slamResultViewer.setPointSize(size);
 }
@@ -6944,6 +7367,9 @@ const saveMapResultViewer = new SlamResultViewer({
         container: 'savemap-result-canvas-container',
         loading: 'savemap-result-loading',
         topViewToggle: 'savemap-viewer-topview-toggle',
+        edlToggle: 'savemap-viewer-edl-toggle',
+        fsTopViewBtn: 'savemap-fs-topview-btn',
+        fsEdlBtn: 'savemap-fs-edl-btn',
         pointSizeSlider: 'savemap-point-size-slider',
         pointSizeLabel: 'savemap-point-size-label',
     },
@@ -6954,8 +7380,8 @@ const saveMapResultViewer = new SlamResultViewer({
             { pathKey: 'static_map_pcd', color: 0x44ff88, layer: 'static' },
         ],
         trajLayers: [
-            { pathKey: 'lio_poses', color: 0xff8800, layer: 'lio', asNodes: false },
-            { pathKey: 'pgo_poses', color: 0xffffff, layer: 'pgo', asNodes: false },
+            { pathKey: 'lio_poses', color: 0xff8800, layer: 'lio', asNodes: false, withNodes: true },
+            { pathKey: 'pgo_poses', color: 0xffffff, layer: 'pgo', asNodes: false, withNodes: true },
         ],
         edges: { pathKey: 'edges', posesFromKey: 'pgo_poses', color: 0x2288ff },
     },
@@ -6967,6 +7393,10 @@ function resetSaveMapResultView() {
 
 function toggleSaveMapTopView(checked) {
     saveMapResultViewer.toggleTopView(checked);
+}
+
+function toggleSaveMapEDL(checked) {
+    saveMapResultViewer.setEDL(checked);
 }
 
 function toggleSaveMapLayer(name) {
@@ -7057,8 +7487,14 @@ document.addEventListener('fullscreenchange', () => {
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
-    if (slamResultViewer) slamResultViewer._resizeRenderer();
-    if (saveMapResultViewer) saveMapResultViewer._resizeRenderer();
+    if (slamResultViewer) {
+        slamResultViewer._resizeRenderer();
+        slamResultViewer._syncControlStates();
+    }
+    if (saveMapResultViewer) {
+        saveMapResultViewer._resizeRenderer();
+        saveMapResultViewer._syncControlStates();
+    }
     if (locLiveViewer) locLiveViewer._resizeRenderer();
     if (typeof onWindowResize === 'function') onWindowResize();
 });
@@ -7071,8 +7507,14 @@ document.addEventListener('webkitfullscreenchange', () => {
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
-    if (slamResultViewer) slamResultViewer._resizeRenderer();
-    if (saveMapResultViewer) saveMapResultViewer._resizeRenderer();
+    if (slamResultViewer) {
+        slamResultViewer._resizeRenderer();
+        slamResultViewer._syncControlStates();
+    }
+    if (saveMapResultViewer) {
+        saveMapResultViewer._resizeRenderer();
+        saveMapResultViewer._syncControlStates();
+    }
     if (locLiveViewer) locLiveViewer._resizeRenderer();
     if (typeof onWindowResize === 'function') onWindowResize();
 });
