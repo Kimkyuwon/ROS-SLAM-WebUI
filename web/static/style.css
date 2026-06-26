@@ -2915,3 +2915,181 @@ h3 {
     height: 10px;
     width: 10px;
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Phase 4.10 — SLAM Analytics Dashboard
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── 대쉬보드 헤더 ─── */
+.analytics-dashboard-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #2d2d4e;
+}
+.analytics-dashboard-title {
+    font-size: 14px;
+    color: #7ecff4;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.analytics-live-badge {
+    background: #e94560;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    animation: analytics-pulse 1.5s infinite;
+}
+@keyframes analytics-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+/* ─── 그리드 레이아웃 ─── */
+.analytics-grid { display: grid; gap: 10px; margin-bottom: 10px; }
+.analytics-row-top    { grid-template-columns: repeat(4, 1fr); }
+.analytics-row-middle { grid-template-columns: 1fr 1fr; }
+.analytics-row-bottom { grid-template-columns: 1fr; margin-bottom: 0; }
+
+/* ─── 카드 공통 ─── */
+.analytics-card {
+    background: #13132a;
+    border: 1px solid #2d2d4e;
+    border-radius: 8px;
+    padding: 12px 14px;
+    position: relative;
+    overflow: hidden; /* Plotly SVG overlay가 카드 밖으로 넘쳐 토글 버튼을 덮는 것 방지 */
+}
+.analytics-card-title {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #7ecff4;
+    margin-bottom: 10px;
+}
+.analytics-card-subtitle {
+    font-size: 9px;
+    color: #556;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    margin-left: 6px;
+}
+
+/* ─── Hz 카드 ─── */
+.analytics-hz-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
+.analytics-hz-item { text-align: center; padding: 8px 4px; background: #1a1a35; border-radius: 6px; }
+.analytics-hz-label { font-size: 10px; color: #8899aa; margin-bottom: 4px; }
+.analytics-hz-value { font-size: 22px; font-weight: 700; line-height: 1; }
+.analytics-hz-unit  { font-size: 10px; color: #8899aa; margin-top: 2px; }
+.analytics-hz-ok   { color: #00d26a; }
+.analytics-hz-warn { color: #ffd32a; }
+.analytics-hz-err  { color: #e94560; }
+
+/* ─── Traj 카드 ─── */
+.analytics-traj-grid { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.analytics-traj-item {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 6px 10px; background: #1a1a35; border-radius: 6px;
+}
+.analytics-traj-label { font-size: 10px; color: #8899aa; }
+.analytics-traj-value { font-size: 18px; font-weight: 700; color: #f9ca24; }
+.analytics-traj-unit  { font-size: 10px; color: #8899aa; margin-left: 3px; }
+.analytics-traj-time  { font-size: 14px; font-weight: 600; color: #c8d6e5; }
+.analytics-traj-derived { font-size: 13px; font-weight: 600; color: #a29bfe; }
+
+/* ─── CPU 게이지 카드 ─── */
+.analytics-cpu-wrap { margin-top: 4px; }
+.analytics-cpu-top-row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+.analytics-cpu-percent { font-size: 24px; font-weight: 700; color: #ffd32a; }
+.analytics-cpu-pct-sym { font-size: 11px; color: #8899aa; }
+.analytics-cpu-cores-equiv { font-size: 11px; color: #8899aa; text-align: right; line-height: 1.5; }
+.analytics-cpu-bar-bg {
+    height: 14px; background: #1a1a35; border-radius: 7px; overflow: hidden; margin-bottom: 6px;
+}
+.analytics-cpu-bar-fill {
+    height: 100%; border-radius: 7px;
+    background: linear-gradient(90deg, #00d26a 0%, #ffd32a 60%, #e94560 100%);
+    transition: width 0.4s;
+}
+.analytics-cpu-ticks {
+    display: flex; justify-content: space-between; font-size: 9px; color: #8899aa; margin-top: 3px;
+}
+
+/* ─── 플롯 컨테이너 ─── */
+.analytics-plot-container { height: 180px; position: relative; }
+
+/* ─── Cumulative 테이블 ─── */
+.analytics-cumul-table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.analytics-cumul-table th {
+    font-size: 10px; color: #556; font-weight: 600; text-align: left;
+    padding: 4px 8px; border-bottom: 1px solid #2d2d4e;
+}
+.analytics-right { text-align: right !important; }
+.analytics-cumul-table td { font-size: 12px; padding: 5px 8px; border-bottom: 1px solid #1e1e38; }
+.analytics-cumul-table tr:hover td { background: #1a1a35; }
+.analytics-cumul-row-label { color: #c8d6e5; font-weight: 500; }
+.analytics-cumul-mean { color: #7ecff4; font-weight: 600; }
+.analytics-cumul-max  { color: #e94560; font-weight: 600; }
+
+/* ─── 상세 토글 ─── */
+.analytics-detail-toggle-bar {
+    margin-top: 10px;
+    background: #13132a;
+    border: 1px solid #2d2d4e;
+    border-radius: 8px;
+    overflow: hidden;
+    position: relative;
+    z-index: 2; /* Plotly 오버레이보다 위에 렌더링 */
+}
+.analytics-detail-toggle-btn {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 16px;
+    background: none;
+    border: none;
+    color: #7ecff4;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    box-sizing: border-box;
+    text-align: left;
+}
+.analytics-detail-toggle-btn:hover { background: #1a1a35; }
+/* CSS ::after로 화살표 표시 — span 분리로 인한 hit-area 문제 제거 */
+.analytics-detail-toggle-btn::after {
+    content: '▼';
+    font-size: 11px;
+    flex-shrink: 0;
+    margin-left: 8px;
+    transition: transform 0.2s;
+    display: inline-block;
+}
+.analytics-detail-toggle-btn.open::after { transform: rotate(180deg); }
+.analytics-detail-section {
+    display: none; padding: 0 16px 12px; border-top: 1px solid #2d2d4e;
+}
+.analytics-detail-section.open { display: block; }
+.analytics-detail-cat-title {
+    font-size: 10px; color: #7ecff4; font-weight: 700; letter-spacing: 0.8px;
+    text-transform: uppercase; margin: 10px 0 6px;
+}
+.analytics-detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+.analytics-detail-item {
+    display: flex; justify-content: space-between;
+    padding: 4px 8px; background: #1a1a35; border-radius: 4px;
+}
+.analytics-detail-field { font-size: 10px; color: #8899aa; }
+.analytics-detail-val {
+    font-size: 10px; color: #c8d6e5; font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* 소화면 대응 */
+@media (max-width: 1280px) {
+    .analytics-row-top { grid-template-columns: repeat(2, 1fr); }
+}
