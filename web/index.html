@@ -43,25 +43,26 @@
                 <div class="section card">
                     <h2>LiDAR SLAM</h2>
 
-                    <!-- Config Parameters Display -->
-                    <div id="slam-config-container" style="display: none;">
-                        <div style="display: flex; align-items: center; justify-content: center; position: relative;">
-                            <h3 style="text-align: center;">SLAM Configuration Parameters</h3>
-                            <button id="slam-config-toggle-btn" class="collapse-toggle-btn" onclick="toggleSlamConfig()" style="position: absolute; right: 0;">▲</button>
-                        </div>
-                        <div class="separator"></div>
-                        <div id="slam-config-parameters">
-                            <!-- Parameters will be dynamically loaded here -->
-                        </div>
-                        <div class="separator"></div>
-                    </div>
-
                     <div class="bag-control-buttons" style="margin-bottom: 15px;">
                         <button onclick="loadSlamConfig()">Config Load</button>
                         <button id="slam-save-button" onclick="saveSlamConfig()">Set Config File</button>
                         <button id="slam-save-map-button" onclick="saveSlamMap()">Save Map</button>
                         <button id="slam-start-button" onclick="startSlamMapping()">Start SLAM</button>
                         <button id="slam-stop-button" onclick="stopSlamMapping()">Stop SLAM</button>
+                    </div>
+
+                    <!-- Config Parameters Display -->
+                    <div id="slam-config-container" class="cfg-panel" style="display: none;">
+                        <div class="cfg-header" onclick="toggleSlamConfig()">
+                            <div class="cfg-header-left">
+                                <span class="cfg-header-title">SLAM Configuration Parameters</span>
+                                <span class="cfg-header-badge" id="slam-cfg-file-badge"></span>
+                            </div>
+                            <span id="slam-config-toggle-btn" class="cfg-toggle-arrow">▼</span>
+                        </div>
+                        <div id="slam-config-parameters" class="cfg-body">
+                            <!-- Parameters will be dynamically loaded here -->
+                        </div>
                     </div>
 
                     <!-- SLAM Analytics Dashboard (Phase 4.10) -->
@@ -185,6 +186,11 @@
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">imu_buffer_size</span><span class="analytics-detail-val" id="ad-imu_buffer_size">—</span></div>
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">scan_time</span><span class="analytics-detail-val" id="ad-scan_time">—</span></div>
                                 </div>
+                                <div class="analytics-detail-cat-title">Adaptive Downsampling Parameters</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">filter_size_surf_ad</span><span class="analytics-detail-val" id="ad-filter_size_surf_ad">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">point_filter_num_ad</span><span class="analytics-detail-val" id="ad-point_filter_num_ad">—</span></div>
+                                </div>
                                 <div class="analytics-detail-cat-title">Feature Matching</div>
                                 <div class="analytics-detail-grid">
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">num_feats</span><span class="analytics-detail-val" id="ad-num_feats">—</span></div>
@@ -201,6 +207,7 @@
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">kf_iterations</span><span class="analytics-detail-val" id="ad-kf_iterations">—</span></div>
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">pos_cov</span><span class="analytics-detail-val" id="ad-pos_cov">—</span></div>
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">rot_cov</span><span class="analytics-detail-val" id="ad-rot_cov">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lidar_meas_cov</span><span class="analytics-detail-val" id="ad-lidar_meas_cov">—</span></div>
                                 </div>
                                 <div class="analytics-detail-cat-title">IMU State Estimates</div>
                                 <div class="analytics-detail-grid">
@@ -300,19 +307,6 @@
                 <div class="section card">
                     <h2>Localization</h2>
 
-                    <!-- Config Parameters Display -->
-                    <div id="localization-config-container" style="display: none;">
-                        <div style="display: flex; align-items: center; justify-content: center; position: relative;">
-                            <h3 style="text-align: center;">Localization Configuration Parameters</h3>
-                            <button id="localization-config-toggle-btn" class="collapse-toggle-btn" onclick="toggleLocalizationConfig()" style="position: absolute; right: 0;">▲</button>
-                        </div>
-                        <div class="separator"></div>
-                        <div id="localization-config-parameters">
-                            <!-- Parameters will be dynamically loaded here -->
-                        </div>
-                        <div class="separator"></div>
-                    </div>
-
                     <div class="bag-control-buttons" style="margin-bottom: 15px;">
                         <button onclick="loadLocalizationConfig()">Config Load</button>
                         <button id="localization-save-button" onclick="saveLocalizationConfig()">Set Config File</button>
@@ -320,105 +314,280 @@
                         <button id="localization-stop-button" onclick="stopLocalizationMapping()">Stop Localization</button>
                     </div>
 
+                    <!-- Config Parameters Display -->
+                    <div id="localization-config-container" class="cfg-panel" style="display: none;">
+                        <div class="cfg-header" onclick="toggleLocalizationConfig()">
+                            <div class="cfg-header-left">
+                                <span class="cfg-header-title">Localization Configuration Parameters</span>
+                                <span class="cfg-header-badge" id="localization-cfg-file-badge"></span>
+                            </div>
+                            <span id="localization-config-toggle-btn" class="cfg-toggle-arrow">▼</span>
+                        </div>
+                        <div id="localization-config-parameters" class="cfg-body">
+                            <!-- Parameters will be dynamically loaded here -->
+                        </div>
+                    </div>
+
+                    <!-- Localization Live Viewer -->
+                    <div id="localization-live-viewer" style="display:none;">
+                        <div class="slam-viewer-header">
+                            <label class="slam-viewer-toggle">
+                                <input type="checkbox" id="loc-viewer-topview-toggle"
+                                       onchange="toggleLocTopView(this.checked)" />
+                                <span>Top View</span>
+                            </label>
+                            <button onclick="resetLocViewer()" class="small-button">Reset View</button>
+                        </div>
+                        <div class="loc-live-viewer-layout">
+                        <div class="loc-viewer-canvas-panel">
+                            <div id="loc-viewer-canvas-container">
+                                <canvas id="loc-viewer-canvas"></canvas>
+                                <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
+                                <div id="loc-viewer-actions">
+                                    <button class="slam-action-btn loc-fs-toggle-btn" id="loc-fs-topview-btn"
+                                            onclick="toggleLocTopView(!locLiveViewer._topView)" title="Top View">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <circle cx="12" cy="12" r="3"/>
+                                            <line x1="12" y1="2" x2="12" y2="6"/>
+                                            <line x1="12" y1="18" x2="12" y2="22"/>
+                                            <line x1="2" y1="12" x2="6" y2="12"/>
+                                            <line x1="18" y1="12" x2="22" y2="12"/>
+                                        </svg>
+                                    </button>
+                                    <button class="slam-action-btn" id="loc-snapshot-btn"
+                                            onclick="takeLocSnapshot()" title="스냅샷 저장">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                                            <circle cx="12" cy="13" r="4"/>
+                                        </svg>
+                                    </button>
+                                    <button class="slam-action-btn" id="loc-fullscreen-btn"
+                                            onclick="toggleLocViewerFullscreen()" title="풀스크린">
+                                        <svg id="loc-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="15 3 21 3 21 9"/>
+                                            <polyline points="9 21 3 21 3 15"/>
+                                            <line x1="21" y1="3" x2="14" y2="10"/>
+                                            <line x1="3" y1="21" x2="10" y2="14"/>
+                                        </svg>
+                                        <svg id="loc-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+                                            <polyline points="4 14 10 14 10 20"/>
+                                            <polyline points="20 10 14 10 14 4"/>
+                                            <line x1="10" y1="14" x2="3" y2="21"/>
+                                            <line x1="21" y1="3" x2="14" y2="10"/>
+                                        </svg>
+                                    </button>
+                                </div><!-- /loc-viewer-actions -->
+                            </div><!-- /loc-viewer-canvas-container -->
+                        </div><!-- /loc-viewer-canvas-panel -->
+                    </div><!-- /loc-live-viewer-layout -->
+                    </div><!-- /localization-live-viewer -->
+
+                    <!-- Localization Analytics Dashboard -->
+                    <div id="loc-analytics-dashboard" style="display:none; margin-top: 12px;">
+                        <div class="analytics-dashboard-header">
+                            <h3 class="analytics-dashboard-title">Localization Analytics Dashboard</h3>
+                            <span class="analytics-live-badge">● LIVE</span>
+                            <span class="loc-init-badge" id="loc-header-init-badge">— Not Init</span>
+                        </div>
+
+                        <!-- Row 1: Hz / Traj / CPU / RAM -->
+                        <div class="analytics-grid analytics-row-top">
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">Sensor Frequency</div>
+                                <div class="analytics-hz-grid">
+                                    <div class="analytics-hz-item">
+                                        <div class="analytics-hz-label">IMU</div>
+                                        <div class="analytics-hz-value analytics-hz-ok" id="loc-analytics-imu-hz">—</div>
+                                        <div class="analytics-hz-unit">Hz</div>
+                                    </div>
+                                    <div class="analytics-hz-item">
+                                        <div class="analytics-hz-label">LiDAR</div>
+                                        <div class="analytics-hz-value analytics-hz-ok" id="loc-analytics-lid-hz">—</div>
+                                        <div class="analytics-hz-unit">Hz</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">Trajectory</div>
+                                <div class="analytics-traj-grid">
+                                    <div class="analytics-traj-item">
+                                        <span class="analytics-traj-label">Distance</span>
+                                        <span><span class="analytics-traj-value" id="loc-analytics-traj-dist">—</span><span class="analytics-traj-unit">m</span></span>
+                                    </div>
+                                    <div class="analytics-traj-item">
+                                        <span class="analytics-traj-label">Uptime</span>
+                                        <span class="analytics-traj-time" id="loc-analytics-run-time">—</span>
+                                    </div>
+                                    <div class="analytics-traj-item">
+                                        <span class="analytics-traj-label">Avg Speed</span>
+                                        <span><span class="analytics-traj-derived" id="loc-analytics-avg-speed">—</span><span class="analytics-traj-unit">m/s</span></span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">CPU Usage</div>
+                                <div class="analytics-cpu-wrap">
+                                    <div class="analytics-cpu-top-row">
+                                        <span class="analytics-cpu-percent" id="loc-analytics-cpu-percent">—<span class="analytics-cpu-pct-sym"> cores</span></span>
+                                        <span class="analytics-cpu-cores-equiv" id="loc-analytics-cpu-cores-equiv"></span>
+                                    </div>
+                                    <div class="analytics-cpu-bar-bg">
+                                        <div class="analytics-cpu-bar-fill" id="loc-analytics-cpu-bar-fill" style="width:0%"></div>
+                                    </div>
+                                    <div class="analytics-cpu-ticks">
+                                        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">RAM Usage</div>
+                                <div id="loc-analytics-chart-ram" style="height:130px;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Row 2: ProcTime / DOP + Map Update Rug -->
+                        <div class="analytics-grid analytics-row-middle">
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">Per-frame Processing Time
+                                    <span class="analytics-card-subtitle">last 10s — stacked area</span>
+                                </div>
+                                <div id="loc-analytics-chart-proctime" class="analytics-plot-container"></div>
+                            </div>
+
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">Geometry Quality (DOP) &amp; Map Updates
+                                    <span class="analytics-card-subtitle">scan · matching · update rug</span>
+                                </div>
+                                <div id="loc-analytics-chart-dop" style="height:130px; position:relative;"></div>
+
+                                <!-- Map Update Rug (Localization 전용) -->
+                                <div class="loc-map-rug-section">
+                                    <div class="loc-map-rug-label">
+                                        <span>Map Update Events — last 200 frames</span>
+                                        <div class="loc-map-rug-label-right">
+                                            <span class="loc-map-update-count">Updates: <span id="loc-map-update-count">0</span></span>
+                                            <span class="loc-dop-ratio-val">ratio: <span id="loc-dop-ratio-val">—</span></span>
+                                        </div>
+                                    </div>
+                                    <div class="loc-map-rug-track">
+                                        <canvas id="loc-rug-canvas" class="loc-map-rug-canvas"></canvas>
+                                    </div>
+                                    <div class="loc-map-update-meta">
+                                        <div class="loc-map-update-dot" id="loc-map-update-dot"></div>
+                                        <span class="loc-map-last-badge">Last update: <span id="loc-map-update-last">—</span></span>
+                                        <span class="loc-init-status-dot" id="loc-init-status-dot">— Not Init</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Row 3: Cumulative Timing -->
+                        <div class="analytics-grid analytics-row-bottom">
+                            <div class="analytics-card">
+                                <div class="analytics-card-title">Cumulative Timing Statistics
+                                    <span class="analytics-card-subtitle">Mean / Max — imu · state · map · total</span>
+                                </div>
+                                <table class="analytics-cumul-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Component</th>
+                                            <th class="analytics-right">Mean (ms)</th>
+                                            <th class="analytics-right">Max (ms)</th>
+                                            <th style="width:180px;">Mean / Max bar</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="loc-analytics-cumul-tbody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Detail toggle -->
+                        <div class="analytics-detail-toggle-bar">
+                            <button class="analytics-detail-toggle-btn" id="loc-analytics-detail-toggle" onclick="toggleLocAnalyticsDetail()">
+                                Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · DOP · Loc Status · Odometry …)
+                            </button>
+                            <div class="analytics-detail-section" id="loc-analytics-detail">
+                                <div class="analytics-detail-cat-title">Scan / Map Statistics</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_size</span><span class="analytics-detail-val" id="lad-scan_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">down_size</span><span class="analytics-detail-val" id="lad-down_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_size</span><span class="analytics-detail-val" id="lad-map_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_valid_size</span><span class="analytics-detail-val" id="lad-map_valid_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">new_idxs</span><span class="analytics-detail-val" id="lad-new_idxs">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">buffer_size</span><span class="analytics-detail-val" id="lad-buffer_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_buffer_size</span><span class="analytics-detail-val" id="lad-imu_buffer_size">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_time</span><span class="analytics-detail-val" id="lad-scan_time">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Adaptive Downsampling Parameters</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">filter_size_surf_ad</span><span class="analytics-detail-val" id="lad-filter_size_surf_ad">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">point_filter_num_ad</span><span class="analytics-detail-val" id="lad-point_filter_num_ad">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Feature Matching</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">num_feats</span><span class="analytics-detail-val" id="lad-num_feats">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">num_reject</span><span class="analytics-detail-val" id="lad-num_reject">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">match_ratio</span><span class="analytics-detail-val" id="lad-match_ratio">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Residual Statistics</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">res_mean</span><span class="analytics-detail-val" id="lad-res_mean">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">res_std</span><span class="analytics-detail-val" id="lad-res_std">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">IESEKF Optimization</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">pos_cov</span><span class="analytics-detail-val" id="lad-pos_cov">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">rot_cov</span><span class="analytics-detail-val" id="lad-rot_cov">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lidar_meas_cov</span><span class="analytics-detail-val" id="lad-lidar_meas_cov">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Geometry Quality (DOP)</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_dop</span><span class="analytics-detail-val" id="lad-scan_dop">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">down_dop</span><span class="analytics-detail-val" id="lad-down_dop">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">matching_dop</span><span class="analytics-detail-val" id="lad-matching_dop">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">dop_ratio</span><span class="analytics-detail-val" id="lad-dop_ratio">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">IMU State Estimates</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">vel_norm</span><span class="analytics-detail-val" id="lad-vel_norm">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">acc_bias_norm</span><span class="analytics-detail-val" id="lad-acc_bias_norm">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">gyr_bias_norm</span><span class="analytics-detail-val" id="lad-gyr_bias_norm">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Time Sync Offsets</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lid_offset</span><span class="analytics-detail-val" id="lad-lid_offset">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_offset</span><span class="analytics-detail-val" id="lad-imu_offset">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Keyframe Info</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_count</span><span class="analytics-detail-val" id="lad-kf_count">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_dist_last</span><span class="analytics-detail-val" id="lad-kf_dist_last">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Localization Status</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">is_initialized</span><span class="analytics-detail-val" id="lad-is_initialized">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_updated</span><span class="analytics-detail-val" id="lad-map_updated">—</span></div>
+                                </div>
+                                <div class="analytics-detail-cat-title">Wheel Odometry</div>
+                                <div class="analytics-detail-grid">
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">linear_velo</span><span class="analytics-detail-val" id="lad-linear_velo">—</span></div>
+                                    <div class="analytics-detail-item"><span class="analytics-detail-field">angular_velo</span><span class="analytics-detail-val" id="lad-angular_velo">—</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div><!-- /loc-analytics-dashboard -->
+
                     <div class="separator"></div>
 
                     <div class="status">
                         <label id="localization-status">Status: Ready</label>
                     </div>
 
-                </div>
-
-                <!-- Localization Live Viewer -->
-                <div id="localization-live-viewer" style="display:none;">
-                    <div class="slam-viewer-header">
-                        <label class="slam-viewer-toggle">
-                            <input type="checkbox" id="loc-viewer-topview-toggle"
-                                   onchange="toggleLocTopView(this.checked)" />
-                            <span>Top View</span>
-                        </label>
-                        <button onclick="resetLocViewer()" class="small-button">Reset View</button>
-                    </div>
-                    <div class="loc-live-viewer-layout">
-                        <!-- 왼쪽: Display 패널 -->
-                        <div id="loc-display-panel" class="viewer-display-panel">
-                            <div class="viewer-display-panel-header views-panel-header">
-                                <h3>Displays</h3>
-                            </div>
-                            <div id="loc-display-panel-body" class="viewer-display-panel-body">
-                                <!-- Fixed Frame -->
-                                <div class="fixed-frame-row">
-                                    <label class="fixed-frame-label">Fixed Frame:</label>
-                                    <div class="fixed-frame-combo" id="loc-fixed-frame-combo">
-                                        <input id="loc-fixed-frame-input" class="fixed-frame-input"
-                                               value="odom"
-                                               onfocus="onLocFixedFrameFocus()"
-                                               oninput="onLocFixedFrameInput(this.value)"
-                                               onblur="onLocFixedFrameBlur(event)" />
-                                        <button class="fixed-frame-dropdown-btn"
-                                                onclick="toggleLocFixedFrameDropdown()">▾</button>
-                                        <div id="loc-fixed-frame-dropdown"
-                                             class="fixed-frame-dropdown" style="display:none;"></div>
-                                    </div>
-                                </div>
-                                <!-- 토픽 체크박스 5종 -->
-                                <div class="loc-display-check-item">
-                                    <input type="checkbox" id="loc-chk-cloud" checked
-                                           onchange="toggleLocLayer('cloud_registered')" />
-                                    <span class="loc-color-dot" style="background:#44aaff;"></span>
-                                    <span>/cloud_registered</span>
-                                    <small>PointCloud2</small>
-                                </div>
-                                <div class="loc-display-check-item">
-                                    <input type="checkbox" id="loc-chk-lasermap" checked
-                                           onchange="toggleLocLayer('laser_map')" />
-                                    <span class="loc-color-dot" style="background:#88ff44;"></span>
-                                    <span>/Laser_map</span>
-                                    <small>PointCloud2</small>
-                                </div>
-                                <div class="loc-display-check-item">
-                                    <input type="checkbox" id="loc-chk-path" checked
-                                           onchange="toggleLocLayer('path')" />
-                                    <span class="loc-color-dot" style="background:#25ff00;"></span>
-                                    <span>/path</span>
-                                    <small>Path</small>
-                                </div>
-                                <div class="loc-display-check-item">
-                                    <input type="checkbox" id="loc-chk-tf" checked
-                                           onchange="toggleLocLayer('tf')" />
-                                    <span class="loc-color-dot" style="background:#ffcc00;"></span>
-                                    <span>/tf</span>
-                                    <small>TF</small>
-                                </div>
-                                <div class="loc-display-check-item">
-                                    <input type="checkbox" id="loc-chk-map" checked
-                                           onchange="toggleLocLayer('map')" />
-                                    <span class="loc-color-dot" style="background:#aaaaaa;"></span>
-                                    <span>/map</span>
-                                    <small>OccupancyGrid</small>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- 오른쪽: Three.js 캔버스 -->
-                        <div class="loc-viewer-canvas-panel">
-                            <div id="loc-viewer-canvas-container">
-                                <canvas id="loc-viewer-canvas"></canvas>
-                                <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
-                                <div id="loc-viewer-actions">
-                                    <button class="slam-action-btn" id="loc-fullscreen-btn"
-                                            onclick="toggleLocViewerFullscreen()" title="풀스크린">
-                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                            <polyline points="15 3 21 3 21 9"/>
-                                            <polyline points="9 21 3 21 3 15"/>
-                                            <line x1="21" y1="3" x2="14" y2="10"/>
-                                            <line x1="3" y1="21" x2="10" y2="14"/>
-                                        </svg>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+                </div><!-- /section card -->
+            </div><!-- /localization-subtab -->
 
             <!-- Multi-Session SLAM Sub-Tab -->
             <div id="multi-session-slam-subtab" class="subtab-content">
