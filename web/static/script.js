@@ -2363,14 +2363,15 @@ class ConfigManager {
                 // Show config container
                 domCache.get(this.containerIds.container).style.display = 'block';
 
-                // Set initial collapsed state
+                // 파일명 배지 업데이트
+                this._updateFileBadge(this.defaultPath);
+
+                // 초기 상태: collapsed
                 const parametersDiv = domCache.get(this.containerIds.parameters);
                 const toggleBtn = domCache.get(this.containerIds.toggleBtn);
-                const separators = document.querySelectorAll(`#${this.containerIds.container} .separator`);
-
                 parametersDiv.style.display = 'none';
-                separators.forEach(sep => sep.style.display = 'none');
-                toggleBtn.textContent = '▼';
+                toggleBtn.classList.remove('open');
+                this.collapsed = true;
             } else {
                 console.error(`Failed to load default ${this.name} config:`, result.message);
             }
@@ -2396,8 +2397,16 @@ class ConfigManager {
                 this.data = result.config;
                 this.display();
 
-                // Show config container
+                // Show config container & 파일명 배지 업데이트
                 domCache.get(this.containerIds.container).style.display = 'block';
+                this._updateFileBadge(path);
+
+                // 새로 로드 시 펼침 상태로
+                const parametersDiv = domCache.get(this.containerIds.parameters);
+                const toggleBtn = domCache.get(this.containerIds.toggleBtn);
+                parametersDiv.style.display = '';
+                toggleBtn.classList.add('open');
+                this.collapsed = false;
             } else {
                 alert('Failed to load config file: ' + (result.message || 'Unknown error'));
             }
@@ -2484,131 +2493,149 @@ class ConfigManager {
         Object.keys(this.data).forEach(key => {
             const value = this.data[key];
             if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-                // This is a nested group
                 nestedGroups.push({ key, data: value });
             } else {
-                // This is a top-level parameter
                 topLevelParams.push({ key, value });
             }
         });
 
-        // Display top-level parameters first
-        if (topLevelParams.length > 0) {
-            const groupHeader = document.createElement('h4');
-            groupHeader.textContent = 'General';
-            groupHeader.style.marginTop = '20px';
-            groupHeader.style.marginBottom = '10px';
-            groupHeader.style.color = '#4a9eff';
-            container.appendChild(groupHeader);
+        const makeGroupCard = (title, params, keyPrefix) => {
+            const card = document.createElement('div');
+            card.className = 'cfg-group';
 
-            topLevelParams.forEach(param => {
-                this.createParameterInput(container, param.key, param.value, param.key);
+            const titleEl = document.createElement('div');
+            titleEl.className = 'cfg-group-title';
+            titleEl.textContent = title;
+            card.appendChild(titleEl);
+
+            const grid = document.createElement('div');
+            grid.className = 'cfg-group-grid';
+            card.appendChild(grid);
+
+            params.forEach(({ key, value, fullKey }) => {
+                this.createParameterInput(grid, key, value, fullKey);
             });
+
+            container.appendChild(card);
+        };
+
+        if (topLevelParams.length > 0) {
+            makeGroupCard('General', topLevelParams.map(p => ({
+                key: p.key, value: p.value, fullKey: p.key
+            })));
         }
 
-        // Display nested groups
         nestedGroups.forEach(group => {
-            const groupHeader = document.createElement('h4');
-            // Convert snake_case to Title Case
-            const title = group.key.split('_').map(word =>
-                word.charAt(0).toUpperCase() + word.slice(1)
+            const title = group.key.split('_').map(w =>
+                w.charAt(0).toUpperCase() + w.slice(1)
             ).join(' ');
-            groupHeader.textContent = title;
-            groupHeader.style.marginTop = '20px';
-            groupHeader.style.marginBottom = '10px';
-            groupHeader.style.color = '#4a9eff';
-            container.appendChild(groupHeader);
-
-            Object.keys(group.data).forEach(key => {
-                const value = group.data[key];
-                const fullKey = `${group.key}.${key}`;
-                this.createParameterInput(container, key, value, fullKey);
-            });
+            const params = Object.keys(group.data).map(key => ({
+                key,
+                value: group.data[key],
+                fullKey: `${group.key}.${key}`
+            }));
+            makeGroupCard(title, params);
         });
     }
 
-    createParameterInput(container, label, value, fullKey) {
-        const formGroup = document.createElement('div');
-        formGroup.className = 'form-group';
-        formGroup.style.display = 'grid';
-        formGroup.style.gridTemplateColumns = '200px 1fr';
-        formGroup.style.alignItems = 'center';
-        formGroup.style.marginBottom = '8px';
+    createParameterInput(grid, label, value, fullKey) {
+        const row = document.createElement('div');
+        row.className = 'cfg-param-row';
 
-        const labelElement = document.createElement('label');
-        labelElement.textContent = label + ':';
-        labelElement.style.fontSize = '0.9em';
-        formGroup.appendChild(labelElement);
+        // Array 타입은 2열 전체 사용
+        const isArray = Array.isArray(value);
+        const isWide = isArray || typeof value === 'string';
+        if (isWide) row.classList.add('cfg-span2');
 
-        let inputElement;
+        const labelEl = document.createElement('span');
+        labelEl.className = 'cfg-param-label';
+        labelEl.textContent = label;
+        row.appendChild(labelEl);
 
-        // Handle different value types
         if (typeof value === 'boolean') {
-            const checkboxContainer = document.createElement('div');
-            checkboxContainer.style.textAlign = 'right';
-            checkboxContainer.style.paddingRight = '10px';
+            // 토글 스위치
+            const wrap = document.createElement('div');
+            wrap.className = 'cfg-toggle-wrap';
 
-            inputElement = document.createElement('input');
-            inputElement.type = 'checkbox';
-            inputElement.checked = value;
-            inputElement.id = `${this.name}-param-${fullKey}`;
-            inputElement.dataset.configKey = fullKey;
-            inputElement.dataset.valueType = 'boolean';
-            inputElement.onchange = () => this.updateValue(fullKey, inputElement.checked);
+            const sw = document.createElement('label');
+            sw.className = 'cfg-switch';
 
-            checkboxContainer.appendChild(inputElement);
-            formGroup.appendChild(checkboxContainer);
-            container.appendChild(formGroup);
-            return;
-        } else if (Array.isArray(value)) {
-            inputElement = document.createElement('input');
-            inputElement.type = 'text';
-            // Keep original number precision (don't round)
-            const formattedValue = value.map(v => String(v));
-            inputElement.value = '[' + formattedValue.join(', ') + ']';
-            inputElement.id = `${this.name}-param-${fullKey}`;
-            inputElement.dataset.configKey = fullKey;
-            inputElement.dataset.valueType = 'array';
-            inputElement.style.width = '100%';
-            inputElement.onchange = () => {
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = value;
+            cb.id = `${this.name}-param-${fullKey}`;
+            cb.dataset.configKey = fullKey;
+            cb.dataset.valueType = 'boolean';
+
+            const slider = document.createElement('span');
+            slider.className = 'cfg-switch-slider';
+
+            const valLabel = document.createElement('span');
+            valLabel.className = 'cfg-switch-val' + (value ? ' cfg-val-on' : '');
+            valLabel.textContent = value ? 'true' : 'false';
+
+            cb.onchange = () => {
+                valLabel.textContent = cb.checked ? 'true' : 'false';
+                valLabel.className = 'cfg-switch-val' + (cb.checked ? ' cfg-val-on' : '');
+                this.updateValue(fullKey, cb.checked);
+            };
+
+            sw.appendChild(cb);
+            sw.appendChild(slider);
+            wrap.appendChild(sw);
+            wrap.appendChild(valLabel);
+            row.appendChild(wrap);
+
+        } else if (isArray) {
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.className = 'cfg-param-input cfg-input-wide';
+            inp.value = '[' + value.map(v => String(v)).join(', ') + ']';
+            inp.id = `${this.name}-param-${fullKey}`;
+            inp.dataset.configKey = fullKey;
+            inp.dataset.valueType = 'array';
+            inp.onchange = () => {
                 try {
-                    // Parse the input, removing spaces for flexibility
-                    const cleanedInput = inputElement.value.replace(/\s/g, '');
-                    const parsedValue = JSON.parse(cleanedInput);
-                    this.updateValue(fullKey, parsedValue);
+                    const parsed = JSON.parse(inp.value.replace(/\s/g, ''));
+                    this.updateValue(fullKey, parsed);
                 } catch (e) {
                     alert('Invalid array format. Use format: [1.0, 0.0, 0.0]');
                 }
             };
+            row.appendChild(inp);
+
         } else if (typeof value === 'number') {
-            inputElement = document.createElement('input');
-            inputElement.type = 'number';
-            inputElement.value = value;
-            inputElement.id = `${this.name}-param-${fullKey}`;
-            inputElement.step = 'any';  // Allow any decimal precision
-            inputElement.dataset.configKey = fullKey;
-            inputElement.dataset.valueType = 'number';
-            inputElement.style.width = '100%';
-            inputElement.onchange = () => {
-                const numValue = parseFloat(inputElement.value);
-                this.updateValue(fullKey, numValue);
-            };
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.className = 'cfg-param-input';
+            inp.value = value;
+            inp.step = 'any';
+            inp.id = `${this.name}-param-${fullKey}`;
+            inp.dataset.configKey = fullKey;
+            inp.dataset.valueType = 'number';
+            inp.onchange = () => this.updateValue(fullKey, parseFloat(inp.value));
+            row.appendChild(inp);
+
         } else if (typeof value === 'string') {
-            inputElement = document.createElement('input');
-            inputElement.type = 'text';
-            inputElement.value = value;
-            inputElement.id = `${this.name}-param-${fullKey}`;
-            inputElement.dataset.configKey = fullKey;
-            inputElement.dataset.valueType = 'string';
-            inputElement.style.width = '100%';
-            inputElement.onchange = () => this.updateValue(fullKey, inputElement.value);
+            const inp = document.createElement('input');
+            inp.type = 'text';
+            inp.className = 'cfg-param-input cfg-input-wide';
+            inp.value = value;
+            inp.id = `${this.name}-param-${fullKey}`;
+            inp.dataset.configKey = fullKey;
+            inp.dataset.valueType = 'string';
+            inp.onchange = () => this.updateValue(fullKey, inp.value);
+            row.appendChild(inp);
+
         } else {
-            inputElement = document.createElement('span');
-            inputElement.textContent = String(value);
+            const span = document.createElement('span');
+            span.className = 'cfg-param-label';
+            span.style.color = '#c8cfe8';
+            span.textContent = String(value);
+            row.appendChild(span);
         }
 
-        formGroup.appendChild(inputElement);
-        container.appendChild(formGroup);
+        grid.appendChild(row);
     }
 
     updateValue(key, value, notifyBackend = true) {
@@ -2634,21 +2661,27 @@ class ConfigManager {
     toggle() {
         const parametersDiv = domCache.get(this.containerIds.parameters);
         const toggleBtn = domCache.get(this.containerIds.toggleBtn);
-        const separators = document.querySelectorAll(`#${this.containerIds.container} .separator`);
 
         this.collapsed = !this.collapsed;
 
         if (this.collapsed) {
-            // Collapse
             parametersDiv.style.display = 'none';
-            separators.forEach(sep => sep.style.display = 'none');
-            toggleBtn.textContent = '▼';
+            toggleBtn.classList.remove('open');
         } else {
-            // Expand
-            parametersDiv.style.display = 'block';
-            separators.forEach(sep => sep.style.display = 'block');
-            toggleBtn.textContent = '▲';
+            parametersDiv.style.display = '';
+            toggleBtn.classList.add('open');
         }
+    }
+
+    _updateFileBadge(filePath) {
+        const badgeId = this.containerIds.fileBadge;
+        if (!badgeId) return;
+        const badge = document.getElementById(badgeId);
+        if (!badge) return;
+        // 파일명만 추출 (경로 제거)
+        const filename = filePath ? filePath.split('/').pop() : '';
+        badge.textContent = filename;
+        badge.style.display = filename ? '' : 'none';
     }
 }
 
@@ -2661,7 +2694,8 @@ const slamConfig = new ConfigManager(
     {
         parameters: 'slam-config-parameters',
         container: 'slam-config-container',
-        toggleBtn: 'slam-config-toggle-btn'
+        toggleBtn: 'slam-config-toggle-btn',
+        fileBadge: 'slam-cfg-file-badge'
     },
     {
         loadConfig: '/api/slam/load_config_file',
@@ -2676,7 +2710,8 @@ const localizationConfig = new ConfigManager(
     {
         parameters: 'localization-config-parameters',
         container: 'localization-config-container',
-        toggleBtn: 'localization-config-toggle-btn'
+        toggleBtn: 'localization-config-toggle-btn',
+        fileBadge: 'localization-cfg-file-badge'
     },
     {
         loadConfig: '/api/slam/load_config_file',
@@ -2951,6 +2986,12 @@ async function startSlamMapping() {
     if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
         saveMapResultViewer.hideAndReset();
     }
+    // Config 패널 숨기기 (Stop 시 복원용으로 상태 저장)
+    const _cfgEl = document.getElementById('slam-config-container');
+    if (_cfgEl) {
+        window._slamConfigVisibleBeforeStart = (_cfgEl.style.display !== 'none');
+        _cfgEl.style.display = 'none';
+    }
     // Immediately update status to Running
     updateLidarSlamStatus('Running');
     // Phase 4.10: 대쉬보드 표시 + 구독 시작
@@ -2979,6 +3020,12 @@ async function stopSlamMapping() {
     if (typeof slamAnalyticsDashboard !== 'undefined') {
         slamAnalyticsDashboard.hide();
         slamAnalyticsDashboard.unsubscribe();
+    }
+    // Start 전에 Config 패널이 열려 있었으면 복원
+    const _cfgEl = document.getElementById('slam-config-container');
+    if (_cfgEl && window._slamConfigVisibleBeforeStart) {
+        _cfgEl.style.display = '';
+        window._slamConfigVisibleBeforeStart = false;
     }
     // Immediately update status to Stopping
     updateLidarSlamStatus('Stopping...');
@@ -3063,12 +3110,20 @@ async function updateLocalizationState() {
 // Localization Start/Stop (terminal output removed)
 // ==============================================================
 async function startLocalizationMapping() {
+    // Config 패널 숨기기 (Stop 시 복원용으로 상태 저장)
+    const _cfgEl = document.getElementById('localization-config-container');
+    if (_cfgEl) {
+        window._locConfigVisibleBeforeStart = (_cfgEl.style.display !== 'none');
+        _cfgEl.style.display = 'none';
+    }
     updateLocalizationStatus('Running');
-    
+
     const result = await apiCall('/api/localization/start_mapping', {});
     if (result.success) {
         console.log('Localization mapping started');
         locLiveViewer.show();
+        locAnalyticsDashboard.show();
+        locAnalyticsDashboard.subscribe();
     } else {
         alert('Failed to start Localization mapping: ' + (result.message || 'Unknown error'));
         console.error('Failed to start Localization mapping');
@@ -3077,12 +3132,20 @@ async function startLocalizationMapping() {
 }
 
 async function stopLocalizationMapping() {
+    // Start 전에 Config 패널이 열려 있었으면 복원
+    const _cfgEl = document.getElementById('localization-config-container');
+    if (_cfgEl && window._locConfigVisibleBeforeStart) {
+        _cfgEl.style.display = '';
+        window._locConfigVisibleBeforeStart = false;
+    }
     updateLocalizationStatus('Stopping...');
-    
+
     console.log('Stopping Localization mapping...');
     const result = await apiCall('/api/localization/stop_mapping', {});
 
     locLiveViewer.hide();
+    locAnalyticsDashboard.hide();
+    locAnalyticsDashboard.unsubscribe();
 
     if (result.success) {
         console.log('Localization mapping stopped');
@@ -5318,13 +5381,7 @@ class LocalizationLiveViewer {
         this._tfObjects = {};
         this._mapMesh = null;
         this._mapTexture = null;
-        this._layers = {
-            cloud_registered: true,
-            laser_map: true,
-            path: true,
-            tf: true,
-            map: true
-        };
+        // 레이어 가시성은 메시지 수신 시 자동으로 활성화 (수동 체크박스 제거)
         this._fixedFrame = 'odom';
         this._topView = false;
         this._savedCameraPos = null;
@@ -5677,7 +5734,7 @@ class LocalizationLiveViewer {
             mat.size = Math.max(1, pointSize * scale);
         }
         const points = new THREE.Points(geo, mat);
-        points.visible = this._layers[key];
+        points.visible = true;
 
         if (key === 'cloud_registered') {
             // 스캔 클라우드는 맵 클라우드와 공간적으로 겹침 → z-파이팅 방지
@@ -5843,7 +5900,7 @@ class LocalizationLiveViewer {
             const geo = new THREE.TubeGeometry(curve, segments, 0.08, 5, false);
             const mat = new THREE.MeshBasicMaterial({ color: 0x00ff44, side: THREE.DoubleSide });
             this._pathObj = new THREE.Mesh(geo, mat);
-            this._pathObj.visible = this._layers.path;
+            this._pathObj.visible = true;
             this._scene.add(this._pathObj);
         });
         this._subscriptions.push(t);
@@ -5873,7 +5930,7 @@ class LocalizationLiveViewer {
                     const group = new THREE.Group();
                     group.add(new THREE.AxesHelper(0.5));
                     this._tfObjects[childId] = { group };
-                    group.visible = this._layers.tf;
+                    group.visible = true;
                     this._scene.add(group);
                 }
 
@@ -5958,29 +6015,12 @@ class LocalizationLiveViewer {
                 origin.position.y + height * resolution / 2,
                 0
             );
-            this._mapMesh.visible = this._layers.map;
+            this._mapMesh.visible = true;
             this._scene.add(this._mapMesh);
         });
         this._subscriptions.push(t);
     }
 
-    toggleLayer(key) {
-        this._layers[key] = !this._layers[key];
-        const visible = this._layers[key];
-        if (key === 'cloud_registered' && this._cloudObj) {
-            this._cloudObj.visible = visible;
-        } else if (key === 'laser_map' && this._mapObj) {
-            this._mapObj.visible = visible;
-        } else if (key === 'path' && this._pathObj) {
-            this._pathObj.visible = visible;
-        } else if (key === 'tf') {
-            for (const entry of Object.values(this._tfObjects)) {
-                if (entry && entry.group) entry.group.visible = visible;
-            }
-        } else if (key === 'map' && this._mapMesh) {
-            this._mapMesh.visible = visible;
-        }
-    }
 
     resetView() {
         if (!this._camera || !this._controls) return;
@@ -6091,6 +6131,12 @@ class LocalizationLiveViewer {
             }
             this._controls.update();
         }
+
+        // header 체크박스 + fullscreen 버튼 active 상태 동기화
+        const headerToggle = document.getElementById('loc-viewer-topview-toggle');
+        if (headerToggle) headerToggle.checked = enable;
+        const fsBtn = document.getElementById('loc-fs-topview-btn');
+        if (fsBtn) fsBtn.classList.toggle('active', enable);
     }
 
     toggleFullscreen() {
@@ -6102,6 +6148,41 @@ class LocalizationLiveViewer {
         } else {
             (container.requestFullscreen || container.webkitRequestFullscreen).call(container);
         }
+    }
+
+    takeSnapshot(scale = 2) {
+        if (!this._renderer || !this._scene || !this._camera) return;
+        const container = document.getElementById('loc-viewer-canvas-container');
+        if (!container) return;
+
+        const w = container.clientWidth;
+        const h = container.clientHeight;
+        const sw = w * scale;
+        const sh = h * scale;
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const filename = `loc_snapshot_${timestamp}.png`;
+
+        this._renderer.setSize(sw, sh);
+        if (this._perspCamera) {
+            this._perspCamera.aspect = w / h;
+            this._perspCamera.updateProjectionMatrix();
+        }
+
+        this._renderer.render(this._scene, this._camera);
+
+        const canvas = this._renderer.domElement;
+        const link = document.createElement('a');
+        link.href = canvas.toDataURL('image/png');
+        link.download = filename;
+        link.click();
+
+        // 원래 크기 복원
+        this._renderer.setSize(w, h);
+        if (this._perspCamera) {
+            this._perspCamera.aspect = w / h;
+            this._perspCamera.updateProjectionMatrix();
+        }
+        this._renderer.render(this._scene, this._camera);
     }
 
     _updateFixedFrameDropdown() {
@@ -7451,12 +7532,19 @@ const locLiveViewer = new LocalizationLiveViewer();
 
 function resetLocViewer()              { locLiveViewer.resetView(); }
 function toggleLocTopView(checked)     { locLiveViewer.toggleTopView(checked); }
-function toggleLocLayer(key)           { locLiveViewer.toggleLayer(key); }
 function toggleLocViewerFullscreen()   { locLiveViewer.toggleFullscreen(); }
+function takeLocSnapshot()             { locLiveViewer.takeSnapshot(2); }
 function onLocFixedFrameFocus()        { locLiveViewer.onFixedFrameFocus(); }
 function onLocFixedFrameInput(value)   { locLiveViewer.onFixedFrameInput(value); }
 function onLocFixedFrameBlur(event)    { locLiveViewer.onFixedFrameBlur(event); }
 function toggleLocFixedFrameDropdown() { locLiveViewer.toggleFixedFrameDropdown(); }
+
+function _updateLocFullscreenIcon(isFullscreen) {
+    const expand   = document.getElementById('loc-fullscreen-icon-expand');
+    const collapse = document.getElementById('loc-fullscreen-icon-collapse');
+    if (expand)   expand.style.display   = isFullscreen ? 'none' : '';
+    if (collapse) collapse.style.display = isFullscreen ? '' : 'none';
+}
 
 function toggleSlamFullscreen() {
     const container = document.getElementById('slam-result-canvas-container');
@@ -7496,12 +7584,14 @@ function _updateViewerFullscreenIcon(isFullscreen) {
 
 document.addEventListener('fullscreenchange', () => {
     const isFullscreen = !!document.fullscreenElement;
-    const isSlamFullscreen = isFullscreen && document.fullscreenElement?.id === 'slam-result-canvas-container';
+    const isSlamFullscreen    = isFullscreen && document.fullscreenElement?.id === 'slam-result-canvas-container';
     const isSaveMapFullscreen = isFullscreen && document.fullscreenElement?.id === 'savemap-result-canvas-container';
-    const isViewerFullscreen = isFullscreen && document.fullscreenElement?.id === '3d-viewer-container';
+    const isViewerFullscreen  = isFullscreen && document.fullscreenElement?.id === '3d-viewer-container';
+    const isLocFullscreen     = isFullscreen && document.fullscreenElement?.id === 'loc-viewer-canvas-container';
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
+    _updateLocFullscreenIcon(isLocFullscreen);
     if (slamResultViewer) {
         slamResultViewer._resizeRenderer();
         slamResultViewer._syncControlStates();
@@ -7516,12 +7606,14 @@ document.addEventListener('fullscreenchange', () => {
 
 document.addEventListener('webkitfullscreenchange', () => {
     const isFullscreen = !!document.webkitFullscreenElement;
-    const isSlamFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'slam-result-canvas-container';
+    const isSlamFullscreen    = isFullscreen && document.webkitFullscreenElement?.id === 'slam-result-canvas-container';
     const isSaveMapFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'savemap-result-canvas-container';
-    const isViewerFullscreen = isFullscreen && document.webkitFullscreenElement?.id === '3d-viewer-container';
+    const isViewerFullscreen  = isFullscreen && document.webkitFullscreenElement?.id === '3d-viewer-container';
+    const isLocFullscreen     = isFullscreen && document.webkitFullscreenElement?.id === 'loc-viewer-canvas-container';
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
+    _updateLocFullscreenIcon(isLocFullscreen);
     if (slamResultViewer) {
         slamResultViewer._resizeRenderer();
         slamResultViewer._syncControlStates();
@@ -8099,6 +8191,9 @@ class SlamAnalyticsDashboard {
             ['buffer_size', (v) => `${v}`],
             ['imu_buffer_size', (v) => `${v}`],
             ['scan_time', (v) => `${v.toFixed(4)} s`],
+            // Adaptive Downsampling Parameters
+            ['filter_size_surf_ad', (v) => `${v.toFixed(3)} m`],
+            ['point_filter_num_ad', (v) => `${v}`],
             ['num_feats', (v) => `${v.toLocaleString()}`],
             ['num_reject', (v) => `${v.toLocaleString()}`],
             ['match_ratio', (v) => `${v.toFixed(4)}`],
@@ -8107,6 +8202,7 @@ class SlamAnalyticsDashboard {
             ['kf_iterations', (v) => `${v}`],
             ['pos_cov', (v) => `${v.toExponential(3)}`],
             ['rot_cov', (v) => `${v.toExponential(3)}`],
+            ['lidar_meas_cov', (v) => `${v.toExponential(3)}`],
             ['vel_norm', (v) => `${v.toFixed(3)} m/s`],
             ['acc_bias_norm', (v) => `${v.toFixed(4)}`],
             ['gyr_bias_norm', (v) => `${v.toFixed(5)}`],
@@ -8187,4 +8283,446 @@ function toggleSlamAnalyticsDetail() {
     btn.textContent = isOpen
         ? 'Collapse Statistics'
         : 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)';
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// LocAnalyticsDashboard — Localization Analytics Dashboard
+// ══════════════════════════════════════════════════════════════════════
+class LocAnalyticsDashboard {
+    constructor() {
+        this._ros          = null;
+        this._subscription = null;
+        this._plotsInit    = false;
+        this._WINDOW_SEC   = 10;
+        this._sysInfo      = {};
+        this._rugHistory   = new Array(200).fill(false);
+        this._rugCanvas    = null;
+        this._updateCount  = 0;
+        this._lastUpdateMs = null;
+        this._fetchSysInfo();
+    }
+
+    async _fetchSysInfo() {
+        try {
+            const r = await fetch('/api/system/info');
+            this._sysInfo = await r.json();
+        } catch (e) { /* ignore */ }
+    }
+
+    show() {
+        const el = document.getElementById('loc-analytics-dashboard');
+        if (el) el.style.display = 'block';
+        this._ensurePlotsInit();
+        this._initRug();
+    }
+
+    hide() {
+        const el = document.getElementById('loc-analytics-dashboard');
+        if (el) el.style.display = 'none';
+    }
+
+    subscribe() {
+        if (this._subscription) return;
+        if (window.plotState && plotState.ros && plotState.ros.isConnected) {
+            this._ros = plotState.ros;
+            this._doSubscribe();
+        } else {
+            try {
+                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros.on('connection', () => this._doSubscribe());
+                this._ros.on('error', (e) => console.error('[LocAnalytics] rosbridge error:', e));
+                this._ros.on('close', ()  => console.warn('[LocAnalytics] rosbridge closed'));
+            } catch (e) {
+                console.error('[LocAnalytics] failed to init rosbridge:', e);
+            }
+        }
+    }
+
+    _doSubscribe() {
+        if (this._subscription || !this._ros) return;
+        this._subscription = new ROSLIB.Topic({
+            ros: this._ros,
+            name: '/loc_analytics',
+            messageType: 'fast_lio/msg/LocAnalytics',
+            queue_length: 1
+        });
+        this._subscription.subscribe((msg) => this._onMessage(msg));
+        console.log('[LocAnalytics] subscribed to /loc_analytics');
+    }
+
+    unsubscribe() {
+        if (this._subscription) {
+            this._subscription.unsubscribe();
+            this._subscription = null;
+        }
+        if (this._ros && this._ros !== (window.plotState && plotState.ros)) {
+            try { this._ros.close(); } catch (e) { /* ignore */ }
+        }
+        this._ros = null;
+        this._resetWidgets();
+    }
+
+    _onMessage(msg) {
+        this._ensurePlotsInit();
+        this._updateWidgets(msg);
+    }
+
+    _ensurePlotsInit() {
+        if (this._plotsInit) return;
+        this._plotsInit = true;
+        this._initProcTimePlot();
+        this._initDopPlot();
+        this._initRamPlot(0, this._sysInfo.total_ram_mb || 32768);
+        this._resetCumulTable();
+    }
+
+    // ── Plotly 초기화 (SLAM과 동일 스펙) ────────────────────────
+    _initProcTimePlot() {
+        const layout = {
+            paper_bgcolor: 'transparent', plot_bgcolor: 'rgba(13,13,26,0.5)',
+            margin: { t: 4, b: 30, l: 42, r: 8 },
+            xaxis: { showgrid:false, color:'#556', tickfont:{size:9,color:'#556'}, nticks:5, type:'date' },
+            yaxis: { gridcolor:'#2d2d4e', color:'#556', tickfont:{size:9,color:'#8899aa'}, title:{text:'ms',font:{size:10,color:'#556'}} },
+            legend: { orientation:'h', y:-0.22, x:0, font:{size:9,color:'#c8d6e5'}, bgcolor:'transparent' },
+            hovermode: 'x unified',
+            hoverlabel: { bgcolor:'#1a1a35', bordercolor:'#4a4a6e', font:{color:'#e8f0fe',size:11}, align:'left' }
+        };
+        Plotly.newPlot('loc-analytics-chart-proctime', [
+            { x:[], y:[], name:'IMU Undistort',    type:'scatter', mode:'lines', fill:'tozeroy',  fillcolor:'rgba(0,210,106,0.35)',  line:{color:'#00d26a',width:1.5} },
+            { x:[], y:[], name:'EKF State Update', type:'scatter', mode:'lines', fill:'tonexty',  fillcolor:'rgba(126,207,244,0.35)',line:{color:'#7ecff4',width:1.5} },
+            { x:[], y:[], name:'Map Increment',    type:'scatter', mode:'lines', fill:'tonexty',  fillcolor:'rgba(233,69,96,0.35)',  line:{color:'#e94560',width:1.5} },
+            { x:[], y:[], name:'Total Pipeline',   type:'scatter', mode:'lines', line:{color:'#ffd32a',width:2,dash:'dot'} }
+        ], layout, { responsive:true, displayModeBar:false });
+    }
+
+    _initDopPlot() {
+        const layout = {
+            paper_bgcolor: 'transparent', plot_bgcolor: 'rgba(13,13,26,0.5)',
+            margin: { t: 4, b: 28, l: 36, r: 8 },
+            xaxis: { showgrid:false, color:'#556', tickfont:{size:9,color:'#556'}, nticks:5, type:'date' },
+            yaxis: { gridcolor:'#2d2d4e', color:'#556', tickfont:{size:9,color:'#8899aa'}, title:{text:'DOP',font:{size:10,color:'#556'}}, range:[0,10] },
+            legend: { orientation:'h', y:-0.28, x:0, font:{size:9,color:'#c8d6e5'}, bgcolor:'transparent' },
+            hovermode: 'x unified',
+            hoverlabel: { bgcolor:'#1a1a35', bordercolor:'#4a4a6e', font:{color:'#e8f0fe',size:11}, align:'left' }
+        };
+        Plotly.newPlot('loc-analytics-chart-dop', [
+            { x:[], y:[], name:'Scan PDOP',     type:'scatter', mode:'lines', line:{color:'#00d26a',width:2} },
+            { x:[], y:[], name:'Matching PDOP', type:'scatter', mode:'lines', line:{color:'#a29bfe',width:2} }
+        ], layout, { responsive:true, displayModeBar:false });
+    }
+
+    _initRamPlot(used, total) {
+        const free  = Math.max(0, total - used);
+        const uLbl  = used  < 1024 ? `${used} MB`  : `${(used/1024).toFixed(1)} GB`;
+        const tLbl  = total < 1024 ? `${total} MB` : `${(total/1024).toFixed(0)} GB`;
+        Plotly.newPlot('loc-analytics-chart-ram', [{
+            type:'pie', hole:0.65,
+            values:[used||0.001, free||total], labels:['Used','Free'],
+            marker:{colors:['#e94560','#1a1a35']},
+            textinfo:'none', hoverinfo:'label+value+percent', showlegend:false
+        }], {
+            paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+            margin:{t:0,b:0,l:0,r:0},
+            annotations:[{ text:`<b>${uLbl}</b><br><span style="font-size:10px">${tLbl}</span>`,
+                x:.5, y:.5, showarrow:false, font:{color:'#c8d6e5',size:13} }]
+        }, { responsive:true, displayModeBar:false });
+    }
+
+    _resetCumulTable() {
+        const tbody = document.getElementById('loc-analytics-cumul-tbody');
+        if (!tbody) return;
+        const rows = [
+            { id:'loc-cumul-imu',   label:'IMU Undistort' },
+            { id:'loc-cumul-state', label:'EKF State Update' },
+            { id:'loc-cumul-map',   label:'Map Increment' },
+            { id:'loc-cumul-total', label:'Total Pipeline' }
+        ];
+        tbody.innerHTML = rows.map((r) => `
+            <tr>
+                <td class="analytics-cumul-row-label">${r.label}</td>
+                <td class="analytics-right analytics-cumul-mean" id="${r.id}-mean">—</td>
+                <td class="analytics-right analytics-cumul-max"  id="${r.id}-max">—</td>
+                <td style="width:180px;padding:0 8px;">
+                    <div style="position:relative;">
+                        <div style="height:8px;background:#1a1a35;border-radius:4px;overflow:hidden;margin-top:3px;">
+                            <div id="${r.id}-bar-mean" style="height:100%;border-radius:4px;background:#7ecff4;transition:width .4s;width:0%"></div>
+                        </div>
+                        <div id="${r.id}-bar-max" style="position:absolute;top:3px;left:0%;width:2px;height:8px;background:#e94560;border-radius:1px;transform:translateX(-1px)"></div>
+                    </div>
+                    <div style="display:flex;justify-content:space-between;font-size:8px;color:#556;margin-top:2px;">
+                        <span style="color:#7ecff4">■ Mean</span><span style="color:#e94560">▎Max</span>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    // ── Rug canvas ───────────────────────────────────────────────
+    _initRug() {
+        this._rugCanvas = document.getElementById('loc-rug-canvas');
+        if (!this._rugCanvas) return;
+        const track = this._rugCanvas.parentElement;
+        this._rugCanvas.width  = track.clientWidth  || 400;
+        this._rugCanvas.height = track.clientHeight || 12;
+        this._drawRug();
+    }
+
+    _drawRug() {
+        if (!this._rugCanvas) return;
+        const ctx  = this._rugCanvas.getContext('2d');
+        const W    = this._rugCanvas.width;
+        const H    = this._rugCanvas.height;
+        const N    = this._rugHistory.length;
+        const cell = W / N;
+        ctx.clearRect(0, 0, W, H);
+        this._rugHistory.forEach((updated, i) => {
+            ctx.fillStyle = updated ? '#ffd32a' : '#1a1a35';
+            ctx.fillRect(Math.floor(i * cell), 0, Math.max(Math.ceil(cell), 1), H);
+        });
+    }
+
+    // ── Widget updates ───────────────────────────────────────────
+    _updateWidgets(msg) {
+        this._updateHzCard(msg);
+        this._updateTrajCard(msg);
+        this._updateCpuCard(msg);
+        this._updateRamChart(msg);
+        this._updateProcTimePlot(msg);
+        this._updateDopPlot(msg);
+        this._updateCumulTable(msg);
+        this._updateRug(msg);
+        this._updateInitBadge(msg);
+        this._updateDetailSection(msg);
+    }
+
+    _updateHzCard(msg) {
+        const imuEl = document.getElementById('loc-analytics-imu-hz');
+        const lidEl = document.getElementById('loc-analytics-lid-hz');
+        if (!imuEl || !lidEl) return;
+        const setHz = (el, val) => {
+            el.textContent = val;
+            el.className = 'analytics-hz-value ' +
+                (val <= 0 ? 'analytics-hz-err' : val < 10 ? 'analytics-hz-warn' : 'analytics-hz-ok');
+        };
+        setHz(imuEl, msg.imu_freq || 0);
+        setHz(lidEl, msg.lid_freq || 0);
+    }
+
+    _updateTrajCard(msg) {
+        const distEl  = document.getElementById('loc-analytics-traj-dist');
+        const timeEl  = document.getElementById('loc-analytics-run-time');
+        const speedEl = document.getElementById('loc-analytics-avg-speed');
+        if (!distEl) return;
+        const dist   = msg.traj_dist || 0;
+        const runSec = msg.run_time  || 0;
+        distEl.textContent = typeof dist === 'number' ? dist.toFixed(1) : dist;
+        const h = Math.floor(runSec / 3600);
+        const m = Math.floor((runSec % 3600) / 60);
+        const s = runSec % 60;
+        if (timeEl) timeEl.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+        if (speedEl) speedEl.textContent = (runSec > 0 ? dist / runSec : 0).toFixed(2);
+    }
+
+    _updateCpuCard(msg) {
+        const pctEl  = document.getElementById('loc-analytics-cpu-percent');
+        const coreEl = document.getElementById('loc-analytics-cpu-cores-equiv');
+        const barEl  = document.getElementById('loc-analytics-cpu-bar-fill');
+        if (!pctEl || !barEl) return;
+        const usedCores = msg.cpu_usage  || 0;
+        const total     = this._sysInfo.cpu_cores || 1;
+        const barPct    = Math.min(usedCores / total * 100, 100);
+        pctEl.innerHTML = `${usedCores.toFixed(1)}<span class="analytics-cpu-pct-sym"> cores</span>`;
+        if (coreEl) coreEl.innerHTML = `<span style="color:#ffd32a;font-weight:700">${barPct.toFixed(1)}%</span> of ${total} cores`;
+        barEl.style.width = `${barPct}%`;
+    }
+
+    _updateRamChart(msg) {
+        const used  = msg.ram_usage || 0;
+        const total = this._sysInfo.total_ram_mb || 32768;
+        const free  = Math.max(0, total - used);
+        const uLbl  = used  < 1024 ? `${used} MB`  : `${(used/1024).toFixed(1)} GB`;
+        const tLbl  = total < 1024 ? `${total} MB` : `${(total/1024).toFixed(0)} GB`;
+        Plotly.react('loc-analytics-chart-ram', [{
+            type:'pie', hole:0.65,
+            values:[used||0.001, free||total], labels:['Used','Free'],
+            marker:{colors:['#e94560','#1a1a35']},
+            textinfo:'none', hoverinfo:'label+value+percent', showlegend:false
+        }], {
+            paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+            margin:{t:0,b:0,l:0,r:0},
+            annotations:[{ text:`<b>${uLbl}</b><br><span style="font-size:10px">${tLbl}</span>`,
+                x:.5, y:.5, showarrow:false, font:{color:'#c8d6e5',size:13} }]
+        });
+    }
+
+    _updateProcTimePlot(msg) {
+        const now = Date.now();
+        const x   = new Date(now);
+        const imu   = (msg.imu_time   || 0) * 1000;
+        const state = imu + (msg.state_time || 0) * 1000;
+        const map   = state + (msg.map_time  || 0) * 1000;
+        const total = (msg.total_time || 0) * 1000;
+        Plotly.extendTraces('loc-analytics-chart-proctime', {
+            x: [[x],[x],[x],[x]], y: [[imu],[state],[map],[total]]
+        }, [0,1,2,3]);
+        Plotly.relayout('loc-analytics-chart-proctime', {
+            'xaxis.range': [new Date(now - this._WINDOW_SEC * 1000), x]
+        });
+    }
+
+    _updateDopPlot(msg) {
+        const now  = Date.now();
+        const x    = new Date(now);
+        const scan = msg.scan_dop     || 0;
+        const match= msg.matching_dop || 0;
+        Plotly.extendTraces('loc-analytics-chart-dop', {
+            x: [[x],[x]], y: [[scan],[match]]
+        }, [0,1]);
+        const dopMax = Math.max(scan, match, 1);
+        Plotly.relayout('loc-analytics-chart-dop', {
+            'xaxis.range': [new Date(now - this._WINDOW_SEC * 1000), x],
+            'yaxis.range': [0, Math.min(dopMax * 1.15, 100)]
+        });
+    }
+
+    _updateCumulTable(msg) {
+        const rows = [
+            { id:'loc-cumul-imu',   mean:(msg.imu_mean   ||0)*1000, max:(msg.imu_max   ||0)*1000 },
+            { id:'loc-cumul-state', mean:(msg.state_mean ||0)*1000, max:(msg.state_max ||0)*1000 },
+            { id:'loc-cumul-map',   mean:(msg.map_mean   ||0)*1000, max:(msg.map_max   ||0)*1000 },
+            { id:'loc-cumul-total', mean:(msg.total_mean ||0)*1000, max:(msg.total_max ||0)*1000 }
+        ];
+        const maxVal = Math.max(...rows.map((r) => r.max), 1);
+        rows.forEach((r) => {
+            const mEl  = document.getElementById(`${r.id}-mean`);
+            const xEl  = document.getElementById(`${r.id}-max`);
+            const bMEl = document.getElementById(`${r.id}-bar-mean`);
+            const bXEl = document.getElementById(`${r.id}-bar-max`);
+            if (mEl)  mEl.textContent  = r.mean.toFixed(2);
+            if (xEl)  xEl.textContent  = r.max.toFixed(2);
+            if (bMEl) bMEl.style.width = `${(r.mean / maxVal * 100).toFixed(1)}%`;
+            if (bXEl) bXEl.style.left  = `${(r.max  / maxVal * 100).toFixed(1)}%`;
+        });
+    }
+
+    _updateRug(msg) {
+        const updated  = !!msg.map_updated;
+        const dopRatio = msg.dop_ratio || 0;
+
+        this._rugHistory.push(updated);
+        this._rugHistory.shift();
+        this._drawRug();
+
+        // dop_ratio 표시
+        const ratioEl = document.getElementById('loc-dop-ratio-val');
+        if (ratioEl) ratioEl.textContent = dopRatio.toFixed(2);
+
+        if (updated) {
+            this._updateCount++;
+            this._lastUpdateMs = Date.now();
+            // 플래시 도트
+            const dot = document.getElementById('loc-map-update-dot');
+            if (dot) { dot.classList.remove('flash'); void dot.offsetWidth; dot.classList.add('flash'); }
+        }
+
+        // 카운트 & 마지막 업데이트
+        const countEl = document.getElementById('loc-map-update-count');
+        if (countEl) countEl.textContent = this._updateCount;
+        const lastEl  = document.getElementById('loc-map-update-last');
+        if (lastEl && this._lastUpdateMs !== null) {
+            const sec = ((Date.now() - this._lastUpdateMs) / 1000).toFixed(1);
+            lastEl.textContent = `${sec}s ago`;
+        }
+    }
+
+    _updateInitBadge(msg) {
+        const inited = !!msg.is_initialized;
+        const text   = inited ? '✓ Initialized' : '✕ Not Init';
+        const cls    = inited ? 'ok' : 'bad';
+
+        const headerBadge = document.getElementById('loc-header-init-badge');
+        if (headerBadge) { headerBadge.textContent = text; headerBadge.className = `loc-init-badge ${cls}`; }
+
+        const rugBadge = document.getElementById('loc-init-status-dot');
+        if (rugBadge) { rugBadge.textContent = text; rugBadge.className = `loc-init-status-dot ${cls}`; }
+    }
+
+    _updateDetailSection(msg) {
+        const fields = [
+            ['scan_size',          (v) => `${v.toLocaleString()} pts`],
+            ['down_size',          (v) => `${v.toLocaleString()} pts`],
+            ['map_size',           (v) => `${v.toLocaleString()} pts`],
+            ['map_valid_size',     (v) => `${v.toLocaleString()} pts`],
+            ['new_idxs',           (v) => `${v.toLocaleString()} pts`],
+            ['buffer_size',        (v) => `${v}`],
+            ['imu_buffer_size',    (v) => `${v}`],
+            ['scan_time',          (v) => `${v.toFixed(4)} s`],
+            ['filter_size_surf_ad',(v) => `${v.toFixed(3)} m`],
+            ['point_filter_num_ad',(v) => `${v}`],
+            ['num_feats',          (v) => `${v.toLocaleString()}`],
+            ['num_reject',         (v) => `${v.toLocaleString()}`],
+            ['match_ratio',        (v) => `${v.toFixed(4)}`],
+            ['res_mean',           (v) => `${v.toFixed(5)} m`],
+            ['res_std',            (v) => `${v.toFixed(5)} m`],
+            ['pos_cov',            (v) => `${v.toExponential(3)}`],
+            ['rot_cov',            (v) => `${v.toExponential(3)}`],
+            ['lidar_meas_cov',     (v) => `${v.toExponential(3)}`],
+            ['scan_dop',           (v) => `${v.toFixed(3)}`],
+            ['down_dop',           (v) => `${v.toFixed(3)}`],
+            ['matching_dop',       (v) => `${v.toFixed(3)}`],
+            ['dop_ratio',          (v) => `${v.toFixed(3)}`],
+            ['vel_norm',           (v) => `${v.toFixed(3)} m/s`],
+            ['acc_bias_norm',      (v) => `${v.toFixed(4)}`],
+            ['gyr_bias_norm',      (v) => `${v.toFixed(5)}`],
+            ['lid_offset',         (v) => `${v.toFixed(4)} s`],
+            ['imu_offset',         (v) => `${v.toFixed(5)} s`],
+            ['kf_count',           (v) => `${v}`],
+            ['kf_dist_last',       (v) => `${v.toFixed(2)} m`],
+            ['is_initialized',     (v) => v ? 'true' : 'false'],
+            ['map_updated',        (v) => v ? 'true' : 'false'],
+            ['linear_velo',        (v) => `${v.toFixed(3)} m/s`],
+            ['angular_velo',       (v) => `${v.toFixed(3)} rad/s`]
+        ];
+        fields.forEach(([key, fmt]) => {
+            const el  = document.getElementById(`lad-${key}`);
+            if (!el) return;
+            const val = msg[key];
+            if (val === undefined || val === null) return;
+            try { el.textContent = fmt(val); } catch (e) { el.textContent = val; }
+        });
+    }
+
+    _resetWidgets() {
+        ['loc-analytics-imu-hz','loc-analytics-lid-hz','loc-analytics-traj-dist',
+         'loc-analytics-run-time','loc-analytics-avg-speed','loc-analytics-cpu-percent',
+         'loc-analytics-cpu-cores-equiv','loc-dop-ratio-val','loc-map-update-last']
+            .forEach((id) => { const el = document.getElementById(id); if (el) el.textContent = '—'; });
+        const bar = document.getElementById('loc-analytics-cpu-bar-fill');
+        if (bar) bar.style.width = '0%';
+        this._rugHistory.fill(false);
+        this._drawRug();
+        this._updateCount  = 0;
+        this._lastUpdateMs = null;
+        const countEl = document.getElementById('loc-map-update-count');
+        if (countEl) countEl.textContent = '0';
+        const section = document.getElementById('loc-analytics-detail');
+        const btn     = document.getElementById('loc-analytics-detail-toggle');
+        if (section) section.classList.remove('open');
+        if (btn)     btn.classList.remove('open');
+        this._plotsInit = false;
+    }
+}
+
+// LocAnalyticsDashboard 전역 인스턴스
+const locAnalyticsDashboard = new LocAnalyticsDashboard();
+
+function toggleLocAnalyticsDetail() {
+    const section = document.getElementById('loc-analytics-detail');
+    const btn     = document.getElementById('loc-analytics-detail-toggle');
+    if (!section || !btn) return;
+    const isOpen = section.classList.toggle('open');
+    btn.classList.toggle('open', isOpen);
+    btn.textContent = isOpen
+        ? 'Collapse Statistics'
+        : 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · DOP · Loc Status · Odometry …)';
 }

@@ -2746,7 +2746,8 @@ h3 {
 }
 
 /* 풀스크린 전용 토글 버튼 (기본 숨김, 풀스크린 진입 시에만 표시) */
-.slam-fs-toggle-btn {
+.slam-fs-toggle-btn,
+.loc-fs-toggle-btn {
     display: none;
 }
 
@@ -2758,6 +2759,24 @@ h3 {
 #slam-result-canvas-container:-webkit-full-screen .slam-fs-toggle-btn,
 #savemap-result-canvas-container:-webkit-full-screen .slam-fs-toggle-btn {
     display: flex;
+}
+
+#loc-viewer-canvas-container:fullscreen .loc-fs-toggle-btn {
+    display: flex;
+}
+
+#loc-viewer-canvas-container:-webkit-full-screen .loc-fs-toggle-btn {
+    display: flex;
+}
+
+.loc-fs-toggle-btn.active {
+    background: rgba(74, 214, 255, 0.22);
+    border-color: rgba(74, 214, 255, 0.65);
+    color: #4ad6ff;
+}
+
+.loc-fs-toggle-btn.active:hover {
+    background: rgba(74, 214, 255, 0.35);
 }
 
 .slam-fs-toggle-btn.active {
@@ -2837,17 +2856,28 @@ h3 {
 /* ======================================
    Localization Live Viewer
    ====================================== */
+/* section card 안으로 이동 후 Firefox overflow 방지 */
+#localization-live-viewer {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    box-sizing: border-box;
+}
+
 .loc-live-viewer-layout {
-    display: grid;
-    grid-template-columns: 220px 1fr;
-    gap: 12px;
+    display: block;
     height: 520px;
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
 }
 
 .loc-viewer-canvas-panel {
     display: flex;
     flex-direction: column;
+    height: 100%;   /* Firefox: block 부모에서 명시적 height 상속 필요 */
     min-width: 0;
+    overflow: hidden;
 }
 
 #loc-viewer-canvas-container {
@@ -3093,3 +3123,331 @@ h3 {
 @media (max-width: 1280px) {
     .analytics-row-top { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   Localization Analytics Dashboard — loc 전용 추가 스타일
+   ═══════════════════════════════════════════════════════════ */
+
+/* 헤더 Initialized 뱃지 */
+.loc-init-badge {
+    margin-left: auto;
+    font-size: 10px; font-weight: 700;
+    padding: 2px 10px; border-radius: 10px;
+    border: 1px solid;
+    transition: background .3s, color .3s;
+}
+.loc-init-badge.ok  { background: #0d2e1a; color: #00d26a; border-color: rgba(0,210,106,.3); }
+.loc-init-badge.bad { background: #2e0d0d; color: #e94560; border-color: rgba(233,69,96,.3); }
+
+/* Map Update Rug 섹션 */
+.loc-map-rug-section {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #2d2d4e;
+}
+.loc-map-rug-label {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 9px; color: #8899aa;
+    text-transform: uppercase; letter-spacing: .06em;
+    margin-bottom: 5px;
+}
+.loc-map-rug-label-right { display: flex; gap: 10px; align-items: center; }
+.loc-map-update-count    { font-size: 10px; color: #8899aa; }
+.loc-map-update-count span { color: #ffd32a; font-weight: 700; }
+.loc-dop-ratio-val       { font-size: 10px; color: #8899aa; }
+.loc-dop-ratio-val span  { color: #ffd32a; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+.loc-map-rug-track {
+    height: 12px;
+    background: #0d0d1a;
+    border: 1px solid #2d2d4e;
+    border-radius: 3px;
+    overflow: hidden;
+}
+.loc-map-rug-canvas { width: 100%; height: 100%; display: block; }
+
+/* 업데이트 메타 행 */
+.loc-map-update-meta {
+    display: flex; align-items: center; gap: 8px; margin-top: 5px;
+}
+.loc-map-update-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #2d2d4e; flex-shrink: 0;
+}
+.loc-map-update-dot.flash {
+    animation: loc-dot-flash .6s ease-out forwards;
+}
+@keyframes loc-dot-flash {
+    0%   { background: #ffd32a; box-shadow: 0 0 8px #ffd32a88; }
+    100% { background: #2d2d4e; box-shadow: none; }
+}
+.loc-map-last-badge      { font-size: 9px; color: #556; }
+.loc-map-last-badge span { color: #ffd32a; }
+
+/* 인라인 Initialized 상태 도트 (rug 우측) */
+.loc-init-status-dot {
+    margin-left: auto;
+    font-size: 9px; font-weight: 700;
+    padding: 1px 7px; border-radius: 8px;
+}
+.loc-init-status-dot.ok  { background: #0d2e1a; color: #00d26a; }
+.loc-init-status-dot.bad { background: #2e0d0d; color: #e94560; }
+
+/* ═══════════════════════════════════════════════════════════
+   Config Panel — dashboard 스타일 통일
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── 패널 헤더 ─── */
+.config-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #2d2d4e;
+}
+.config-panel-title {
+    font-size: 14px;
+    color: #7ecff4;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.config-panel-toggle {
+    background: none;
+    border: 1px solid #2d2d4e;
+    border-radius: 4px;
+    color: #7ecff4;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 3px 10px;
+    transition: background 0.15s, border-color 0.15s;
+    line-height: 1.4;
+}
+.config-panel-toggle:hover { background: #1a1a35; border-color: #4a9eff; }
+
+/* ─── 그룹 카드 ─── */
+.config-group-card {
+    background: #13132a;
+    border: 1px solid #2d2d4e;
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+}
+.config-group-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #7ecff4;
+    margin-bottom: 10px;
+}
+
+/* ─── 파라미터 그리드 ─── */
+.config-params-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+}
+.config-param-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.config-param-item.span-full { grid-column: 1 / -1; }
+.config-param-label {
+    font-size: 10px;
+    color: #8899aa;
+    font-weight: 500;
+}
+.config-param-input input[type="number"],
+.config-param-input input[type="text"] {
+    background: #0e0e1e;
+    border: 1px solid #2d2d4e;
+    border-radius: 4px;
+    color: #c8d6e5;
+    font-size: 12px;
+    padding: 5px 8px;
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color 0.15s, background 0.15s;
+    font-variant-numeric: tabular-nums;
+}
+.config-param-input input:focus {
+    outline: none;
+    border-color: #4a9eff;
+    background: #13132a;
+}
+.config-param-bool {
+    display: flex;
+    align-items: center;
+    height: 28px;
+    gap: 8px;
+}
+.config-param-bool input[type="checkbox"] {
+    accent-color: #4a9eff;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+}
+.config-param-bool-label {
+    font-size: 12px;
+    color: #c8d6e5;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Config Panel — 세련된 다크 디자인 (analytics dashboard 통일)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ─── 패널 래퍼 ─── */
+.cfg-panel {
+    background: #13132a;
+    border: 1px solid #2d2d4e;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 12px;
+}
+
+/* ─── 헤더 바 ─── */
+.cfg-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: #1a1a35;
+    border-bottom: 1px solid #2d2d4e;
+    cursor: pointer;
+    user-select: none;
+}
+.cfg-header:hover { background: #1e1e3a; }
+.cfg-header-left { display: flex; align-items: center; gap: 10px; }
+.cfg-header-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #7ecff4;
+    letter-spacing: 0.4px;
+}
+.cfg-header-badge {
+    font-size: 11px;
+    background: #1e3a5f;
+    color: #7ecff4;
+    border: 1px solid #2d5a8e;
+    padding: 2px 8px;
+    border-radius: 10px;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.cfg-toggle-arrow {
+    font-size: 14px;
+    color: #7ecff4;
+    transition: transform 0.2s ease;
+    display: inline-block;
+}
+.cfg-toggle-arrow.open { transform: rotate(180deg); }
+
+/* ─── 바디 ─── */
+.cfg-body { padding: 12px 12px 4px; }
+
+/* ─── 그룹 카드 ─── */
+.cfg-group {
+    background: #0f0f22;
+    border: 1px solid #252545;
+    border-radius: 8px;
+    margin-bottom: 10px;
+    overflow: hidden;
+}
+.cfg-group-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.9px;
+    text-transform: uppercase;
+    color: #7ecff4;
+    padding: 8px 14px;
+    background: #13132a;
+    border-bottom: 1px solid #252545;
+}
+
+/* ─── 파라미터 2열 그리드 ─── */
+.cfg-group-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1px;
+    background: #1e1e38;
+}
+
+/* ─── 파라미터 행 ─── */
+.cfg-param-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 14px;
+    background: #0f0f22;
+    gap: 12px;
+    transition: background 0.1s;
+}
+.cfg-param-row:hover { background: #14142c; }
+.cfg-param-row.cfg-span2 { grid-column: span 2; }
+
+.cfg-param-label {
+    font-size: 13px;
+    color: #99a8c0;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* ─── 입력 필드 ─── */
+.cfg-param-input {
+    background: #1a1a35;
+    border: 1px solid #2d2d4e;
+    border-radius: 5px;
+    color: #c8cfe8;
+    font-size: 13px;
+    padding: 5px 10px;
+    width: 140px;
+    text-align: right;
+    outline: none;
+    transition: border-color 0.15s, background 0.15s;
+    -moz-appearance: textfield;
+}
+.cfg-param-input::-webkit-inner-spin-button,
+.cfg-param-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.cfg-param-input:focus { border-color: #7ecff4; background: #1a2240; }
+.cfg-param-input.cfg-input-wide {
+    width: 240px;
+    text-align: left;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+}
+
+/* ─── 토글 스위치 (boolean) ─── */
+.cfg-toggle-wrap { display: flex; align-items: center; gap: 7px; }
+.cfg-switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+.cfg-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.cfg-switch-slider {
+    position: absolute;
+    inset: 0;
+    background: #1e1e38;
+    border: 1px solid #3a3a60;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: background 0.2s, border-color 0.2s;
+}
+.cfg-switch-slider::before {
+    content: '';
+    position: absolute;
+    width: 14px; height: 14px;
+    left: 2px; top: 2px;
+    background: #44446a;
+    border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+}
+.cfg-switch input:checked + .cfg-switch-slider { background: #1a3355; border-color: #7ecff4; }
+.cfg-switch input:checked + .cfg-switch-slider::before { transform: translateX(16px); background: #7ecff4; }
+.cfg-switch-val {
+    font-size: 12px;
+    color: #44446a;
+    min-width: 36px;
+    transition: color 0.2s;
+}
+.cfg-switch-val.cfg-val-on { color: #7ecff4; }
