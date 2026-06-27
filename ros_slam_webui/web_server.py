@@ -7,7 +7,7 @@ from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, TransformStamped, TwistStamped
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as NavPath
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
@@ -1260,6 +1260,11 @@ class PC2WebSocketServer:
         self._pc2_sending: dict = {}    # topic_name → bool
         self._img_sending: dict = {}    # topic_name → bool
         self._livox_sending: dict = {}  # topic_name → bool
+        # ── Path (nav_msgs/Path) 전용 ─────────────────────────────────────────────
+        self._path_clients: dict = {}    # topic → set[websocket]
+        self._path_subs: dict = {}       # topic → rclpy Subscription
+        self._path_last_sent: dict = {}  # topic → float (단조시각)
+        self._path_sending: dict = {}    # topic → bool (backpressure)
         # ── Latched (TRANSIENT_LOCAL) 토픽 전용 ─────────────────────────────────
         self._latched_subs: dict = {}        # topic → rclpy Subscription
         self._latched_clients: dict = {}     # topic → set[websocket]
@@ -1304,6 +1309,7 @@ class PC2WebSocketServer:
         my_plot_topics: set     = set()   # 범용 plot JSON 구독
         my_img_topics: set      = set()   # Image JPEG binary 구독
         my_latched_topics: set  = set()   # TRANSIENT_LOCAL PointCloud2 구독
+        my_path_topics: set     = set()   # nav_msgs/Path binary 구독
         # 전체 클라이언트 집합에 등록 (broadcast용)
         with self._lock:
             self._all_clients.add(websocket)
@@ -1345,6 +1351,12 @@ class PC2WebSocketServer:
                 elif cmd == 'unsubscribe_image':
                     self._remove_image_client(topic, websocket)
                     my_img_topics.discard(topic)
+                elif cmd == 'subscribe_path':
+                    self._add_path_client(topic, websocket)
+                    my_path_topics.add(topic)
+                elif cmd == 'unsubscribe_path':
+                    self._remove_path_client(topic, websocket)
+                    my_path_topics.discard(topic)
                 elif cmd == 'subscribe_latched':
                     # TRANSIENT_LOCAL QoS 구독 (latched 토픽용)
                     self._add_latched_client(topic, websocket)
@@ -1365,6 +1377,8 @@ class PC2WebSocketServer:
                 self._remove_image_client(t, websocket)
             for t in list(my_latched_topics):
                 self._remove_latched_client(t, websocket)
+            for t in list(my_path_topics):
+                self._remove_path_client(t, websocket)
 
     # ── 클라이언트 / 구독 관리 ────────────────────────────────────────────────
 
@@ -1412,7 +1426,7 @@ class PC2WebSocketServer:
                     sub = self._node.create_subscription(
                         PointCloud2, topic,
                         lambda m, t=topic: self._on_pc2(m, t),
-                        10)
+                        1)
                     self._subs[topic] = sub
                     self._last_sent[topic] = 0.0
                     self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
@@ -1589,6 +1603,111 @@ class PC2WebSocketServer:
                 self._img_clients.pop(topic, None)
                 # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 이미지 수신
                 self._node.get_logger().info(f'[ImgWS] all clients gone, sub kept ← {topic}')
+
+    # ── Path 클라이언트 / 구독 관리 ───────────────────────────────────────────
+
+    def _add_path_client(self, topic: str, ws):
+        """nav_msgs/Path 토픽을 바이너리 PTH 패킷으로 스트리밍하기 위한 클라이언트 등록."""
+        with self._lock:
+            if topic not in self._path_clients:
+                self._path_clients[topic] = set()
+            self._path_clients[topic].add(ws)
+            if topic not in self._path_subs:
+                sub = self._node.create_subscription(
+                    NavPath, topic,
+                    lambda m, t=topic: self._on_path(m, t),
+                    1)
+                self._path_subs[topic]      = sub
+                self._path_last_sent[topic] = 0.0
+                self._node.get_logger().info(f'[PathWS] subscribed → {topic}')
+
+    def _remove_path_client(self, topic: str, ws):
+        with self._lock:
+            s = self._path_clients.get(topic)
+            if not s:
+                return
+            s.discard(ws)
+            if not s:
+                self._path_clients.pop(topic, None)
+                self._node.get_logger().info(f'[PathWS] all clients gone, sub kept ← {topic}')
+
+    # ── rclpy 콜백 (Path) ────────────────────────────────────────────────────
+
+    def _on_path(self, msg: NavPath, topic_name: str):
+        """nav_msgs/Path 수신 → throttle → binary PTH 패킷 → asyncio 브로드캐스트."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._path_last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+                return
+            if self._path_sending.get(topic_name, False):
+                return
+            clients = self._path_clients.get(topic_name, set()).copy()
+            if not clients:
+                return
+            self._path_last_sent[topic_name] = now
+            self._path_sending[topic_name] = True
+
+        loop = self._loop
+        if loop and loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self._build_and_broadcast_path(msg, topic_name, clients), loop)
+        else:
+            with self._lock:
+                self._path_sending[topic_name] = False
+
+    async def _build_and_broadcast_path(self, msg, topic_name: str, clients: set):
+        """_build_path_payload를 thread pool에서 실행 후 브로드캐스트."""
+        try:
+            loop = asyncio.get_running_loop()
+            payload = await loop.run_in_executor(
+                None, self._build_path_payload, msg, topic_name)
+            if payload:
+                for ws in list(clients):
+                    try:
+                        await ws.send(payload)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self._node.get_logger().warn(
+                f'[PathWS] broadcast error ({topic_name}): {e}')
+        finally:
+            with self._lock:
+                self._path_sending[topic_name] = False
+
+    def _build_path_payload(self, msg: NavPath, topic_name: str) -> bytes | None:
+        """nav_msgs/Path → PTH binary 패킷 생성.
+
+        Binary 패킷 포맷 (little-endian):
+          [3B]  magic = b'PTH'
+          [1B]  version = 1
+          [4B]  uint32  topic_name 바이트 길이
+          [4B]  uint32  frame_id 바이트 길이
+          [4B]  uint32  total_pose_count
+          [N B] topic_name (UTF-8)
+          [M B] frame_id  (UTF-8)
+          [count*12 B] XYZ float32 interleaved (x0,y0,z0, x1,y1,z1, ...)
+        """
+        try:
+            poses = msg.poses
+            if not poses:
+                return None
+            topic_b = topic_name.encode('utf-8')
+            frame_b = (msg.header.frame_id or '').encode('utf-8')
+            n = len(poses)
+            xyz = np.empty(n * 3, dtype=np.float32)
+            for i, ps in enumerate(poses):
+                p = ps.pose.position
+                xyz[i * 3]     = p.x
+                xyz[i * 3 + 1] = p.y
+                xyz[i * 3 + 2] = p.z
+            header = struct.pack('<3sBIII',
+                                 b'PTH', 1,
+                                 len(topic_b), len(frame_b), n)
+            return b''.join([header, topic_b, frame_b, xyz.tobytes()])
+        except Exception as e:
+            self._node.get_logger().error(
+                f'[PathWS] _build_path_payload error ({topic_name}): {e}')
+            return None
 
     # ── rclpy 콜백 (Image) ────────────────────────────────────────────────────
 
@@ -2018,6 +2137,15 @@ class PC2WebSocketServer:
 
     # ── PointCloud2 → binary 패킷 변환 ───────────────────────────────────────
 
+    @staticmethod
+    def _voxel_downsample(xyz: np.ndarray, voxel_size: float) -> np.ndarray:
+        """numpy 기반 복셀 다운샘플링. 각 복셀에서 첫 번째 점만 유지."""
+        if len(xyz) == 0:
+            return xyz
+        voxel_coords = np.floor(xyz / voxel_size).astype(np.int32)
+        _, unique_idx = np.unique(voxel_coords, axis=0, return_index=True)
+        return xyz[np.sort(unique_idx)]
+
     def _build_payload(self, msg: PointCloud2, topic_name: str):
         """PointCloud2 메시지를 binary 패킷으로 변환. 실패 시 None 반환."""
         try:
@@ -2059,10 +2187,25 @@ class PC2WebSocketServer:
             if n == 0:
                 return None
 
-            # 다운샘플링 (voxel-free: 균등 step)
-            step = max(1, n // self.MAX_POINTS)
-            x, y, z = x[::step], y[::step], z[::step]
-            n_out = len(x)
+            # 다운샘플링: /cloud_registered는 복셀(0.4m), 나머지는 균등 step
+            if topic_name == '/cloud_registered':
+                xyz_valid = np.column_stack([x, y, z]).astype(np.float32)
+                voxel_coords = np.floor(xyz_valid / 0.4).astype(np.int32)
+                _, unique_idx = np.unique(voxel_coords, axis=0, return_index=True)
+                sel_idx = np.sort(unique_idx)
+                extra_step = max(1, len(sel_idx) // self.MAX_POINTS)
+                sel_idx = sel_idx[::extra_step]
+                x = xyz_valid[sel_idx, 0]
+                y = xyz_valid[sel_idx, 1]
+                z = xyz_valid[sel_idx, 2]
+                n_out = len(x)
+                subsample = lambda arr_v: arr_v[sel_idx]
+            else:
+                # 균등 step 다운샘플링
+                step = max(1, n // self.MAX_POINTS)
+                x, y, z = x[::step], y[::step], z[::step]
+                n_out = len(x)
+                subsample = lambda arr_v, _s=step, _n=n_out: arr_v[::_s][:_n]
 
             xyz = np.column_stack([x, y, z]).astype(np.float32)
 
@@ -2071,7 +2214,7 @@ class PC2WebSocketServer:
             color_f32 = np.zeros(n_out, dtype=np.float32)
             if has_intensity:
                 ci = _extract_f32('intensity')
-                color_f32 = ci[valid][::step][:n_out]
+                color_f32 = subsample(ci[valid])
 
             # RGB 추출
             has_rgb = 'rgb' in field_map or 'rgba' in field_map
@@ -2081,7 +2224,7 @@ class PC2WebSocketServer:
                 f    = field_map[rkey]
                 ri   = np.frombuffer(
                     arr[:, f.offset:f.offset + 4].tobytes(), dtype=np.uint32)
-                rgb_u32 = ri[valid][::step][:n_out]
+                rgb_u32 = subsample(ri[valid])
 
             flags  = (0x01 if has_intensity else 0) | (0x02 if has_rgb else 0)
             topic_b = topic_name.encode('utf-8')

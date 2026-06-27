@@ -3451,3 +3451,96 @@ h3 {
     transition: color 0.2s;
 }
 .cfg-switch-val.cfg-val-on { color: #7ecff4; }
+
+/* ── SLAM Live Viewer ──────────────────────────────────────────────────────── */
+
+#slam-live-canvas-container {
+    background: #0a0a18;
+    border-radius: 8px;
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+}
+
+#slam-live-canvas {
+    display: block;
+    height: 100%;
+    width: 100%;
+}
+
+#slam-live-viewer-loading {
+    align-items: center;
+    color: #666;
+    display: none;
+    inset: 0;
+    justify-content: center;
+    pointer-events: none;
+    position: absolute;
+}
+
+#slam-live-viewer-actions {
+    bottom: 8px;
+    display: flex;
+    gap: 6px;
+    position: absolute;
+    right: 8px;
+}
+
+#slam-live-canvas-container:fullscreen {
+    background: #0a0a18;
+    height: 100%;
+    width: 100%;
+}
+
+#slam-live-canvas-container:-webkit-full-screen {
+    background: #0a0a18;
+    height: 100%;
+    width: 100%;
+}
+
+#slam-live-canvas-container:fullscreen .loc-fs-toggle-btn {
+    display: flex;
+}
+
+#slam-live-canvas-container:-webkit-full-screen .loc-fs-toggle-btn {
+    display: flex;
+}
+
+/* ── SLAM Live Viewer — legend ─────────────────────────────────────────────── */
+
+#slam-live-legend {
+    background: rgba(10, 10, 24, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    left: 10px;
+    padding: 7px 10px;
+    pointer-events: none;
+    position: absolute;
+    top: 10px;
+    user-select: none;
+}
+
+.slam-live-legend-item {
+    align-items: center;
+    display: flex;
+    gap: 7px;
+}
+
+.slam-live-legend-line {
+    border-radius: 2px;
+    display: inline-block;
+    flex-shrink: 0;
+    height: 3px;
+    width: 22px;
+}
+
+.slam-live-legend-label {
+    color: #d8d8e8;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
