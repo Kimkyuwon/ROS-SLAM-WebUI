@@ -6544,13 +6544,21 @@ function renderAddDisplayTree() {
 
         // 카테고리 헤더
         const catHeader = document.createElement('div');
-        catHeader.className = 'add-display-cat-header';
+        catHeader.className = 'add-display-cat-header add-display-type-row';
         catHeader.innerHTML =
             '<span class="add-display-cat-arrow" id="add-display-cat-arrow-' + catIdx + '">▾</span>' +
             '<span class="add-display-cat-dot" style="background:' + cat.color + '"></span>' +
-            '<span class="add-display-cat-name">' + cat.type + '</span>' +
-            '<span class="add-display-cat-type">' + cat.msgType + '</span>';
-        catHeader.onclick = function() { toggleAddDisplayCategory(catIdx); };
+            '<span class="add-display-icon">◉</span>' +
+            '<span class="add-display-name add-display-cat-name">' + cat.type + '</span>' +
+            '<span class="add-display-topic add-display-cat-type">' + cat.msgType + '</span>';
+        catHeader.onclick = function() {
+            tree.querySelectorAll('.add-display-type-row').forEach(function(row) {
+                row.classList.remove('selected');
+            });
+            catHeader.classList.add('selected');
+            toggleAddDisplayCategory(catIdx);
+            updateAddDisplayDescription(cat.description);
+        };
         catDiv.appendChild(catHeader);
 
         // 토픽 목록

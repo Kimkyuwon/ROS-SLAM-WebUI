@@ -54,10 +54,10 @@ class PlotTabManager {
     createTabBar() {
         // 탭 바 레이아웃: 왼쪽에 탭 목록, 오른쪽에 + 버튼
         this.tabBarContainer.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 6px; border-bottom: 2px solid rgba(74, 214, 255, 0.2); margin-bottom: 8px; padding-bottom: 2px; flex-wrap: nowrap; min-height: 40px; max-height: 40px; overflow: hidden;">
+            <div style="display: flex; align-items: center; gap: 6px; border-bottom: 2px solid rgba(124, 111, 255, 0.2); margin-bottom: 8px; padding-bottom: 2px; flex-wrap: nowrap; min-height: 40px; max-height: 40px; overflow: hidden;">
                 <div id="plot-tab-list" style="display: flex; align-items: center; gap: 6px; flex: 1; overflow-x: hidden; flex-wrap: nowrap;"></div>
                 <button id="plot-tab-add-btn" 
-                        style="padding: 8px 14px; background: linear-gradient(135deg, rgba(74, 214, 255, 0.2), rgba(60, 180, 220, 0.2)); border: 1px solid rgba(74, 214, 255, 0.4); border-radius: 6px; color: rgba(74, 214, 255, 1); font-size: 16px; font-weight: 600; cursor: pointer; min-width: 36px; transition: all 0.25s ease; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2); flex-shrink: 0;"
+                        style="padding: 8px 14px; background: linear-gradient(135deg, rgba(124, 111, 255, 0.2), rgba(124, 111, 255, 0.2)); border: 1px solid rgba(124, 111, 255, 0.4); border-radius: 6px; color: #b0a8ff; font-size: 16px; font-weight: 600; cursor: pointer; min-width: 36px; transition: all 0.25s ease; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2); flex-shrink: 0;"
                         title="Add new plot tab">+</button>
             </div>
         `;
@@ -70,14 +70,14 @@ class PlotTabManager {
         
         // + 버튼 호버 효과
         addBtn.addEventListener('mouseenter', () => {
-            addBtn.style.background = 'linear-gradient(135deg, rgba(74, 214, 255, 0.35), rgba(60, 180, 220, 0.35))';
-            addBtn.style.borderColor = 'rgba(74, 214, 255, 0.7)';
+            addBtn.style.background = 'linear-gradient(135deg, rgba(124, 111, 255, 0.35), rgba(124, 111, 255, 0.35))';
+            addBtn.style.borderColor = 'rgba(124, 111, 255, 0.7)';
             addBtn.style.transform = 'scale(1.05)';
-            addBtn.style.boxShadow = '0 4px 12px rgba(74, 214, 255, 0.3)';
+            addBtn.style.boxShadow = '0 4px 12px rgba(124, 111, 255, 0.3)';
         });
         addBtn.addEventListener('mouseleave', () => {
-            addBtn.style.background = 'linear-gradient(135deg, rgba(74, 214, 255, 0.2), rgba(60, 180, 220, 0.2))';
-            addBtn.style.borderColor = 'rgba(74, 214, 255, 0.4)';
+            addBtn.style.background = 'linear-gradient(135deg, rgba(124, 111, 255, 0.2), rgba(124, 111, 255, 0.2))';
+            addBtn.style.borderColor = 'rgba(124, 111, 255, 0.4)';
             addBtn.style.transform = 'scale(1)';
             addBtn.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.2)';
         });
@@ -146,7 +146,7 @@ class PlotTabManager {
             gap: 4px;
             padding: 8px 6px;
             background: linear-gradient(135deg, rgba(30, 30, 40, 0.95), rgba(25, 25, 35, 0.95));
-            border: 1px solid rgba(74, 214, 255, 0.15);
+            border: 1px solid rgba(124, 111, 255, 0.15);
             border-bottom: none;
             border-radius: 8px 8px 0 0;
             cursor: pointer;
@@ -231,16 +231,16 @@ class PlotTabManager {
         tabElement.addEventListener('mouseenter', () => {
             if (this.activeTabId !== tab.id) {
                 tabElement.style.background = 'linear-gradient(135deg, rgba(40, 45, 60, 0.95), rgba(35, 40, 55, 0.95))';
-                tabElement.style.borderColor = 'rgba(74, 214, 255, 0.3)';
+                tabElement.style.borderColor = 'rgba(124, 111, 255, 0.3)';
                 tabElement.style.transform = 'translateY(-2px)';
-                tabElement.style.boxShadow = '0 4px 12px rgba(74, 214, 255, 0.15)';
+                tabElement.style.boxShadow = '0 4px 12px rgba(124, 111, 255, 0.15)';
                 titleSpan.style.color = 'rgba(255, 255, 255, 0.95)';
             }
         });
         tabElement.addEventListener('mouseleave', () => {
             if (this.activeTabId !== tab.id) {
                 tabElement.style.background = 'linear-gradient(135deg, rgba(30, 30, 40, 0.95), rgba(25, 25, 35, 0.95))';
-                tabElement.style.borderColor = 'rgba(74, 214, 255, 0.15)';
+                tabElement.style.borderColor = 'rgba(124, 111, 255, 0.15)';
                 tabElement.style.transform = 'translateY(0)';
                 tabElement.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.2)';
                 titleSpan.style.color = 'rgba(255, 255, 255, 0.85)';
@@ -274,7 +274,7 @@ class PlotTabManager {
                 const prevTabUI = document.getElementById(`plot-tab-ui-${prevTab.id}`);
                 if (prevTabUI) {
                     prevTabUI.style.background = 'linear-gradient(135deg, rgba(30, 30, 40, 0.95), rgba(25, 25, 35, 0.95))';
-                    prevTabUI.style.borderColor = 'rgba(74, 214, 255, 0.15)';
+                    prevTabUI.style.borderColor = 'rgba(124, 111, 255, 0.15)';
                     prevTabUI.style.borderBottom = 'none';
                     prevTabUI.style.transform = 'translateY(0)';
                     prevTabUI.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.2)';
@@ -293,11 +293,11 @@ class PlotTabManager {
         
         const tabUI = document.getElementById(`plot-tab-ui-${tabId}`);
         if (tabUI) {
-            tabUI.style.background = 'linear-gradient(135deg, rgba(74, 214, 255, 0.25), rgba(60, 180, 220, 0.25))';
-            tabUI.style.borderColor = 'rgba(74, 214, 255, 0.6)';
-            tabUI.style.borderBottom = '3px solid rgba(74, 214, 255, 0.9)';
+            tabUI.style.background = 'linear-gradient(135deg, rgba(124, 111, 255, 0.25), rgba(124, 111, 255, 0.25))';
+            tabUI.style.borderColor = 'rgba(124, 111, 255, 0.6)';
+            tabUI.style.borderBottom = '3px solid rgba(124, 111, 255, 0.9)';
             tabUI.style.transform = 'translateY(0)';
-            tabUI.style.boxShadow = '0 4px 16px rgba(74, 214, 255, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
+            tabUI.style.boxShadow = '0 4px 16px rgba(124, 111, 255, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
             
             const titleSpan = document.getElementById(`plot-tab-title-${tabId}`);
             if (titleSpan) {

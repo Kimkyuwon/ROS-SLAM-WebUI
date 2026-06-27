@@ -1021,15 +1021,25 @@
 
                     <div class="player-divider"></div>
 
-                    <div class="player-options">
-                        <label>
-                            <input type="checkbox" id="player-loop" onchange="setLoop(this.checked)">
-                            Loop
-                        </label>
-                        <label>
-                            <input type="checkbox" id="player-auto-start" onchange="setAutoStart(this.checked)">
-                            Auto start
-                        </label>
+                    <div class="player-options player-options-redesigned">
+                        <div class="toggle-option">
+                            <span class="toggle-label">Loop</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="player-loop" onchange="setLoop(this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
+                        <div class="toggle-option">
+                            <span class="toggle-label">Auto Start</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="player-auto-start" onchange="setAutoStart(this.checked)">
+                                <span class="toggle-track">
+                                    <span class="toggle-thumb"></span>
+                                </span>
+                            </label>
+                        </div>
                     </div>
 
                     <div class="player-divider"></div>
