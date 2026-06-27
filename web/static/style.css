@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
 * {
     margin: 0;
     padding: 0;
@@ -591,27 +593,27 @@ h3 {
     padding: 10px 14px;
     margin: 0 0 14px 0;
     border-radius: 10px;
-    border: 1px solid var(--border);
-    background: rgba(74, 214, 255, 0.08);
+    border: 1px solid rgba(124, 111, 255, 0.3);
+    background: rgba(124, 111, 255, 0.08);
     color: var(--text);
     font-weight: 600;
     box-shadow: var(--shadow);
 }
 
 .status-banner.success {
-    background: rgba(111, 227, 180, 0.12);
-    border-color: rgba(111, 227, 180, 0.5);
+    background: rgba(29, 233, 182, 0.1);
+    border-color: rgba(29, 233, 182, 0.4);
     color: var(--text);
 }
 
 .status-banner.warn {
-    background: rgba(240, 179, 87, 0.12);
-    border-color: rgba(240, 179, 87, 0.5);
+    background: rgba(255, 183, 77, 0.1);
+    border-color: rgba(255, 183, 77, 0.4);
 }
 
 .status-banner.error {
-    background: rgba(255, 95, 109, 0.12);
-    border-color: rgba(255, 95, 109, 0.5);
+    background: rgba(240, 98, 146, 0.1);
+    border-color: rgba(240, 98, 146, 0.4);
 }
 
 /* PlotJugglerTree 스타일 */
@@ -3543,4 +3545,599 @@ h3 {
     font-weight: 500;
     letter-spacing: 0.3px;
     white-space: nowrap;
+}
+
+/* === DESIGN OVERRIDE === */
+/* ===== DESIGN OVERRIDE: SLAM Dashboard Dark Theme ===== */
+
+/* ── Brand 타이틀 폰트 ── */
+body {
+    font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', 'Ubuntu', Arial, sans-serif !important;
+}
+
+/* 폰트를 명시적으로 상속받지 못하는 요소들에 강제 적용 */
+.chip, .chip-soft, .chip-connected, .chip-disconnected, .chip-reconnecting,
+.subtab-button, .tab-button,
+.brand-title, label, span, p, h1, h2, h3, h4,
+button:not(.views-collapse-btn),
+input, select, textarea {
+    font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', 'Ubuntu', Arial, sans-serif !important;
+}
+
+/* monospace 요소는 JetBrains Mono 사용 */
+.font-mono, code, pre,
+.cfg-param-name, .cfg-param-value,
+input[type="text"].mono, .log-box,
+.analytics-hz-value, .analytics-traj-value,
+.dir-entry, .topic-item,
+.add-display-topic {
+    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+}
+.brand-title {
+    font-family: 'Space Grotesk', 'Segoe UI', sans-serif !important;
+    font-size: 15px !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.12em !important;
+    text-transform: uppercase !important;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important;
+    -webkit-background-clip: text !important;
+    -webkit-text-fill-color: transparent !important;
+    background-clip: text !important;
+}
+
+/* ── 섹션 h2 중앙 정렬 ── */
+.section-card h2,
+.tab-content h2 {
+    text-align: center !important;
+    font-size: 15px !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.05em !important;
+    color: var(--text) !important;
+    margin-bottom: 16px !important;
+    padding-bottom: 10px !important;
+    border-bottom: 1px solid var(--border) !important;
+}
+
+/* ── 탭 버튼 active: 보라 그라디언트 ── */
+.tab-button.active {
+    background: linear-gradient(135deg, rgba(124,111,255,0.18), rgba(29,233,182,0.12)) !important;
+    border-color: rgba(124,111,255,0.65) !important;
+    box-shadow: 0 6px 20px rgba(124,111,255,0.22) !important;
+    color: var(--accent) !important;
+}
+.tab-button:hover {
+    border-color: rgba(124,111,255,0.45) !important;
+}
+
+/* ── 서브탭 버튼 active ── */
+.subtab-button.active {
+    background: linear-gradient(135deg, rgba(124,111,255,0.22), rgba(29,233,182,0.1)) !important;
+    border-color: rgba(124,111,255,0.7) !important;
+    color: var(--accent) !important;
+    box-shadow: 0 3px 12px rgba(124,111,255,0.2) !important;
+}
+
+/* ╔══════════════════════════════════════════════════════════════╗
+   ║  통일 버튼 시스템 — 3 Category (Default / Primary / Destructive) ║
+   ╚══════════════════════════════════════════════════════════════╝ */
+
+/* ── Category A: Default (대부분의 버튼) ── */
+.form-group button,
+.bag-control-buttons button,
+.player-actions button,
+.modal-footer button,
+.primary-button,
+#viewer-add-display-btn,
+#plot-add-topics-btn,
+button[onclick*="selectTopics"],
+button[onclick*="selectRecorderTopics"],
+button[onclick*="loadPlayerPath"],
+button[onclick*="enterBagName"],
+button[onclick*="openAddDisplayModal"] {
+    background: #16192c !important;
+    border: 1px solid #2e3358 !important;
+    color: #c8cde8 !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+    transition: all 0.18s ease !important;
+}
+.form-group button:hover,
+.bag-control-buttons button:hover,
+.player-actions button:hover,
+.modal-footer button:hover,
+.primary-button:hover,
+#viewer-add-display-btn:hover,
+#plot-add-topics-btn:hover,
+button[onclick*="selectTopics"]:hover,
+button[onclick*="selectRecorderTopics"]:hover,
+button[onclick*="loadPlayerPath"]:hover,
+button[onclick*="enterBagName"]:hover,
+button[onclick*="openAddDisplayModal"]:hover {
+    background: #1b1f38 !important;
+    border-color: rgba(124,111,255,0.5) !important;
+    color: var(--text) !important;
+    box-shadow: 0 0 0 1px rgba(124,111,255,0.25), 0 4px 16px rgba(124,111,255,0.18) !important;
+}
+
+/* ── Category B: Primary (실행 버튼: Start / Play / Record / Run) ── */
+#slam-start-button,
+#bag-play-button,
+#play-button,
+#recorder-record-button,
+button[onclick*="startSlamMapping"],
+button[onclick*="startLocalization"],
+button[onclick*="runOptimization"],
+button[onclick*="optimizeSlam"] {
+    background: rgba(124,111,255,0.15) !important;
+    border: 1px solid rgba(124,111,255,0.5) !important;
+    color: #b0a8ff !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+    transition: all 0.18s ease !important;
+}
+#slam-start-button:hover,
+#bag-play-button:hover,
+#play-button:hover,
+#recorder-record-button:hover,
+button[onclick*="startSlamMapping"]:hover,
+button[onclick*="startLocalization"]:hover,
+button[onclick*="runOptimization"]:hover,
+button[onclick*="optimizeSlam"]:hover {
+    background: rgba(124,111,255,0.28) !important;
+    border-color: rgba(124,111,255,0.75) !important;
+    color: #d4cfff !important;
+    box-shadow: 0 0 0 1px rgba(124,111,255,0.35), 0 4px 18px rgba(124,111,255,0.32) !important;
+}
+
+/* ── Category C: Destructive (중지 버튼: Stop / Pause) ── */
+#slam-stop-button,
+#bag-stop-button,
+#bag-pause-button,
+#pause-button,
+button[onclick*="stopSlamMapping"],
+button[onclick*="stopLocalization"] {
+    background: rgba(240,98,146,0.1) !important;
+    border: 1px solid rgba(240,98,146,0.4) !important;
+    color: #f48db0 !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+    transition: all 0.18s ease !important;
+}
+#slam-stop-button:hover,
+#bag-stop-button:hover,
+#bag-pause-button:hover,
+#pause-button:hover,
+button[onclick*="stopSlamMapping"]:hover,
+button[onclick*="stopLocalization"]:hover {
+    background: rgba(240,98,146,0.2) !important;
+    border-color: rgba(240,98,146,0.7) !important;
+    color: #f8a8c4 !important;
+    box-shadow: 0 0 0 1px rgba(240,98,146,0.3), 0 4px 16px rgba(240,98,146,0.25) !important;
+}
+:root {
+    --bg:            #0b0d18;
+    --panel:         #111426;
+    --panel-strong:  #171b30;
+    --border:        #252a47;
+    --text:          #dde1f5;
+    --muted:         #7b82ab;
+    --accent:        #7c6fff;
+    --accent-2:      #1de9b6;
+    --danger:        #f06292;
+    --warning:       #ffb74d;
+    --shadow:        0 8px 32px rgba(0,0,0,0.55);
+    --radius:        10px;
+    --bg-base:       #0b0d18;
+    --bg-card:       #111426;
+    --bg-section:    #171b30;
+    --bg-input:      #1e2238;
+    --bg-hover:      #252a47;
+    --border-light:  #333966;
+    --accent-dim:    rgba(124,111,255,0.13);
+    --teal:          #1de9b6;
+    --teal-dim:      rgba(29,233,182,0.11);
+    --text-primary:  #dde1f5;
+    --text-secondary:#7b82ab;
+    --text-muted:    #454d70;
+    --success:       #1de9b6;
+    --font-mono:     'Courier New', 'Consolas', monospace;
+}
+
+body {
+    background:
+        radial-gradient(120% 120% at 30% 20%, rgba(124,111,255,0.07), transparent),
+        radial-gradient(100% 100% at 80% 0%,  rgba(29,233,182,0.06), transparent),
+        var(--bg) !important;
+    color: var(--text) !important;
+}
+
+.brand-dot {
+    background: linear-gradient(135deg, var(--accent), var(--teal)) !important;
+    box-shadow: 0 0 16px rgba(124,111,255,0.65) !important;
+}
+
+.chip {
+    background: rgba(124,111,255,0.12) !important;
+    border-color: rgba(124,111,255,0.35) !important;
+}
+
+.tab-button.active {
+    color: var(--accent) !important;
+    border-bottom-color: var(--accent) !important;
+    background: rgba(124,111,255,0.08) !important;
+}
+
+.subtab-button.active {
+    background: var(--accent-dim) !important;
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
+}
+
+.cfg-section-header {
+    border-left: 3px solid var(--accent) !important;
+}
+.cfg-section-title {
+    color: var(--accent) !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.09em !important;
+    font-size: 11px !important;
+    font-weight: 700 !important;
+}
+
+.cfg-param-value,
+.cfg-param-row input[type="text"],
+.cfg-param-row input[type="number"],
+.cfg-param-row input:not([type="checkbox"]):not([type="radio"]) {
+    font-family: var(--font-mono) !important;
+    color: var(--teal) !important;
+    background: transparent !important;
+    border-color: transparent !important;
+}
+.cfg-param-value:focus,
+.cfg-param-row input:focus {
+    background: var(--bg-input) !important;
+    border-color: var(--accent) !important;
+    color: var(--text) !important;
+    outline: none !important;
+}
+.cfg-param-name {
+    font-family: var(--font-mono) !important;
+    color: var(--muted) !important;
+    font-size: 12px !important;
+}
+
+.log-box, .output-log, #slam-opt-msg,
+[id$="-log"], [id$="-output"] {
+    background: #06080e !important;
+    border-color: var(--border) !important;
+    color: var(--teal) !important;
+    font-family: var(--font-mono) !important;
+    font-size: 12px !important;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(29,233,182,0.4); }
+    50%       { opacity: 0.7; box-shadow: 0 0 0 4px rgba(29,233,182,0); }
+}
+.status-dot {
+    border-radius: 50% !important;
+}
+.status-running .status-dot,
+.status-dot.running {
+    background: var(--teal) !important;
+    animation: pulse 1.6s ease infinite !important;
+}
+
+#3d-viewer-container, #loc-viewer-canvas-container,
+#slam-result-canvas-container, .viewer-canvas-area {
+    background: #06080e !important;
+    border-color: var(--border) !important;
+}
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ╔══════════════════════════════════════════════════════════════╗
+   ║  Analytics Dashboard — 보라/인디고 accent 기반 재스타일         ║
+   ╚══════════════════════════════════════════════════════════════╝ */
+.analytics-dashboard-header {
+    border-bottom: 1px solid rgba(124,111,255,0.2) !important;
+}
+.analytics-dashboard-title {
+    color: #c0b8ff !important;
+    font-size: 13px !important;
+    letter-spacing: 0.06em !important;
+    text-transform: uppercase !important;
+}
+.analytics-live-badge {
+    background: transparent !important;
+    border: 1px solid rgba(29,233,182,0.6) !important;
+    color: #1de9b6 !important;
+    animation: analytics-pulse 2s infinite !important;
+}
+
+.analytics-card {
+    background: #0e1122 !important;
+    border: 1px solid rgba(124,111,255,0.2) !important;
+    border-radius: 10px !important;
+    backdrop-filter: blur(4px) !important;
+}
+.analytics-card-title {
+    color: rgba(192,184,255,0.8) !important;
+    font-size: 10px !important;
+    letter-spacing: 0.1em !important;
+}
+
+.analytics-hz-item {
+    background: rgba(124,111,255,0.07) !important;
+    border: 1px solid rgba(124,111,255,0.15) !important;
+}
+.analytics-hz-value.analytics-hz-ok {
+    color: #1de9b6 !important;
+}
+.analytics-hz-value.analytics-hz-warn {
+    color: #ffb74d !important;
+}
+.analytics-hz-value.analytics-hz-err {
+    color: #f06292 !important;
+}
+
+.analytics-traj-item {
+    background: rgba(124,111,255,0.06) !important;
+    border: 1px solid rgba(124,111,255,0.12) !important;
+}
+.analytics-traj-value {
+    color: #ffd166 !important;
+}
+.analytics-traj-derived {
+    color: #b0a8ff !important;
+}
+
+.analytics-cpu-percent {
+    color: #ffb74d !important;
+}
+.analytics-cpu-bar-bg {
+    background: rgba(255,255,255,0.05) !important;
+}
+
+.analytics-cumul-table th {
+    color: rgba(192,184,255,0.5) !important;
+    border-bottom-color: rgba(124,111,255,0.2) !important;
+}
+
+/* ── 토글 스위치 ── */
+.player-options-redesigned {
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    padding: 8px 0;
+}
+.toggle-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.toggle-label {
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 500;
+    letter-spacing: 0.03em;
+}
+.toggle-switch {
+    position: relative;
+    display: inline-block;
+    cursor: pointer;
+}
+.toggle-switch input { display: none; }
+.toggle-track {
+    display: block;
+    width: 36px;
+    height: 20px;
+    background: #16192c;
+    border: 1px solid #2e3358;
+    border-radius: 10px;
+    position: relative;
+    transition: background 0.2s, border-color 0.2s;
+}
+.toggle-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #454d70;
+    transition: left 0.2s, background 0.2s;
+}
+.toggle-switch input:checked ~ .toggle-track {
+    background: rgba(124,111,255,0.2);
+    border-color: rgba(124,111,255,0.6);
+}
+.toggle-switch input:checked ~ .toggle-track .toggle-thumb {
+    left: 19px;
+    background: #7c6fff;
+    box-shadow: 0 0 6px rgba(124,111,255,0.5);
+}
+
+/* ── 모달 공통 (flex center) ── */
+.modal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(11,13,24,0.82) !important;
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(3px);
+}
+.modal[style*="flex"] { display: flex !important; }
+/* 모달 display: block → flex 통일 (JS가 block으로 설정하므로) */
+.modal[style*="display: block"] {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+}
+
+/* 동적 생성 dir-entry (파일 브라우저) */
+.dir-entry {
+    padding: 8px 14px !important;
+    font-size: 13px !important;
+    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    cursor: pointer !important;
+    border-radius: 5px !important;
+    transition: background 0.12s !important;
+    color: var(--text) !important;
+}
+.dir-entry:hover { background: rgba(124,111,255,0.1) !important; color: #b0a8ff !important; }
+.dir-entry.file-item { color: var(--muted) !important; }
+
+/* 동적 생성 topic-item (토픽 선택 모달) */
+.topic-item {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+    padding: 6px 10px !important;
+    font-size: 12px !important;
+    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    color: var(--muted) !important;
+    cursor: pointer !important;
+    border-radius: 4px !important;
+    transition: background 0.1s !important;
+}
+.topic-item:hover { background: rgba(124,111,255,0.08) !important; color: var(--text) !important; }
+.topic-item input[type="checkbox"] { accent-color: #7c6fff !important; width: 14px !important; height: 14px !important; }
+
+/* 동적 생성 add-display-type-row (3D Viewer Add Display) */
+.add-display-type-row {
+    display: flex !important;
+    align-items: center !important;
+    gap: 10px !important;
+    padding: 9px 14px !important;
+    cursor: pointer !important;
+    border-radius: 5px !important;
+    transition: background 0.12s !important;
+    font-size: 13px !important;
+}
+.add-display-type-row:hover { background: rgba(124,111,255,0.1) !important; }
+.add-display-type-row.selected {
+    background: rgba(124,111,255,0.18) !important;
+    border-left: 3px solid #7c6fff !important;
+}
+.add-display-type-row.active {
+    background: rgba(124,111,255,0.18) !important;
+    border-left: 3px solid #7c6fff !important;
+}
+.add-display-icon { font-size: 16px !important; width: 20px !important; text-align: center !important; }
+.add-display-name { flex: 1 !important; color: var(--text) !important; font-weight: 500 !important; }
+.add-display-topic { font-size: 11px !important; font-family: monospace !important; color: var(--muted) !important; }
+
+/* selected-topics-display 스타일 */
+.topics-display-styled {
+    background: #0e1020 !important;
+    border: 1px solid rgba(124,111,255,0.25) !important;
+    border-radius: 6px !important;
+    padding: 7px 12px !important;
+    font-size: 12px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    color: #1de9b6 !important;
+    min-height: 30px !important;
+    line-height: 1.6 !important;
+}
+
+/* Plot Display Toolbar 버튼 */
+.plot-display-toolbar button,
+button[onclick*="expandAllPlotTree"],
+button[onclick*="collapseAllPlotTree"] {
+    background: #16192c !important;
+    border: 1px solid #2e3358 !important;
+    color: #8b90b8 !important;
+    border-radius: 5px !important;
+    font-size: 11px !important;
+    padding: 3px 10px !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+    letter-spacing: 0.03em !important;
+    transition: all 0.15s !important;
+}
+.plot-display-toolbar button:hover,
+button[onclick*="expandAllPlotTree"]:hover,
+button[onclick*="collapseAllPlotTree"]:hover {
+    border-color: rgba(124,111,255,0.5) !important;
+    color: #b0a8ff !important;
+}
+
+/* Zero / resetViewCamera 버튼 */
+button[onclick*="resetViewCamera"] {
+    background: #0e1020 !important;
+    border: 1px solid rgba(29,233,182,0.3) !important;
+    color: #1de9b6 !important;
+    border-radius: 4px !important;
+    font-size: 11px !important;
+    padding: 2px 8px !important;
+    font-family: 'Space Grotesk', sans-serif !important;
+    transition: all 0.15s !important;
+}
+button[onclick*="resetViewCamera"]:hover {
+    border-color: rgba(29,233,182,0.7) !important;
+    box-shadow: 0 0 8px rgba(29,233,182,0.15) !important;
+}
+
+/* Collapse/Expand 화살표 버튼 */
+.views-collapse-btn {
+    background: transparent !important;
+    border: 1px solid rgba(124,111,255,0.2) !important;
+    border-radius: 4px !important;
+    color: #6c72a0 !important;
+    width: 20px !important;
+    height: 20px !important;
+    padding: 0 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 9px !important;
+    line-height: 1 !important;
+    transition: all 0.15s !important;
+    cursor: pointer !important;
+}
+.views-collapse-btn:hover {
+    background: rgba(124,111,255,0.12) !important;
+    border-color: rgba(124,111,255,0.5) !important;
+    color: #b0a8ff !important;
+}
+
+/* × (닫기) 버튼 스타일 */
+.modal-header .close,
+span.close {
+    background: transparent !important;
+    border: 1px solid rgba(240,98,146,0.2) !important;
+    border-radius: 4px !important;
+    color: #8b90b8 !important;
+    width: 24px !important;
+    height: 24px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 16px !important;
+    line-height: 1 !important;
+    cursor: pointer !important;
+    transition: all 0.15s !important;
+}
+.modal-header .close:hover,
+span.close:hover {
+    background: rgba(240,98,146,0.15) !important;
+    border-color: rgba(240,98,146,0.5) !important;
+    color: #f06292 !important;
+}
+
+/* ── status label 좌측 간격 ── */
+label#slam-status,
+label#localization-status,
+label#lidar-slam-status,
+#slam-status, #localization-status, #lidar-slam-status {
+    padding-left: 4px !important;
+    margin-left: 4px !important;
 }

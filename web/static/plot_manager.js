@@ -509,37 +509,37 @@ class PlotlyPlotManager {
             title: {
                 text: paths.length === 1 ? `Plot: ${paths[0]}` : `Plot: ${paths.length} items`,
                 font: {
-                    color: '#000000',
+                    color: '#dde1f5',
                     size: 14
                 }
             },
             xaxis: {
                 title: {
                     text: 'Time (seconds, relative to t0)',  // 디폴트로 상대 시간 표시
-                    font: { color: '#000000' }
+                    font: { color: '#7b82ab' }
                 },
                 showgrid: true,
-                gridcolor: '#cccccc',
+                gridcolor: '#1e2238',
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#000000',
+                zerolinecolor: '#2e3358',
                 zerolinewidth: 1,
-                tickfont: { color: '#000000' },
+                tickfont: { color: '#7b82ab' },
                 exponentformat: 'e',  // 과학적 표기법 (1.23e+08)
                 showexponent: 'all'
             },
             yaxis: {
                 title: {
                     text: 'Value',
-                    font: { color: '#000000' }
+                    font: { color: '#7b82ab' }
                 },
                 showgrid: true,
-                gridcolor: '#cccccc',
+                gridcolor: '#1e2238',
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#000000',
+                zerolinecolor: '#2e3358',
                 zerolinewidth: 1,
-                tickfont: { color: '#000000' },
+                tickfont: { color: '#7b82ab' },
                 exponentformat: 'e',  // 과학적 표기법 (1.23e+08)
                 showexponent: 'all'
             },
@@ -549,10 +549,10 @@ class PlotlyPlotManager {
                 xanchor: 'right',
                 y: 1,
                 yanchor: 'top',
-                bgcolor: 'rgba(255, 255, 255, 0.9)',
-                bordercolor: '#000000',
+                bgcolor: 'rgba(17,20,38,0.9)',
+                bordercolor: '#2e3358',
                 borderwidth: 1,
-                font: { color: '#000000' }
+                font: { color: '#dde1f5' }
             },
             margin: {
                 l: 60,
@@ -560,10 +560,10 @@ class PlotlyPlotManager {
                 b: 50,
                 t: 50
             },
-            paper_bgcolor: '#ffffff',
-            plot_bgcolor: '#ffffff',
+            paper_bgcolor: '#0b0d18',
+            plot_bgcolor: '#0e1020',
             font: {
-                color: '#000000',
+                color: '#dde1f5',
                 family: 'Arial, sans-serif'
             }
         };
@@ -740,35 +740,35 @@ class PlotlyPlotManager {
             title: {
                 text: `XY Plot: ${yPath} vs ${xPath}`,
                 font: {
-                    color: '#000000',
+                    color: '#dde1f5',
                     size: 14
                 }
             },
             xaxis: {
                 title: {
                     text: xPath,  // X축 라벨은 데이터명
-                    font: { color: '#000000' }
+                    font: { color: '#7b82ab' }
                 },
                 showgrid: true,
-                gridcolor: '#cccccc',
+                gridcolor: '#1e2238',
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#000000',
+                zerolinecolor: '#2e3358',
                 zerolinewidth: 1,
-                tickfont: { color: '#000000' }
+                tickfont: { color: '#7b82ab' }
             },
             yaxis: {
                 title: {
                     text: yPath,  // Y축 라벨은 데이터명
-                    font: { color: '#000000' }
+                    font: { color: '#7b82ab' }
                 },
                 showgrid: true,
-                gridcolor: '#cccccc',
+                gridcolor: '#1e2238',
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#000000',
+                zerolinecolor: '#2e3358',
                 zerolinewidth: 1,
-                tickfont: { color: '#000000' }
+                tickfont: { color: '#7b82ab' }
             },
             showlegend: true,
             legend: {
@@ -776,10 +776,10 @@ class PlotlyPlotManager {
                 xanchor: 'right',
                 y: 1,
                 yanchor: 'top',
-                bgcolor: 'rgba(255, 255, 255, 0.9)',
-                bordercolor: '#000000',
+                bgcolor: 'rgba(17,20,38,0.9)',
+                bordercolor: '#2e3358',
                 borderwidth: 1,
-                font: { color: '#000000' }
+                font: { color: '#dde1f5' }
             },
             margin: {
                 l: 60,
@@ -787,10 +787,10 @@ class PlotlyPlotManager {
                 b: 50,
                 t: 50
             },
-            paper_bgcolor: '#ffffff',
-            plot_bgcolor: '#ffffff',
+            paper_bgcolor: '#0b0d18',
+            plot_bgcolor: '#0e1020',
             font: {
-                color: '#000000',
+                color: '#dde1f5',
                 family: 'Arial, sans-serif'
             }
         };
@@ -1509,6 +1509,10 @@ class PlotlyPlotManager {
             // Plotly.react로 전체 다시 렌더링
             const plotDiv = document.getElementById(this.containerId);
             const currentLayout = plotDiv.layout;
+            if (currentLayout) {
+                currentLayout.paper_bgcolor = '#0b0d18';
+                currentLayout.plot_bgcolor = '#0e1020';
+            }
             Plotly.react(this.containerId, this.traces, currentLayout);
         }
         

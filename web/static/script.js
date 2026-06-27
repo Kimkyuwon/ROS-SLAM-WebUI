@@ -308,12 +308,13 @@ async function loadDirectoryList(path) {
 
                 // Add icon for directories and files
                 if (entry.is_dir) {
+                    div.classList.add('dir-entry');
                     div.textContent = '📁 ' + entry.name;
                     div.onclick = () => loadDirectoryList(entry.path);
                 } else {
+                    div.classList.add('dir-entry', 'file-item');
                     div.textContent = '📄 ' + entry.name;
                     div.onclick = () => selectFile(entry.path);
-                    div.style.color = '#aaaaaa';
                 }
 
                 listElement.appendChild(div);
@@ -794,6 +795,9 @@ function confirmTopicSelection() {
 function updateSelectedTopicsDisplay() {
     const display = domCache.get('bag-selected-topics-display');
     if (!display) return;
+    if (!display.classList.contains('topics-display-styled')) {
+        display.classList.add('topics-display-styled');
+    }
 
     if (bagPlayerState.selectedTopics.length === 0) {
         display.innerHTML = '<span style="color: #888;">No topics selected</span>';
@@ -2113,11 +2117,12 @@ async function loadBagNameDirectory(path) {
                 div.className = 'directory-entry';
 
                 if (entry.is_dir) {
+                    div.classList.add('dir-entry');
                     div.textContent = '📁 ' + entry.name;
                     div.onclick = () => loadBagNameDirectory(entry.path);
                 } else {
+                    div.classList.add('dir-entry', 'file-item');
                     div.textContent = '📄 ' + entry.name;
-                    div.style.color = '#aaaaaa';
                     div.onclick = () => {
                         domCache.get('bag-name-input').value = entry.name;
                     };
@@ -2251,6 +2256,9 @@ function confirmRecorderTopicSelection() {
 function updateRecorderSelectedTopicsDisplay() {
     const display = domCache.get('recorder-selected-topics-display');
     if (!display) return;
+    if (!display.classList.contains('topics-display-styled')) {
+        display.classList.add('topics-display-styled');
+    }
 
     if (bagRecorderState.selectedTopics.length === 0) {
         display.innerHTML = '<span style="color: #888;">No topics selected</span>';
