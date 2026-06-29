@@ -599,7 +599,13 @@ async function updateSlamState() {
                 // 페이지 재진입 시 Save Map 결과가 이미 완료된 상태면 뷰어 복원
                 _maybeRestoreSaveMapViewer();
                 // 재진입 복원: SLAM Live Viewer (_slamStopping 중에는 재표시 차단)
-                if (typeof slamLiveViewer !== 'undefined' && !window._slamStopping) {
+                // SLAM 미실행 상태면 _slamSaving 플래그 자동 해제 (stale flag 방지)
+                if (!state.is_running) {
+                    window._slamSaving = false;
+                    // SLAM 중단 시 visual hide된 뷰어 복원 (연결은 유지 중이었으므로 표시만)
+                    if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+                }
+                if (typeof slamLiveViewer !== 'undefined' && !window._slamStopping && !window._slamSaving) {
                     if (state.is_running && !slamLiveViewer._visible) {
                         slamLiveViewer.show();
                     } else if (!state.is_running && slamLiveViewer._visible) {
@@ -2818,6 +2824,11 @@ async function saveSlamMap() {
 
 function closeSaveMapModal() {
     domCache.get('save-map-modal').style.display = 'none';
+    // 모달 취소 시 플래그 해제 (confirmSaveMap 호출 전에 닫은 경우)
+    if (!_saveMapPollTimer) {
+        window._slamSaving = false;
+        if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+    }
 }
 
 let _saveMapPollTimer = null;
@@ -2840,12 +2851,19 @@ async function confirmSaveMap() {
         saveMapResultViewer.hideAndReset();
     }
 
+    // 저장 확정 시점에 Live Viewer 화면만 숨김 (WebSocket 유지 → DDS 재조회 없음)
+    window._slamSaving = true;
+    if (typeof slamLiveViewer !== 'undefined' && slamLiveViewer._visible) {
+        slamLiveViewer._visualHide();
+    }
+
     const result = await apiCall('/api/slam/save_map', { directory: directoryName });
 
     if (result.success) {
         _showSaveMapStatus('Saving map to "' + directoryName + '"...', true);
         _startSaveMapPolling();
     } else {
+        window._slamSaving = false;
         alert('Failed to start map save: ' + (result.message || 'Unknown error'));
     }
 }
@@ -2960,6 +2978,8 @@ async function _pollSaveMapStatus() {
         if (status.done) {
             clearInterval(_saveMapPollTimer);
             _saveMapPollTimer = null;
+            window._slamSaving = false;
+            if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
 
             if (status.success) {
                 _showSaveMapSuccess('✓ ' + (status.message || 'Map saved successfully'));
@@ -2986,6 +3006,8 @@ async function cancelSaveMap() {
     if (result.success) {
         clearInterval(_saveMapPollTimer);
         _saveMapPollTimer = null;
+        window._slamSaving = false;
+        if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
         _showSaveMapError('Cancelled by user');
     } else {
         cancelBtn.disabled = false;
@@ -2998,6 +3020,8 @@ async function cancelSaveMap() {
 // SLAM Start/Stop (terminal output removed)
 // ==============================================================
 async function startSlamMapping() {
+    // SLAM 시작 시 stale 플래그 초기화
+    window._slamSaving = false;
     // 새 SLAM 시작 시 이전 Save Map 결과 뷰어 숨김
     if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
         saveMapResultViewer.hideAndReset();
@@ -3400,7 +3424,7 @@ const plotState = {
 // PC2WebSocketServer의 subscribe_plot 명령을 사용한다.
 // ─────────────────────────────────────────────────────────────────────────────
 function _initBackendWs() {
-    const host = window.location.hostname;
+    const host = window.location.hostname || 'localhost';
     const url  = `ws://${host}:8081`;
 
     if (plotState.backendWs &&
@@ -3761,6 +3785,17 @@ function updateRosbridgeStatusChip(state) {
 }
 window.updateRosbridgeStatusChip = updateRosbridgeStatusChip;
 
+// rosbridge WebSocket URL 결정 헬퍼
+// - IP 주소 또는 localhost: 그대로 사용 (원격 접속 지원, DNS 즉시)
+// - 호스트명(예: 'kkw'): localhost로 대체 (DNS/프록시 지연 방지)
+// rosbridge는 항상 웹 서버와 동일 머신에서 실행되므로 localhost 연결이 항상 유효
+function _getRosbridgeUrl(port) {
+    const host = window.location.hostname || 'localhost';
+    const isRemoteIp = /^[\d.]+$/.test(host) || /^\[?[0-9a-fA-F:]+\]?$/.test(host);
+    const wsHost = isRemoteIp ? host : '127.0.0.1';
+    return `ws://${wsHost}:${port || 9090}`;
+}
+
 function initRosbridge() {
     if (typeof ROSLIB === 'undefined') {
         console.error('ROSLIB not loaded');
@@ -3769,7 +3804,7 @@ function initRosbridge() {
 
     try {
         plotState.ros = new ROSLIB.Ros({
-            url: 'ws://localhost:9090'
+            url: _getRosbridgeUrl(9090)
         });
 
         plotState.ros.on('connection', () => {
@@ -5406,6 +5441,10 @@ class LocalizationLiveViewer {
         this._mapObj = null;
         this._pathObj = null;
         this._tfObjects = {};
+        this._robotPos = null;   // THREE.Vector3 — updated from base_link TF
+        this._followMode = true; // camera follow toggle
+        this._accMapObj    = null;   // accumulated map PointCloud
+        this._mapAccWorker = null;   // map_accumulator_worker instance
         this._mapMesh = null;
         this._mapTexture = null;
         // 레이어 가시성은 메시지 수신 시 자동으로 활성화 (수동 체크박스 제거)
@@ -5450,7 +5489,7 @@ class LocalizationLiveViewer {
         this._scene.background = new THREE.Color(0x0a0a18);
 
         this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
-        this._camera.position.set(0, -30, 20);
+        this._camera.position.set(0, 0, 20);
         this._camera.up.set(0, 0, 1);
         this._perspCamera = this._camera;
 
@@ -5468,8 +5507,39 @@ class LocalizationLiveViewer {
     }
 
     _startRenderLoop() {
+        const LERP = 0.08;
         const animate = () => {
             this._animFrameId = requestAnimationFrame(animate);
+
+            // Camera follow: pan camera+target together toward robot (preserves orbit angle)
+            if (this._followMode && this._robotPos && this._controls) {
+                const rp = this._robotPos;
+                if (this._topView && this._orthoCamera) {
+                    // TopView: move orthoCamera + target together
+                    const dx = (rp.x - this._orthoCamera.position.x) * LERP;
+                    const dy = (rp.y - this._orthoCamera.position.y) * LERP;
+                    this._orthoCamera.position.x += dx;
+                    this._orthoCamera.position.y += dy;
+                    this._controls.target.x += dx;
+                    this._controls.target.y += dy;
+                    this._orthoCamera.lookAt(
+                        this._orthoCamera.position.x,
+                        this._orthoCamera.position.y, 0
+                    );
+                } else {
+                    // Orbit: move camera + target by same delta (preserves angle/distance)
+                    const dx = (rp.x - this._controls.target.x) * LERP;
+                    const dy = (rp.y - this._controls.target.y) * LERP;
+                    const dz = (rp.z - this._controls.target.z) * LERP;
+                    this._controls.target.x += dx;
+                    this._controls.target.y += dy;
+                    this._controls.target.z += dz;
+                    this._perspCamera.position.x += dx;
+                    this._perspCamera.position.y += dy;
+                    this._perspCamera.position.z += dz;
+                }
+            }
+
             if (this._controls) this._controls.update();
             // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신
             if (this._topView && this._orthoCamera) {
@@ -5599,7 +5669,7 @@ class LocalizationLiveViewer {
         } else {
             if (loadingEl) loadingEl.style.display = 'flex';
             try {
-                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
                 this._ros.on('connection', () => {
                     console.log('[LocalizationLiveViewer] rosbridge connected');
                     if (loadingEl) loadingEl.style.display = 'none';
@@ -5623,6 +5693,47 @@ class LocalizationLiveViewer {
         this._subscribePathBinary('/path');
         this._subscribeTF('/tf');
         this._subscribeMap('/map');
+        this._initMapAccumulator();
+    }
+
+    _initMapAccumulator() {
+        if (this._mapAccWorker) return;
+        try {
+            this._mapAccWorker = new Worker('/static/map_accumulator_worker.js');
+        } catch (e) {
+            console.warn('[LocalizationLiveViewer] map_accumulator_worker not available:', e);
+            return;
+        }
+
+        this._mapAccWorker.onmessage = (e) => {
+            if (e.data.cmd !== 'flush') return;
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+            const { positions, colors, count } = e.data;
+            if (count === 0) return;
+
+            if (!this._accMapObj) {
+                const geo = new THREE.BufferGeometry();
+                const mat = new THREE.PointsMaterial({
+                    size: 0.03,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.6,
+                    depthWrite: false,
+                    sizeAttenuation: true
+                });
+                mat._baseSize = 0.03;
+                this._accMapObj = new THREE.Points(geo, mat);
+                this._scene.add(this._accMapObj);
+            }
+
+            const geo = this._accMapObj.geometry;
+            geo.setAttribute('position',
+                new THREE.BufferAttribute(positions, 3));
+            geo.setAttribute('color',
+                new THREE.BufferAttribute(colors, 3));
+            geo.computeBoundingSphere();
+        };
     }
 
     _unsubscribeAll() {
@@ -5630,6 +5741,10 @@ class LocalizationLiveViewer {
             try { t.unsubscribe(); } catch (e) { /* ignore */ }
         }
         this._subscriptions = [];
+        if (this._mapAccWorker) {
+            this._mapAccWorker.terminate();
+            this._mapAccWorker = null;
+        }
     }
 
     _parsePC2(msg) {
@@ -5788,7 +5903,19 @@ class LocalizationLiveViewer {
         ws.onmessage = (ev) => {
             if (!(ev.data instanceof ArrayBuffer)) return; // JSON meta 무시
             const parsed = this._parseBinaryPC2(ev.data);
-            if (parsed) this._updatePointCloud(key, parsed);
+            if (parsed) {
+                this._updatePointCloud(key, parsed);
+
+                // Forward to accumulator worker
+                if (this._mapAccWorker && parsed.positions && parsed.colors) {
+                    const posCopy = new Float32Array(parsed.positions);
+                    const colCopy = new Float32Array(parsed.colors);
+                    this._mapAccWorker.postMessage(
+                        { cmd: 'addPoints', positions: posCopy, colors: colCopy },
+                        [posCopy.buffer, colCopy.buffer]
+                    );
+                }
+            }
         };
 
         ws.onerror = (e) => console.error('[LocalizationLiveViewer] PC2 WS error:', e);
@@ -6042,6 +6169,12 @@ class LocalizationLiveViewer {
                 const entry = this._tfObjects[childId];
                 entry.group.position.set(trans.x, trans.y, trans.z);
                 entry.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+
+                // Update robot position for camera follow (base_link or body frame)
+                if (childId === 'base_link' || childId === 'body') {
+                    if (!this._robotPos) this._robotPos = new window.THREE.Vector3();
+                    this._robotPos.set(trans.x, trans.y, trans.z);
+                }
             }
         });
         this._subscriptions.push(t);
@@ -6129,7 +6262,7 @@ class LocalizationLiveViewer {
 
     resetView() {
         if (!this._camera || !this._controls) return;
-        this._camera.position.set(0, -30, 20);
+        this._camera.position.set(0, 0, 20);
         this._camera.up.set(0, 0, 1);
         this._controls.target.set(0, 0, 0);
         this._restoreOrbitControls();
@@ -6155,6 +6288,12 @@ class LocalizationLiveViewer {
                 RIGHT: window.THREE.MOUSE.PAN
             };
         }
+    }
+
+    toggleFollow(force) {
+        this._followMode = (force !== undefined) ? force : !this._followMode;
+        const btn = document.getElementById('loc-follow-btn');
+        if (btn) btn.classList.toggle('active', this._followMode);
     }
 
     toggleTopView(enable) {
@@ -6373,6 +6512,10 @@ class SlamLiveViewer {
 
         // TF 객체 (/tf) — LocalizationLiveViewer와 동일한 구조
         this._tfObjects = {};         // childFrameId → { group: THREE.Group }
+        this._robotPos   = null;   // THREE.Vector3 — updated from base_link TF
+        this._followMode = true;   // camera follow toggle
+        this._accMapObj  = null;   // accumulated map PointCloud
+        this._mapAccWorker = null; // map_accumulator_worker instance
         this._knownFrames = new Set();
 
         this._topView = false;
@@ -6411,7 +6554,7 @@ class SlamLiveViewer {
         this._scene.background = new THREE.Color(0x0a0a18);
 
         this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
-        this._camera.position.set(0, -30, 20);
+        this._camera.position.set(0, 0, 20);
         this._camera.up.set(0, 0, 1);
         this._perspCamera = this._camera;
 
@@ -6429,8 +6572,39 @@ class SlamLiveViewer {
     }
 
     _startRenderLoop() {
+        const LERP = 0.08;
         const animate = () => {
             this._animFrameId = requestAnimationFrame(animate);
+
+            // Camera follow: pan camera+target together toward robot (preserves orbit angle)
+            if (this._followMode && this._robotPos && this._controls) {
+                const rp = this._robotPos;
+                if (this._topView && this._orthoCamera) {
+                    // TopView: move orthoCamera + target together
+                    const dx = (rp.x - this._orthoCamera.position.x) * LERP;
+                    const dy = (rp.y - this._orthoCamera.position.y) * LERP;
+                    this._orthoCamera.position.x += dx;
+                    this._orthoCamera.position.y += dy;
+                    this._controls.target.x += dx;
+                    this._controls.target.y += dy;
+                    this._orthoCamera.lookAt(
+                        this._orthoCamera.position.x,
+                        this._orthoCamera.position.y, 0
+                    );
+                } else {
+                    // Orbit: move camera + target by same delta (preserves angle/distance)
+                    const dx = (rp.x - this._controls.target.x) * LERP;
+                    const dy = (rp.y - this._controls.target.y) * LERP;
+                    const dz = (rp.z - this._controls.target.z) * LERP;
+                    this._controls.target.x += dx;
+                    this._controls.target.y += dy;
+                    this._controls.target.z += dz;
+                    this._perspCamera.position.x += dx;
+                    this._perspCamera.position.y += dy;
+                    this._perspCamera.position.z += dz;
+                }
+            }
+
             if (this._controls) this._controls.update();
             if (this._topView && this._orthoCamera) this._updateOrthoPointSizes();
             if (this._renderer && this._scene && this._camera) {
@@ -6457,6 +6631,7 @@ class SlamLiveViewer {
             obj.material.size = Math.max(1, baseSize * scale);
         };
         update(this._cloudObj);
+        update(this._accMapObj);
     }
 
     _resizeRenderer() {
@@ -6543,6 +6718,16 @@ class SlamLiveViewer {
         this._pathObj = null;
         this._pgoPathObj = null;
         this._loopLineObj = null;
+        // Clear accumulated map
+        if (this._accMapObj) {
+            this._scene.remove(this._accMapObj);
+            if (this._accMapObj.geometry) this._accMapObj.geometry.dispose();
+            if (this._accMapObj.material) this._accMapObj.material.dispose();
+            this._accMapObj = null;
+        }
+        if (this._mapAccWorker) {
+            this._mapAccWorker.postMessage({ cmd: 'clear' });
+        }
         this._pathPoseCount = 0;
         this._pgoPathPoseCount = 0;
 
@@ -6564,7 +6749,7 @@ class SlamLiveViewer {
         } else {
             if (loadingEl) loadingEl.style.display = 'flex';
             try {
-                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
                 this._ros.on('connection', () => {
                     console.log('[SlamLiveViewer] rosbridge connected');
                     if (loadingEl) loadingEl.style.display = 'none';
@@ -6589,13 +6774,54 @@ class SlamLiveViewer {
 
         // Path: 바이너리 WebSocket(8081) — rosbridge JSON 오버헤드 제거
         this._subscribePathBinary('/path', 'path', 0x00ff44);         // 녹색
-        this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffaa00); // 주황색
+        this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffffff); // 흰색
 
         // Marker: ROSLIB via rosbridge
         this._subscribeMarker('/loopLine');
 
         // TF: ROSLIB via rosbridge (LocalizationLiveViewer와 동일)
         this._subscribeTF('/tf');
+        this._initMapAccumulator();
+    }
+
+    _initMapAccumulator() {
+        if (this._mapAccWorker) return;
+        try {
+            this._mapAccWorker = new Worker('/static/map_accumulator_worker.js');
+        } catch (e) {
+            console.warn('[SlamLiveViewer] map_accumulator_worker not available:', e);
+            return;
+        }
+
+        this._mapAccWorker.onmessage = (e) => {
+            if (e.data.cmd !== 'flush') return;
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+            const { positions, colors, count } = e.data;
+            if (count === 0) return;
+
+            if (!this._accMapObj) {
+                const geo = new THREE.BufferGeometry();
+                const mat = new THREE.PointsMaterial({
+                    size: 0.03,
+                    vertexColors: true,
+                    transparent: true,
+                    opacity: 0.6,
+                    depthWrite: false,
+                    sizeAttenuation: true
+                });
+                mat._baseSize = 0.03;
+                this._accMapObj = new THREE.Points(geo, mat);
+                this._scene.add(this._accMapObj);
+            }
+
+            const geo = this._accMapObj.geometry;
+            geo.setAttribute('position',
+                new THREE.BufferAttribute(positions, 3));
+            geo.setAttribute('color',
+                new THREE.BufferAttribute(colors, 3));
+            geo.computeBoundingSphere();
+        };
     }
 
     _unsubscribeAll() {
@@ -6603,6 +6829,10 @@ class SlamLiveViewer {
             try { t.unsubscribe(); } catch (e) { /* ignore */ }
         }
         this._subscriptions = [];
+        if (this._mapAccWorker) {
+            this._mapAccWorker.terminate();
+            this._mapAccWorker = null;
+        }
     }
 
     _rainbowColor(t) {
@@ -6853,6 +7083,16 @@ class SlamLiveViewer {
             if (!(ev.data instanceof ArrayBuffer)) return;
             const parsed = this._parseBinaryPC2(ev.data);
             if (parsed) this._updatePointCloud(key, parsed);
+            // Forward cloud_registered to accumulator worker
+            if (parsed && key === 'cloud_registered' && this._mapAccWorker &&
+                parsed.positions && parsed.colors) {
+                const posCopy = new Float32Array(parsed.positions);
+                const colCopy = new Float32Array(parsed.colors);
+                this._mapAccWorker.postMessage(
+                    { cmd: 'addPoints', positions: posCopy, colors: colCopy },
+                    [posCopy.buffer, colCopy.buffer]
+                );
+            }
         };
 
         ws.onerror = (e) => console.error(`[SlamLiveViewer] PC2 WS error (${topic}):`, e);
@@ -7104,6 +7344,11 @@ class SlamLiveViewer {
                 const entry = this._tfObjects[childId];
                 entry.group.position.set(trans.x, trans.y, trans.z);
                 entry.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+                // Update robot position for camera follow (base_link or body frame)
+                if (childId === 'base_link' || childId === 'body') {
+                    if (!this._robotPos) this._robotPos = new window.THREE.Vector3();
+                    this._robotPos.set(trans.x, trans.y, trans.z);
+                }
             }
         });
         this._subscriptions.push(t);
@@ -7111,7 +7356,7 @@ class SlamLiveViewer {
 
     resetView() {
         if (!this._camera || !this._controls) return;
-        this._camera.position.set(0, -30, 20);
+        this._camera.position.set(0, 0, 20);
         this._camera.up.set(0, 0, 1);
         this._controls.target.set(0, 0, 0);
         this._restoreOrbitControls();
@@ -7137,6 +7382,23 @@ class SlamLiveViewer {
                 RIGHT: window.THREE.MOUSE.PAN
             };
         }
+    }
+
+    // Save Map 중 화면만 숨김 (WebSocket 연결 유지 → DDS 재조회 방지)
+    _visualHide() {
+        const viewerEl = document.getElementById('slam-live-viewer');
+        if (viewerEl) viewerEl.style.display = 'none';
+    }
+
+    _visualShow() {
+        const viewerEl = document.getElementById('slam-live-viewer');
+        if (viewerEl && this._visible) viewerEl.style.display = 'block';
+    }
+
+    toggleFollow(force) {
+        this._followMode = (force !== undefined) ? force : !this._followMode;
+        const btn = document.getElementById('slam-live-follow-btn');
+        if (btn) btn.classList.toggle('active', this._followMode);
     }
 
     toggleTopView(enable) {
@@ -7197,6 +7459,7 @@ class SlamLiveViewer {
                 }
             };
             restoreSize(this._cloudObj);
+            restoreSize(this._accMapObj);
             // kf_node는 InstancedMesh(MeshBasicMaterial)이므로 size 복원 불필요
 
             if (this._savedCameraPos) {
@@ -8759,7 +9022,7 @@ class SlamAnalyticsDashboard {
             this._doSubscribe();
         } else {
             try {
-                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
                 this._ros.on('connection', () => {
                     console.log('[SlamAnalyticsDashboard] rosbridge connected');
                     this._doSubscribe();
@@ -9364,7 +9627,7 @@ class LocAnalyticsDashboard {
             this._doSubscribe();
         } else {
             try {
-                this._ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
                 this._ros.on('connection', () => this._doSubscribe());
                 this._ros.on('error', (e) => console.error('[LocAnalytics] rosbridge error:', e));
                 this._ros.on('close', ()  => console.warn('[LocAnalytics] rosbridge closed'));

@@ -73,6 +73,9 @@
                                        onchange="toggleSlamLiveTopView(this.checked)" />
                                 <span>Top View</span>
                             </label>
+                            <button id="slam-live-follow-btn" class="small-button active"
+                                    title="Toggle camera follow"
+                                    onclick="slamLiveViewer && slamLiveViewer.toggleFollow()">📍 Follow</button>
                             <button onclick="resetSlamLiveViewer()" class="small-button">Reset View</button>
                         </div>
                         <div class="loc-live-viewer-layout">
@@ -87,7 +90,7 @@
                                             <span class="slam-live-legend-label">LIO</span>
                                         </div>
                                         <div class="slam-live-legend-item">
-                                            <span class="slam-live-legend-line" style="background:#ffaa00;"></span>
+                                            <span class="slam-live-legend-line" style="background:#ffffff;"></span>
                                             <span class="slam-live-legend-label">Pose Graph</span>
                                         </div>
                                     </div>
@@ -402,6 +405,9 @@
                                        onchange="toggleLocTopView(this.checked)" />
                                 <span>Top View</span>
                             </label>
+                            <button id="loc-follow-btn" class="viewer-btn active"
+                                    title="Toggle camera follow"
+                                    onclick="locLiveViewer && locLiveViewer.toggleFollow()">📍 Follow</button>
                             <button onclick="resetLocViewer()" class="small-button">Reset View</button>
                         </div>
                         <div class="loc-live-viewer-layout">
