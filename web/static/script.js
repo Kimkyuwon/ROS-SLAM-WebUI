@@ -602,10 +602,9 @@ async function updateSlamState() {
                 // SLAM 미실행 상태면 _slamSaving 플래그 자동 해제 (stale flag 방지)
                 if (!state.is_running) {
                     window._slamSaving = false;
-                    // SLAM 중단 시 visual hide된 뷰어 복원 (연결은 유지 중이었으므로 표시만)
-                    if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+                    window._slamMapJustSaved = false; // SLAM 중단 시 플래그 해제
                 }
-                if (typeof slamLiveViewer !== 'undefined' && !window._slamStopping && !window._slamSaving) {
+                if (typeof slamLiveViewer !== 'undefined' && !window._slamStopping && !window._slamSaving && !window._slamMapJustSaved) {
                     if (state.is_running && !slamLiveViewer._visible) {
                         slamLiveViewer.show();
                     } else if (!state.is_running && slamLiveViewer._visible) {
@@ -2979,7 +2978,7 @@ async function _pollSaveMapStatus() {
             clearInterval(_saveMapPollTimer);
             _saveMapPollTimer = null;
             window._slamSaving = false;
-            if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+            window._slamMapJustSaved = true; // 저장 완료 후 Live Viewer 재출현 차단
 
             if (status.success) {
                 _showSaveMapSuccess('✓ ' + (status.message || 'Map saved successfully'));
@@ -3007,7 +3006,7 @@ async function cancelSaveMap() {
         clearInterval(_saveMapPollTimer);
         _saveMapPollTimer = null;
         window._slamSaving = false;
-        if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+        window._slamMapJustSaved = true; // 취소 완료 후 Live Viewer 재출현 차단
         _showSaveMapError('Cancelled by user');
     } else {
         cancelBtn.disabled = false;
@@ -3022,6 +3021,7 @@ async function cancelSaveMap() {
 async function startSlamMapping() {
     // SLAM 시작 시 stale 플래그 초기화
     window._slamSaving = false;
+    window._slamMapJustSaved = false;
     // 새 SLAM 시작 시 이전 Save Map 결과 뷰어 숨김
     if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
         saveMapResultViewer.hideAndReset();
