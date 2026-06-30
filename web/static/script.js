@@ -9362,7 +9362,7 @@ class SlamAnalyticsDashboard {
 
         const dist = msg.traj_dist || 0;
         const runSec = msg.run_time || 0;
-        distEl.textContent = (typeof dist === 'number' ? dist.toFixed(1) : dist);
+        distEl.textContent = (typeof dist === 'number' ? dist.toFixed(2) : dist);
 
         const h = Math.floor(runSec / 3600);
         const m = Math.floor((runSec % 3600) / 60);
@@ -9827,7 +9827,7 @@ class LocAnalyticsDashboard {
         if (!distEl) return;
         const dist   = msg.traj_dist || 0;
         const runSec = msg.run_time  || 0;
-        distEl.textContent = typeof dist === 'number' ? dist.toFixed(1) : dist;
+        distEl.textContent = typeof dist === 'number' ? dist.toFixed(2) : dist;
         const h = Math.floor(runSec / 3600);
         const m = Math.floor((runSec % 3600) / 60);
         const s = runSec % 60;
