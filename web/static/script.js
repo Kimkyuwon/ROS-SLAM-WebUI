@@ -2827,6 +2827,11 @@ function closeSaveMapModal() {
     if (!_saveMapPollTimer) {
         window._slamSaving = false;
         if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+        // 대시보드 복원 (saveSlamMap에서 숨겼으므로)
+        if (typeof slamAnalyticsDashboard !== 'undefined') {
+            slamAnalyticsDashboard.show();
+            slamAnalyticsDashboard.subscribe();
+        }
     }
 }
 
@@ -3006,7 +3011,14 @@ async function cancelSaveMap() {
         clearInterval(_saveMapPollTimer);
         _saveMapPollTimer = null;
         window._slamSaving = false;
-        window._slamMapJustSaved = true; // 취소 완료 후 Live Viewer 재출현 차단
+        window._slamMapJustSaved = false; // 취소 시 Live Viewer 복원 허용
+        // Live Viewer 복원
+        if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
+        // 대시보드 복원
+        if (typeof slamAnalyticsDashboard !== 'undefined') {
+            slamAnalyticsDashboard.show();
+            slamAnalyticsDashboard.subscribe();
+        }
         _showSaveMapError('Cancelled by user');
     } else {
         cancelBtn.disabled = false;
