@@ -2821,10 +2821,11 @@ async function saveSlamMap() {
     domCache.get('save-map-directory').focus();
 }
 
-function closeSaveMapModal() {
+function closeSaveMapModal(skipRestore = false) {
     domCache.get('save-map-modal').style.display = 'none';
     // 모달 취소 시 플래그 해제 (confirmSaveMap 호출 전에 닫은 경우)
-    if (!_saveMapPollTimer) {
+    // skipRestore=true이면 confirmSaveMap에서 호출한 것이므로 복원 생략
+    if (!_saveMapPollTimer && !skipRestore) {
         window._slamSaving = false;
         if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
         // 대시보드 복원 (saveSlamMap에서 숨겼으므로)
@@ -2846,7 +2847,7 @@ async function confirmSaveMap() {
         return;
     }
 
-    closeSaveMapModal();
+    closeSaveMapModal(true); // 저장 확정 시 복원 생략
 
     // 새 Save Map 시작 시 이전 결과 뷰어 초기화 + 디렉토리명 보관
     _saveMapDirectory = directoryName;
