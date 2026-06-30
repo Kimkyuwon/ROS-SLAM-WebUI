@@ -5727,14 +5727,14 @@ class LocalizationLiveViewer {
             if (!this._accMapObj) {
                 const geo = new THREE.BufferGeometry();
                 const mat = new THREE.PointsMaterial({
-                    size: 0.03,
+                    size: 0.08,
                     vertexColors: true,
                     transparent: true,
                     opacity: 0.6,
                     depthWrite: false,
                     sizeAttenuation: true
                 });
-                mat._baseSize = 0.03;
+                mat._baseSize = 0.08;
                 this._accMapObj = new THREE.Points(geo, mat);
                 this._scene.add(this._accMapObj);
             }
@@ -6815,14 +6815,14 @@ class SlamLiveViewer {
             if (!this._accMapObj) {
                 const geo = new THREE.BufferGeometry();
                 const mat = new THREE.PointsMaterial({
-                    size: 0.03,
+                    size: 0.08,
                     vertexColors: true,
                     transparent: true,
                     opacity: 0.6,
                     depthWrite: false,
                     sizeAttenuation: true
                 });
-                mat._baseSize = 0.03;
+                mat._baseSize = 0.08;
                 this._accMapObj = new THREE.Points(geo, mat);
                 this._scene.add(this._accMapObj);
             }
