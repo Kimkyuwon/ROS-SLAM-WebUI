@@ -68,11 +68,8 @@
                     <!-- SLAM Live Viewer -->
                     <div id="slam-live-viewer" style="display:none; margin-bottom: 12px;">
                         <div class="slam-viewer-header">
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="slam-live-topview-toggle"
-                                       onchange="toggleSlamLiveTopView(this.checked)" />
-                                <span>Top View</span>
-                            </label>
+                            <input type="checkbox" id="slam-live-topview-toggle"
+                                   onchange="toggleSlamLiveTopView(this.checked)" style="display:none;" />
                             <button onclick="resetSlamLiveViewer()" class="small-button">Reset View</button>
                         </div>
                         <div class="loc-live-viewer-layout">
@@ -87,13 +84,20 @@
                                             <span class="slam-live-legend-label">LIO</span>
                                         </div>
                                         <div class="slam-live-legend-item">
-                                            <span class="slam-live-legend-line" style="background:#ffaa00;"></span>
+                                            <span class="slam-live-legend-line" style="background:#ffffff;"></span>
                                             <span class="slam-live-legend-label">Pose Graph</span>
                                         </div>
                                     </div>
 
                                     <div id="slam-live-viewer-actions">
-                                        <button class="slam-action-btn loc-fs-toggle-btn" id="slam-live-fs-topview-btn"
+                                        <button class="slam-action-btn" id="slam-live-follow-btn"
+                                                onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                                                <circle cx="12" cy="10" r="3"/>
+                                            </svg>
+                                        </button>
+                                        <button class="slam-action-btn" id="slam-live-fs-topview-btn"
                                                 onclick="toggleSlamLiveTopView(!slamLiveViewer._topView)" title="Top View">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                 <circle cx="12" cy="12" r="3"/>
@@ -397,11 +401,8 @@
                     <!-- Localization Live Viewer -->
                     <div id="localization-live-viewer" style="display:none;">
                         <div class="slam-viewer-header">
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="loc-viewer-topview-toggle"
-                                       onchange="toggleLocTopView(this.checked)" />
-                                <span>Top View</span>
-                            </label>
+                            <input type="checkbox" id="loc-viewer-topview-toggle"
+                                   onchange="toggleLocTopView(this.checked)" style="display:none;" />
                             <button onclick="resetLocViewer()" class="small-button">Reset View</button>
                         </div>
                         <div class="loc-live-viewer-layout">
@@ -410,7 +411,14 @@
                                 <canvas id="loc-viewer-canvas"></canvas>
                                 <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
                                 <div id="loc-viewer-actions">
-                                    <button class="slam-action-btn loc-fs-toggle-btn" id="loc-fs-topview-btn"
+                                    <button class="slam-action-btn" id="loc-follow-btn"
+                                            onclick="locLiveViewer && locLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                                            <circle cx="12" cy="10" r="3"/>
+                                        </svg>
+                                    </button>
+                                    <button class="slam-action-btn" id="loc-fs-topview-btn"
                                             onclick="toggleLocTopView(!locLiveViewer._topView)" title="Top View">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <circle cx="12" cy="12" r="3"/>
