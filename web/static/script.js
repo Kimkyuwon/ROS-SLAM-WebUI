@@ -1,3 +1,48 @@
+// ROS 버전 감지 및 messageType 헬퍼 (다중 스크립트 간 전역 공유)
+window._rosVersion = (typeof window._rosVersion === 'number') ? window._rosVersion : 1;
+window.getMsgType = window.getMsgType || function getMsgType(ros1, ros2) {
+    return window._rosVersion === 1 ? ros1 : ros2;
+};
+var getMsgType = window.getMsgType;
+fetch('/api/ros_version')
+    .then((r) => r.json())
+    .then((d) => { window._rosVersion = d.version || 1; })
+    .catch(() => {});
+
+// webui_ports.js 로드 실패 시에도 기본 포트로 동작하도록 안전장치
+if (typeof window.ensureWebuiPortsReady !== 'function') {
+    window.ROS_SLAM_WEBUI = window.ROS_SLAM_WEBUI || {
+        webPort: 8880,
+        pc2WsPort: 8881,
+        rosbridgePort: 9090,
+        ready: true,
+    };
+    window.ROS_SLAM_WEBUI_READY = Promise.resolve(window.ROS_SLAM_WEBUI);
+    window.ensureWebuiPortsReady = () => Promise.resolve(window.ROS_SLAM_WEBUI);
+    window.getPc2WsPort = () => window.ROS_SLAM_WEBUI.pc2WsPort || 8881;
+    window.getWebSocketHost = () => window.location.hostname || 'localhost';
+    window.getPc2WsUrl = (host) => {
+        const h = host || window.getWebSocketHost();
+        return `ws://${h}:${window.getPc2WsPort()}`;
+    };
+    window.getRosbridgePort = () => window.ROS_SLAM_WEBUI.rosbridgePort || 9090;
+    window.getRosbridgeUrl = (host) => {
+        const h = host || window.getWebSocketHost();
+        return `ws://${h}:${window.getRosbridgePort()}`;
+    };
+    window.getRosNotConnectedHint = () => {
+        const rosVersion = (typeof window._rosVersion === 'number') ? window._rosVersion : 1;
+        if (rosVersion === 1) {
+            return 'Not connected to ROS. Make sure rosbridge_server is running:\n\n'
+                + 'roslaunch ros_slam_webui ros_slam_webui.launch\n'
+                + '# or\n'
+                + 'roslaunch rosbridge_server rosbridge_websocket.launch port:=9090';
+        }
+        return 'Not connected to ROS. Make sure rosbridge_server is running:\n\n'
+            + 'ros2 launch rosbridge_server rosbridge_websocket_launch.xml';
+    };
+}
+
 // Global state - grouped by functionality
 const fileBrowserState = {
     currentPath: '/home',
@@ -217,9 +262,22 @@ function initPlotSubtab() {
     if (!plotState.ros) {
         console.log('[initPlotSubtab] Connecting to rosbridge');
         initRosbridge();
-    } else if (plotState.ros.isConnected && plotState.topics.length === 0) {
-        console.log('[initPlotSubtab] rosbridge already connected, loading topics');
-        loadPlotTopics();
+    } else if (plotState.ros.isConnected) {
+        _verifyRosbridgeAlive(plotState.ros, 2500).then((alive) => {
+            if (alive) {
+                if (plotState.topics.length === 0) {
+                    console.log('[initPlotSubtab] rosbridge verified, loading topics');
+                    loadPlotTopics();
+                }
+            } else {
+                console.warn('[initPlotSubtab] rosbridge stale — reconnecting');
+                try { plotState.ros.close(); } catch (e) { /* ignore */ }
+                plotState.ros = null;
+                initRosbridge();
+            }
+        });
+    } else {
+        initRosbridge();
     }
 
     // Python 백엔드 WebSocket (8081) 연결 — throttle 없이 원래 주기로 plot
@@ -607,7 +665,7 @@ async function updateSlamState() {
                 if (typeof slamLiveViewer !== 'undefined' && !window._slamStopping && !window._slamSaving && !window._slamMapJustSaved) {
                     if (state.is_running && !slamLiveViewer._visible) {
                         slamLiveViewer.show();
-                    } else if (!state.is_running && slamLiveViewer._visible) {
+                    } else if (!state.is_running && slamLiveViewer._visible && !window._slamLiveViewerHoldOpen) {
                         slamLiveViewer.hide();
                     }
                 }
@@ -2186,7 +2244,8 @@ async function selectRecorderTopics() {
     const result = await apiCall('/api/recorder/get_topics');
 
     if (!result.success || !result.topics || result.topics.length === 0) {
-        alert('No ROS2 topics found. Make sure ROS2 nodes are running.');
+        const rosLabel = window._rosVersion === 1 ? 'ROS1' : 'ROS2';
+        alert(`No ${rosLabel} topics found. Play a bag or start ROS nodes first.`);
         return;
     }
 
@@ -2439,7 +2498,7 @@ class ConfigManager {
             this.syncFromInputs();
         } catch (error) {
             alert(error.message);
-            return;
+            return false;
         }
 
         if (targetPath === null) {
@@ -2447,7 +2506,7 @@ class ConfigManager {
         }
         if (!targetPath) {
             alert(`No ${this.name} config file path is available.`);
-            return;
+            return false;
         }
 
         console.log(`Saving ${this.name} config to:`, targetPath);
@@ -2460,11 +2519,14 @@ class ConfigManager {
 
         if (result.success) {
             const savedPath = result.path || targetPath;
+            this.currentPath = savedPath;
             alert('Config file saved successfully to:\n' + savedPath);
             console.log(`${this.name} config saved to:`, savedPath);
-        } else {
-            alert('Failed to save config file: ' + (result.message || 'Unknown error'));
+            return true;
         }
+
+        alert('Failed to save config file: ' + (result.message || 'Unknown error'));
+        return false;
     }
 
     syncFromInputs() {
@@ -2779,7 +2841,19 @@ async function loadSlamConfig() {
 }
 
 async function saveSlamConfig() {
-    await slamConfig.save(slamConfig.defaultPath, false);
+    const path = slamConfig.defaultPath;
+    if (!path) {
+        alert('No SLAM config file path is available.');
+        return;
+    }
+    const saved = await slamConfig.save(path, false);
+    if (!saved) {
+        return;
+    }
+    const result = await apiCall('/api/slam/set_config_file', { path });
+    if (!result.success) {
+        alert('Failed to set SLAM config file: ' + (result.message || 'Unknown error'));
+    }
 }
 
 function toggleSlamConfig() {
@@ -2795,7 +2869,19 @@ async function loadLocalizationConfig() {
 }
 
 async function saveLocalizationConfig() {
-    await localizationConfig.save(localizationConfig.defaultPath, false);
+    const path = localizationConfig.defaultPath;
+    if (!path) {
+        alert('No localization config file path is available.');
+        return;
+    }
+    const saved = await localizationConfig.save(path, false);
+    if (!saved) {
+        return;
+    }
+    const result = await apiCall('/api/localization/set_config_file', { path });
+    if (!result.success) {
+        alert('Failed to set localization config file: ' + (result.message || 'Unknown error'));
+    }
 }
 
 function toggleLocalizationConfig() {
@@ -3047,7 +3133,8 @@ async function startSlamMapping() {
     }
     // Immediately update status to Running
     updateLidarSlamStatus('Running');
-    // SLAM Live Viewer 표시
+    // SLAM Live Viewer 표시 (API 응답 전 is_running=false 폴링이 hide()하지 않도록 hold)
+    window._slamLiveViewerHoldOpen = true;
     if (typeof slamLiveViewer !== 'undefined') {
         slamLiveViewer.show();
     }
@@ -3057,7 +3144,12 @@ async function startSlamMapping() {
         slamAnalyticsDashboard.subscribe();
     }
 
-    const result = await apiCall('/api/slam/start_mapping', {});
+    let result;
+    try {
+        result = await apiCall('/api/slam/start_mapping', {});
+    } finally {
+        window._slamLiveViewerHoldOpen = false;
+    }
     if (result.success) {
         console.log('SLAM mapping started');
         // Status will be updated by periodic updateSlamState() calls
@@ -3437,44 +3529,43 @@ const plotState = {
 // PC2WebSocketServer의 subscribe_plot 명령을 사용한다.
 // ─────────────────────────────────────────────────────────────────────────────
 function _initBackendWs() {
-    const host = window.location.hostname || 'localhost';
-    const url  = `ws://${host}:8081`;
+    ensureWebuiPortsReady().then(() => {
+        const url = getPc2WsUrl();
 
-    if (plotState.backendWs &&
-        (plotState.backendWs.readyState === WebSocket.OPEN ||
-         plotState.backendWs.readyState === WebSocket.CONNECTING)) {
-        return; // 이미 연결 중
-    }
-
-    const ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer'; // binary 메시지는 무시 (PC2 binary는 worker가 처리)
-    plotState.backendWs = ws;
-
-    ws.onopen = () => {
-        console.log('[BackendWs] 연결됨:', url);
-        // 대기 중이던 subscribe_plot 명령 전송
-        const pending = plotState._pendingPlotSubs.splice(0);
-        for (const req of pending) {
-            ws.send(JSON.stringify(req));
+        if (plotState.backendWs &&
+            (plotState.backendWs.readyState === WebSocket.OPEN ||
+             plotState.backendWs.readyState === WebSocket.CONNECTING)) {
+            return;
         }
-    };
 
-    ws.onmessage = (evt) => {
-        if (typeof evt.data === 'string') {
-            _handleBackendWsMessage(evt.data);
-        }
-        // binary(PC2 포인트클라우드)는 pc2_stream_worker.js가 처리 — 여기서는 무시
-    };
+        const ws = new WebSocket(url);
+        ws.binaryType = 'arraybuffer';
+        plotState.backendWs = ws;
 
-    ws.onerror = () => {
-        console.warn('[BackendWs] 연결 오류');
-    };
+        ws.onopen = () => {
+            console.log('[BackendWs] 연결됨:', url);
+            const pending = plotState._pendingPlotSubs.splice(0);
+            for (const req of pending) {
+                ws.send(JSON.stringify(req));
+            }
+        };
 
-    ws.onclose = () => {
-        console.log('[BackendWs] 연결 끊김, 3초 후 재연결...');
-        plotState.backendWs = null;
-        setTimeout(_initBackendWs, 3000);
-    };
+        ws.onmessage = (evt) => {
+            if (typeof evt.data === 'string') {
+                _handleBackendWsMessage(evt.data);
+            }
+        };
+
+        ws.onerror = () => {
+            console.warn('[BackendWs] 연결 오류');
+        };
+
+        ws.onclose = () => {
+            console.log('[BackendWs] 연결 끊김, 3초 후 재연결...');
+            plotState.backendWs = null;
+            setTimeout(_initBackendWs, 3000);
+        };
+    });
 }
 
 function _handleBackendWsMessage(rawData) {
@@ -3798,59 +3889,351 @@ function updateRosbridgeStatusChip(state) {
 }
 window.updateRosbridgeStatusChip = updateRosbridgeStatusChip;
 
+/**
+ * rosbridge WebSocket이 실제로 동작하는지 getTopics로 검증.
+ * isConnected=true 이지만 죽은(stale) 연결을 감지한다.
+ * @param {object} ros - ROSLIB.Ros 인스턴스
+ * @param {number} [timeoutMs=2500]
+ * @returns {Promise<boolean>}
+ */
+function _verifyRosbridgeAlive(ros, timeoutMs = 2500) {
+    if (!ros || !ros.isConnected) {
+        return Promise.resolve(false);
+    }
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (alive) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve(alive);
+        };
+        const timer = setTimeout(() => finish(false), timeoutMs);
+        try {
+            ros.getTopics(
+                () => finish(true),
+                () => finish(false)
+            );
+        } catch (e) {
+            finish(false);
+        }
+    });
+}
+window._verifyRosbridgeAlive = _verifyRosbridgeAlive;
+
 // rosbridge WebSocket URL 결정 헬퍼
 // - IP 주소 또는 localhost: 그대로 사용 (원격 접속 지원, DNS 즉시)
 // - 호스트명(예: 'kkw'): localhost로 대체 (DNS/프록시 지연 방지)
-// rosbridge는 항상 웹 서버와 동일 머신에서 실행되므로 localhost 연결이 항상 유효
 function _getRosbridgeUrl(port) {
-    const host = window.location.hostname || 'localhost';
-    const isRemoteIp = /^[\d.]+$/.test(host) || /^\[?[0-9a-fA-F:]+\]?$/.test(host);
-    const wsHost = isRemoteIp ? host : '127.0.0.1';
-    return `ws://${wsHost}:${port || 9090}`;
+    if (typeof getRosbridgeUrl === 'function') {
+        return getRosbridgeUrl();
+    }
+    const host = (typeof getWebSocketHost === 'function')
+        ? getWebSocketHost()
+        : (window.location.hostname || 'localhost');
+    const resolvedPort = (typeof port === 'number' && Number.isFinite(port) && port > 0)
+        ? port
+        : 9090;
+    return `ws://${host}:${resolvedPort}`;
+}
+
+function _normalizeTopicTypeForUi(typeName) {
+    if (!typeName || typeof typeName !== 'string') return 'unknown';
+    // ROS1에서는 nav_msgs/Path 같은 원본 타입이 구독 messageType과 일치해야 한다.
+    // 여기서 /msg/ 형식으로 바꾸면 subscribeToTopic()가 첫 메시지를 못 받아
+    // Plot tree 하위 필드가 생성되지 않는다.
+    if (window._rosVersion === 1) return typeName;
+    if (typeName.includes('/msg/')) return typeName;
+    const slashCount = (typeName.match(/\//g) || []).length;
+    if (slashCount === 1) {
+        const parts = typeName.split('/');
+        return `${parts[0]}/msg/${parts[1]}`;
+    }
+    return typeName;
+}
+
+async function _fetchTopicsFromBackendApi() {
+    try {
+        const result = await apiCall('/api/recorder/get_topics');
+        if (!result || !result.success || !Array.isArray(result.topics)) {
+            return { topics: [], types: [] };
+        }
+
+        const topics = [];
+        const types = [];
+        result.topics.forEach((entry) => {
+            if (typeof entry === 'string') {
+                topics.push(entry);
+                types.push('unknown');
+                return;
+            }
+            if (!entry || typeof entry !== 'object' || !entry.name) {
+                return;
+            }
+            topics.push(entry.name);
+            types.push(_normalizeTopicTypeForUi(entry.type));
+        });
+        return { topics, types };
+    } catch (error) {
+        console.warn('[loadPlotTopics] Backend topic fallback failed:', error);
+        return { topics: [], types: [] };
+    }
+}
+
+function _applyPlotTopicsToState(topics, types) {
+    const topicTypesMap = new Map();
+    topics.forEach((name, index) => {
+        topicTypesMap.set(name, types[index] || 'unknown');
+    });
+    plotState.topicTypes = topicTypesMap;
+
+    const oldTopicsSet = new Set(plotState.topics);
+    const addedTopics = topics.filter((t) => !oldTopicsSet.has(t));
+    if (addedTopics.length > 0) {
+        console.log('[loadPlotTopics] New topics detected:', addedTopics);
+    }
+    const removedTopics = plotState.topics.filter((t) => !new Set(topics).has(t));
+    if (removedTopics.length > 0) {
+        console.log('[loadPlotTopics] Removed topics:', removedTopics);
+    }
+
+    plotState.topics = topics;
+
+    const rosSet = new Set(plotState.topics);
+    const removedFromPanel = plotState.addedPlotTopics.filter((t) => !rosSet.has(t));
+    removedFromPanel.forEach((t) => unselectPlotTopic(t));
+    plotState.addedPlotTopics = plotState.addedPlotTopics.filter((t) => rosSet.has(t));
+
+    displayTopicList();
+}
+
+async function _getPlotTopicsWithFallback(timeoutMs = 10000) {
+    let rosapiError = null;
+
+    try {
+        const result = await new Promise((resolve, reject) => {
+            let timeoutId = null;
+            let completed = false;
+            timeoutId = setTimeout(() => {
+                if (!completed) {
+                    completed = true;
+                    reject(new Error('Topic loading timeout'));
+                }
+            }, timeoutMs);
+
+            try {
+                plotState.ros.getTopics((topicsResult) => {
+                    if (completed) return;
+                    completed = true;
+                    clearTimeout(timeoutId);
+                    resolve(topicsResult);
+                }, (error) => {
+                    if (completed) return;
+                    completed = true;
+                    clearTimeout(timeoutId);
+                    reject(error);
+                });
+            } catch (error) {
+                if (!completed) {
+                    completed = true;
+                    clearTimeout(timeoutId);
+                    reject(error);
+                }
+            }
+        });
+
+        const topics = result.topics || [];
+        const types = result.types || [];
+        if (topics.length > 0) {
+            return { topics, types, source: 'rosapi' };
+        }
+    } catch (error) {
+        rosapiError = error;
+    }
+
+    const fallback = await _fetchTopicsFromBackendApi();
+    if (fallback.topics.length > 0) {
+        if (rosapiError) {
+            console.warn(
+                '[loadPlotTopics] rosapi unavailable, using backend topic fallback (rosgraph):',
+                rosapiError.message || rosapiError
+            );
+        } else {
+            console.warn('[loadPlotTopics] Using backend topic fallback (rosgraph)');
+        }
+        return { topics: fallback.topics, types: fallback.types, source: 'backend' };
+    }
+
+    if (rosapiError) {
+        throw rosapiError;
+    }
+    return { topics: [], types: [], source: 'none' };
 }
 
 function initRosbridge() {
     if (typeof ROSLIB === 'undefined') {
-        console.error('ROSLIB not loaded');
+        console.error('[rosbridge] ROSLIB not loaded');
         return;
     }
 
-    try {
-        plotState.ros = new ROSLIB.Ros({
-            url: _getRosbridgeUrl(9090)
-        });
+    const doInit = async () => {
+        try {
+            const url = _getRosbridgeUrl();
+            const pageHost = window.location.hostname || 'localhost';
+            console.log('[rosbridge] Connecting to', url, '| page host:', pageHost);
 
-        plotState.ros.on('connection', () => {
-            console.log('[rosbridge] Connected to rosbridge');
-            updateRosbridgeStatusChip('connected');
-            loadPlotTopics();
-        });
-
-        plotState.ros.on('error', (error) => {
-            console.error('[rosbridge] Connection error:', error);
-            updateRosbridgeStatusChip('disconnected');
-            const container = domCache.get('plot-tree');
-            if (container) {
-                plotState.tree = null;
-                container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--warning); padding: 12px; text-align: center;">rosbridge connection failed. Make sure rosbridge is running on port 9090.</div>';
+            if (plotState.ros && plotState.ros.isConnected) {
+                const alive = await _verifyRosbridgeAlive(plotState.ros, 2500);
+                if (alive) {
+                    console.log('[rosbridge] Verified alive, skipping duplicate init');
+                    updateRosbridgeStatusChip('connected');
+                    if (typeof _syncViewerRosFromPlotState === 'function') {
+                        await _syncViewerRosFromPlotState();
+                    }
+                    return;
+                }
+                console.warn('[rosbridge] Stale connection (isConnected but dead) — reconnecting');
+                try { plotState.ros.close(); } catch (e) { /* ignore */ }
+                plotState.ros = null;
+                if (typeof window.invalidateViewerRosConnection === 'function') {
+                    window.invalidateViewerRosConnection();
+                }
+            } else if (plotState.ros) {
+                try { plotState.ros.close(); } catch (e) { /* ignore */ }
+                plotState.ros = null;
             }
-        });
 
-        plotState.ros.on('close', () => {
-            console.log('[rosbridge] Connection closed. Attempting to reconnect...');
             updateRosbridgeStatusChip('reconnecting');
-            const container = domCache.get('plot-tree');
-            if (container) {
-                plotState.tree = null;
-                container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--muted); padding: 12px; text-align: center;">rosbridge disconnected. Reconnecting...</div>';
-            }
-            setTimeout(() => {
-                initRosbridge(); // 재연결 시도
-            }, 3000);
-        });
-    } catch (error) {
-        console.error('[rosbridge] Failed to initialize:', error);
+
+            plotState.ros = new ROSLIB.Ros({ url });
+
+            plotState.ros.on('connection', () => {
+                console.log('[rosbridge] Connected:', url);
+                updateRosbridgeStatusChip('connected');
+                if (typeof _syncViewerRosFromPlotState === 'function') {
+                    _syncViewerRosFromPlotState();
+                }
+                loadPlotTopics();
+            });
+
+            plotState.ros.on('error', (error) => {
+                console.error('[rosbridge] Connection error:', url, error);
+                updateRosbridgeStatusChip('disconnected');
+                const container = domCache.get('plot-tree');
+                if (container) {
+                    plotState.tree = null;
+                    container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--warning); padding: 12px; text-align: center;">rosbridge connection failed. Check rosbridge status and configured port.</div>';
+                }
+            });
+
+            plotState.ros.on('close', () => {
+                console.log('[rosbridge] Connection closed. Reconnecting in 3s:', url);
+                updateRosbridgeStatusChip('reconnecting');
+                const container = domCache.get('plot-tree');
+                if (container) {
+                    plotState.tree = null;
+                    container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--muted); padding: 12px; text-align: center;">rosbridge disconnected. Reconnecting...</div>';
+                }
+                plotState.ros = null;
+                setTimeout(() => {
+                    initRosbridge();
+                }, 3000);
+            });
+        } catch (error) {
+            console.error('[rosbridge] Failed to initialize:', error);
+        }
+    };
+
+    if (typeof ensureWebuiPortsReady === 'function') {
+        ensureWebuiPortsReady().then(doInit);
+    } else {
+        doInit();
     }
+}
+
+/**
+ * Live Viewer용 백엔드 binary WebSocket (8881) — 재연결 포함.
+ * PC2/Path는 rosbridge 없이 동작한다.
+ * connectGen: hide() 시 증가하여 show/hide 경쟁 중 stale 연결 시도를 무효화.
+ */
+function _createLiveViewerBackendWs(viewer, label, onOpen, onBinaryMessage, connectGen) {
+    let ws = null;
+    let reconnectTimer = null;
+    let stopped = false;
+    const gen = (typeof connectGen === 'number') ? connectGen : (viewer._wsConnectGen || 0);
+
+    const isStale = () => stopped || (viewer._wsConnectGen !== gen);
+
+    const connect = () => {
+        if (isStale()) {
+            console.log(`[${label}] Backend WS connect skipped (stale gen ${gen} vs ${viewer._wsConnectGen})`);
+            return;
+        }
+
+        const startWs = () => {
+            if (isStale()) return;
+            const url = getPc2WsUrl();
+            console.log(`[${label}] Backend WS connecting:`, url, `(gen=${gen})`);
+            ws = new WebSocket(url);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = () => {
+                if (isStale()) {
+                    console.warn(`[${label}] Backend WS opened but stale — closing`);
+                    try { ws.close(); } catch (e) { /* ignore */ }
+                    return;
+                }
+                console.log(`[${label}] Backend WS connected:`, url);
+                try {
+                    onOpen(ws);
+                    console.log(`[${label}] Backend WS subscribe sent`);
+                } catch (e) {
+                    console.error(`[${label}] Backend WS onOpen handler failed:`, e);
+                }
+            };
+
+            ws.onmessage = (ev) => {
+                if (ev.data instanceof ArrayBuffer) {
+                    onBinaryMessage(ev.data);
+                }
+            };
+
+            ws.onerror = () => {
+                console.warn(`[${label}] Backend WS error:`, url);
+            };
+
+            ws.onclose = () => {
+                console.log(`[${label}] Backend WS closed, retry in 3s`);
+                ws = null;
+                if (!isStale()) {
+                    reconnectTimer = setTimeout(connect, 3000);
+                }
+            };
+        };
+
+        if (typeof ensureWebuiPortsReady === 'function') {
+            ensureWebuiPortsReady().then(startWs);
+        } else {
+            startWs();
+        }
+    };
+
+    connect();
+
+    return {
+        isConnected: () => ws && ws.readyState === WebSocket.OPEN,
+        unsubscribe: () => {
+            stopped = true;
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+            try {
+                if (ws) ws.close();
+            } catch (e) { /* ignore */ }
+            ws = null;
+        }
+    };
 }
 
 // 토픽 목록 로드 (rosbridge 사용)
@@ -3867,6 +4250,18 @@ async function loadPlotTopics() {
         return;
     }
 
+    const alive = await _verifyRosbridgeAlive(plotState.ros, 2500);
+    if (!alive) {
+        console.warn('[loadPlotTopics] rosbridge stale — forcing reconnect');
+        try { plotState.ros.close(); } catch (e) { /* ignore */ }
+        plotState.ros = null;
+        if (typeof window.invalidateViewerRosConnection === 'function') {
+            window.invalidateViewerRosConnection();
+        }
+        initRosbridge();
+        return;
+    }
+
     // 이미 로딩 중이면 스킵
     if (plotState.isLoadingTopics) {
         console.log('[loadPlotTopics] Already loading topics, skipping...');
@@ -3876,85 +4271,34 @@ async function loadPlotTopics() {
     plotState.isLoadingTopics = true;
 
     try {
-        // 타임아웃 설정 (10초로 증가)
-        const timeout = 10000;
-        let timeoutId = null;
-        let completed = false;
+        const { topics, types, source } = await _getPlotTopicsWithFallback(10000);
 
-        // 타임아웃 Promise
-        const timeoutPromise = new Promise((_, reject) => {
-            timeoutId = setTimeout(() => {
-                if (!completed) {
-                    reject(new Error('Topic loading timeout'));
-                }
-            }, timeout);
-        });
-
-        // getTopics Promise
-        const getTopicsPromise = new Promise((resolve, reject) => {
-            try {
-                plotState.ros.getTopics((result) => {
-                    completed = true;
-                    clearTimeout(timeoutId);
-                    resolve(result);
-                }, (error) => {
-                    completed = true;
-                    clearTimeout(timeoutId);
-                    reject(error);
-                });
-            } catch (error) {
-                completed = true;
-                clearTimeout(timeoutId);
-                reject(error);
-            }
-        });
-
-        // 경쟁: getTopics vs timeout
-        const result = await Promise.race([getTopicsPromise, timeoutPromise]);
-
-        const topics = result.topics || [];
-        const types = result.types || [];
-        
-        console.log('[loadPlotTopics] Received topics:', topics.length);
+        console.log('[loadPlotTopics] Received topics:', topics.length, `(source: ${source})`);
         console.log('[loadPlotTopics] Topic list:', topics);
-        
-        // topics와 types를 Map으로 저장 (별도 저장)
-        const topicTypesMap = new Map();
-        topics.forEach((name, index) => {
-            topicTypesMap.set(name, types[index] || 'unknown');
-        });
-        plotState.topicTypes = topicTypesMap;
 
-        const oldTopicsSet = new Set(plotState.topics);
-        const newTopicsSet = new Set(topics);
-        const addedTopics = topics.filter((t) => !oldTopicsSet.has(t));
-        if (addedTopics.length > 0) {
-            console.log('[loadPlotTopics] New topics detected:', addedTopics);
-        }
-        const removedTopics = plotState.topics.filter((t) => !newTopicsSet.has(t));
-        if (removedTopics.length > 0) {
-            console.log('[loadPlotTopics] Removed topics:', removedTopics);
-        }
-
-        plotState.topics = topics;
-
-        // ROS 그래프에 없어진 토픽은 왼쪽 패널에서 자동 제거
-        const rosSet = new Set(plotState.topics);
-        const removedFromPanel = plotState.addedPlotTopics.filter((t) => !rosSet.has(t));
-        removedFromPanel.forEach((t) => unselectPlotTopic(t));
-        plotState.addedPlotTopics = plotState.addedPlotTopics.filter((t) => rosSet.has(t));
-
-        displayTopicList();
-    } catch (error) {
-        console.error('[loadPlotTopics] Error:', error);
-        
-        // 타임아웃이 발생했지만 이미 토픽 목록이 있는 경우 (기존 플롯이 동작 중)
-        if (plotState.topics && plotState.topics.length > 0) {
-            console.warn('[loadPlotTopics] Timeout occurred, but keeping existing topics');
-            // 기존 UI 유지, 에러 메시지는 콘솔에만 출력
+        if (topics.length === 0) {
+            if (plotState.topics && plotState.topics.length > 0) {
+                console.warn('[loadPlotTopics] No topics returned, keeping existing list');
+                return;
+            }
+            const container = domCache.get('plot-tree');
+            if (container) {
+                plotState.tree = null;
+                container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--warning); padding: 12px; text-align: center;">No ROS topics found. Start ROS nodes or play a bag first.</div>';
+            }
             return;
         }
-        
+
+        _applyPlotTopicsToState(topics, types);
+    } catch (error) {
+        console.error('[loadPlotTopics] Error:', error);
+
+        // 타임아웃이 발생했지만 이미 토픽 목록이 있는 경우 (기존 플롯이 동작 중)
+        if (plotState.topics && plotState.topics.length > 0) {
+            console.warn('[loadPlotTopics] Error occurred, but keeping existing topics');
+            return;
+        }
+
         const container = domCache.get('plot-tree');
         if (container) {
             plotState.tree = null;
@@ -4327,6 +4671,12 @@ async function openPlotTopicSelectionModal() {
     if (!plotState.ros || !plotState.ros.isConnected) {
         alert('rosbridge에 연결된 뒤 토픽을 선택할 수 있습니다.');
         return;
+    }
+    if (plotState.isLoadingTopics) {
+        const waitStart = Date.now();
+        while (plotState.isLoadingTopics && (Date.now() - waitStart) < 1500) {
+            await new Promise((resolve) => setTimeout(resolve, 60));
+        }
     }
     await loadPlotTopics();
     if (!plotState.topics || plotState.topics.length === 0) {
@@ -5468,6 +5818,14 @@ class LocalizationLiveViewer {
         this._savedTarget = null;
         this._knownFrames = new Set();
         this._resizeObserver = null;
+        this._backendSubscribed = false;
+        this._wsConnectGen = 0;
+        // Live On/Off 토글: 렌더 루프 + 구독을 켜고 끌 수 있음 (기본 ON, localStorage 저장)
+        this._liveEnabled = (() => {
+            try { return localStorage.getItem('locLiveEnabled') !== '0'; }
+            catch (e) { return true; }
+        })();
+        this._renderLoopRunning = false;
     }
 
     _waitForThree() {
@@ -5520,8 +5878,11 @@ class LocalizationLiveViewer {
     }
 
     _startRenderLoop() {
+        if (this._renderLoopRunning) return;
+        this._renderLoopRunning = true;
         const LERP = 0.08;
         const animate = () => {
+            if (!this._renderLoopRunning) { this._animFrameId = null; return; }
             this._animFrameId = requestAnimationFrame(animate);
 
             // Camera follow: pan camera+target together toward robot (preserves orbit angle)
@@ -5617,12 +5978,22 @@ class LocalizationLiveViewer {
         if (viewerEl) viewerEl.style.display = 'block';
         this._visible = true;
         await this._init();
+        await new Promise(resolve => requestAnimationFrame(resolve));
         this._resizeRenderer();
-        this._connectAndSubscribe();
+        this._updateLiveToggleBtn();
+        if (this._liveEnabled) {
+            this._startRenderLoop();
+            await this._connectAndSubscribe();
+        } else {
+            // Live OFF 상태로 시작 → 렌더 루프 정지, 구독 안 함 (CPU 절감)
+            this._stopRenderLoop();
+        }
     }
 
     hide() {
         this._visible = false;
+        this._wsConnectGen++;
+        this._backendSubscribed = false;
         this._unsubscribeAll();
         this._clearLiveObjects();
         const viewerEl = document.getElementById('localization-live-viewer');
@@ -5673,40 +6044,80 @@ class LocalizationLiveViewer {
         }
     }
 
-    _connectAndSubscribe() {
+    async _connectAndSubscribe() {
+        if (this._backendSubscribed) return;
+
         const loadingEl = document.getElementById('loc-viewer-loading');
+        if (loadingEl) {
+            loadingEl.textContent = '백엔드 WebSocket 연결 중...';
+            loadingEl.style.display = 'block';
+        }
+        if (typeof ensureWebuiPortsReady === 'function') {
+            await ensureWebuiPortsReady();
+        }
+
+        // PC2/Path는 Python 백엔드 WS(8881) — rosbridge 연결과 무관하게 즉시 구독
+        console.log('[LocalizationLiveViewer] Subscribing binary topics (backend WS 8881)');
+        this._subscribeBinaryTopics();
+        this._backendSubscribed = true;
+        if (loadingEl) loadingEl.style.display = 'none';
+
+        const onRosbridgeReady = () => {
+            this._subscribeRosbridgeTopics();
+        };
+
         if (window.plotState && plotState.ros && plotState.ros.isConnected) {
-            this._ros = plotState.ros;
-            if (loadingEl) loadingEl.style.display = 'none';
-            this._subscribeAll();
-        } else {
-            if (loadingEl) loadingEl.style.display = 'flex';
-            try {
-                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
-                this._ros.on('connection', () => {
-                    console.log('[LocalizationLiveViewer] rosbridge connected');
-                    if (loadingEl) loadingEl.style.display = 'none';
-                    this._subscribeAll();
-                });
-                this._ros.on('error', (err) => {
-                    console.error('[LocalizationLiveViewer] rosbridge error:', err);
-                });
-                this._ros.on('close', () => {
-                    console.warn('[LocalizationLiveViewer] rosbridge connection closed');
-                });
-            } catch (e) {
-                console.error('[LocalizationLiveViewer] failed to init rosbridge:', e);
-            }
+            _verifyRosbridgeAlive(plotState.ros, 2500).then((alive) => {
+                if (alive) {
+                    this._ros = plotState.ros;
+                    onRosbridgeReady();
+                } else {
+                    console.warn('[LocalizationLiveViewer] plotState.ros stale — own rosbridge connection');
+                    this._connectOwnRosbridge(onRosbridgeReady);
+                }
+            });
+            return;
+        }
+
+        this._connectOwnRosbridge(onRosbridgeReady);
+    }
+
+    _connectOwnRosbridge(onRosbridgeReady) {
+        try {
+            const url = _getRosbridgeUrl();
+            console.log('[LocalizationLiveViewer] rosbridge connecting (TF/map):', url);
+            this._ros = new ROSLIB.Ros({ url });
+            this._ros.on('connection', () => {
+                console.log('[LocalizationLiveViewer] rosbridge connected:', url);
+                onRosbridgeReady();
+            });
+            this._ros.on('error', (err) => {
+                console.error('[LocalizationLiveViewer] rosbridge error:', url, err);
+            });
+            this._ros.on('close', () => {
+                console.warn('[LocalizationLiveViewer] rosbridge connection closed:', url);
+            });
+        } catch (e) {
+            console.error('[LocalizationLiveViewer] failed to init rosbridge:', e);
         }
     }
 
-    _subscribeAll() {
+    _subscribeBinaryTopics() {
         this._subscribePointCloud('/cloud_registered', 'cloud_registered');
         this._subscribePointCloudLatched('/Laser_map', 'laser_map');
         this._subscribePathBinary('/path');
+        this._initMapAccumulator();
+    }
+
+    _subscribeRosbridgeTopics() {
+        if (!this._ros) return;
         this._subscribeTF('/tf');
         this._subscribeMap('/map');
-        this._initMapAccumulator();
+    }
+
+    _subscribeAll() {
+        this._subscribeBinaryTopics();
+        this._subscribeRosbridgeTopics();
     }
 
     _initMapAccumulator() {
@@ -5903,81 +6314,49 @@ class LocalizationLiveViewer {
     }
 
     _subscribePointCloud(topic, key) {
-        // Python 백엔드 binary WebSocket (8081) 사용
-        // rosbridge JSON+base64 대비 전송 크기 ~4배 감소, JSON 파싱 오버헤드 제거 → 부드러운 실시간 시각화
-        const hostname = window.location.hostname || 'localhost';
-        const ws = new WebSocket(`ws://${hostname}:8081`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ cmd: 'subscribe', topic }));
-        };
-
-        ws.onmessage = (ev) => {
-            if (!(ev.data instanceof ArrayBuffer)) return; // JSON meta 무시
-            const parsed = this._parseBinaryPC2(ev.data);
-            if (parsed) {
-                this._updatePointCloud(key, parsed);
-
-                // Forward to accumulator worker
-                if (this._mapAccWorker && parsed.positions && parsed.colors) {
-                    const posCopy = new Float32Array(parsed.positions);
-                    const colCopy = new Float32Array(parsed.colors);
-                    this._mapAccWorker.postMessage(
-                        { cmd: 'addPoints', positions: posCopy, colors: colCopy },
-                        [posCopy.buffer, colCopy.buffer]
-                    );
+        const viewer = this;
+        const sub = _createLiveViewerBackendWs(
+            viewer,
+            'LocalizationLiveViewer',
+            (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe', topic })); },
+            (buffer) => {
+                const parsed = viewer._parseBinaryPC2(buffer);
+                if (parsed) {
+                    viewer._updatePointCloud(key, parsed);
+                    if (viewer._mapAccWorker && parsed.positions && parsed.colors) {
+                        const posCopy = new Float32Array(parsed.positions);
+                        const colCopy = new Float32Array(parsed.colors);
+                        const rp = viewer._robotPos;
+                        viewer._mapAccWorker.postMessage(
+                            { cmd: 'addPoints', positions: posCopy, colors: colCopy,
+                              pose: rp ? [rp.x, rp.y, rp.z] : null },
+                            [posCopy.buffer, colCopy.buffer]
+                        );
+                    }
                 }
             }
-        };
-
-        ws.onerror = (e) => console.error('[LocalizationLiveViewer] PC2 WS error:', e);
-
-        this._subscriptions.push({
-            unsubscribe: () => {
-                try {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ cmd: 'unsubscribe', topic }));
-                    }
-                    ws.close();
-                } catch (e) { /* ignore */ }
-            }
-        });
+        );
+        this._subscriptions.push(sub);
     }
 
     // /Laser_map 은 TRANSIENT_LOCAL + RELIABLE QoS 로 발행됨
     // rosbridge는 volatile QoS 구독이라 latched 메시지를 받지 못함
     // → Python 백엔드(8081)에 subscribe_latched 명령으로 직접 연결
     _subscribePointCloudLatched(topic, key) {
-        const hostname = window.location.hostname || 'localhost';
-        const ws = new WebSocket(`ws://${hostname}:8081`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ cmd: 'subscribe_latched', topic }));
-            console.log(`[LocalizationLiveViewer] subscribe_latched 전송: ${topic}`);
-        };
-
-        ws.onmessage = (ev) => {
-            if (!(ev.data instanceof ArrayBuffer)) return; // JSON meta 무시
-            const parsed = this._parseBinaryPC2(ev.data);
-            if (parsed) this._updatePointCloud(key, parsed);
-        };
-
-        ws.onerror = (e) => {
-            console.error('[LocalizationLiveViewer] PC2 WS error:', e);
-        };
-
-        this._subscriptions.push({
-            unsubscribe: () => {
-                try {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ cmd: 'unsubscribe_latched', topic }));
-                    }
-                    ws.close();
-                } catch (e) { /* ignore */ }
+        const viewer = this;
+        const sub = _createLiveViewerBackendWs(
+            viewer,
+            'LocalizationLiveViewer',
+            (ws) => {
+                ws.send(JSON.stringify({ cmd: 'subscribe_latched', topic }));
+                console.log(`[LocalizationLiveViewer] subscribe_latched 전송: ${topic}`);
+            },
+            (buffer) => {
+                const parsed = viewer._parseBinaryPC2(buffer);
+                if (parsed) viewer._updatePointCloud(key, parsed);
             }
-        });
+        );
+        this._subscriptions.push(sub);
     }
 
     // Python 백엔드 binary PC2 패킷 파싱
@@ -6043,7 +6422,7 @@ class LocalizationLiveViewer {
         const t = new ROSLIB.Topic({
             ros: this._ros,
             name: topic,
-            messageType: 'nav_msgs/msg/Path',
+            messageType: getMsgType('nav_msgs/Path', 'nav_msgs/msg/Path'),
             throttle_rate: 200,
             queue_length: 1
         });
@@ -6097,33 +6476,17 @@ class LocalizationLiveViewer {
     }
 
     _subscribePathBinary(topic) {
-        const hostname = window.location.hostname || 'localhost';
-        const ws = new WebSocket(`ws://${hostname}:8081`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ cmd: 'subscribe_path', topic }));
-        };
-
-        ws.onmessage = (ev) => {
-            if (!(ev.data instanceof ArrayBuffer)) return;
-            const parsed = this._parseBinaryPath(ev.data);
-            if (!parsed || !this._scene) return;
-            this._updatePathFromBinary(parsed);
-        };
-
-        ws.onerror = (e) => console.error(`[LocalizationLiveViewer] Path WS error (${topic}):`, e);
-
-        this._subscriptions.push({
-            unsubscribe: () => {
-                try {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ cmd: 'unsubscribe_path', topic }));
-                    }
-                    ws.close();
-                } catch (e) { /* ignore */ }
+        const viewer = this;
+        const sub = _createLiveViewerBackendWs(
+            viewer,
+            'LocalizationLiveViewer',
+            (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe_path', topic })); },
+            (buffer) => {
+                const parsed = viewer._parseBinaryPath(buffer);
+                if (parsed && viewer._scene) viewer._updatePathFromBinary(parsed);
             }
-        });
+        );
+        this._subscriptions.push(sub);
     }
 
     _updatePathFromBinary(parsed) {
@@ -6155,7 +6518,7 @@ class LocalizationLiveViewer {
         const t = new ROSLIB.Topic({
             ros: this._ros,
             name: topic,
-            messageType: 'tf2_msgs/msg/TFMessage',
+            messageType: getMsgType('tf2_msgs/TFMessage', 'tf2_msgs/msg/TFMessage'),
             throttle_rate: 200,
             queue_length: 1
         });
@@ -6197,7 +6560,7 @@ class LocalizationLiveViewer {
         const t = new ROSLIB.Topic({
             ros: this._ros,
             name: topic,
-            messageType: 'nav_msgs/msg/OccupancyGrid',
+            messageType: getMsgType('nav_msgs/OccupancyGrid', 'nav_msgs/msg/OccupancyGrid'),
             throttle_rate: 1000,
             queue_length: 1
         });
@@ -6307,6 +6670,56 @@ class LocalizationLiveViewer {
         this._followMode = (force !== undefined) ? force : !this._followMode;
         const btn = document.getElementById('loc-follow-btn');
         if (btn) btn.classList.toggle('active', this._followMode);
+    }
+
+    _stopRenderLoop() {
+        this._renderLoopRunning = false;
+        if (this._animFrameId !== null) {
+            cancelAnimationFrame(this._animFrameId);
+            this._animFrameId = null;
+        }
+    }
+
+    // Live On/Off 토글: 실시간 구독(PC2/Path 바이너리 WS, TF/map) + 렌더 루프를 함께 제어
+    setLiveEnabled(enabled, persist = true) {
+        enabled = !!enabled;
+        this._liveEnabled = enabled;
+        if (persist) {
+            try { localStorage.setItem('locLiveEnabled', enabled ? '1' : '0'); } catch (e) { /* ignore */ }
+        }
+        if (this._visible) {
+            if (enabled) {
+                // 구독 재개 + 렌더 재개
+                this._startRenderLoop();
+                if (!this._backendSubscribed) this._connectAndSubscribe();
+            } else {
+                // 구독 해제 + 렌더 정지 → SLAM 성능 확보 (마지막 프레임은 화면에 정지 상태로 유지)
+                this._wsConnectGen++;
+                this._backendSubscribed = false;
+                this._unsubscribeAll();
+                this._stopRenderLoop();
+            }
+        }
+        this._updateLiveToggleBtn();
+        // 접힌 상태에서 펼칠 때 캔버스가 display:none → 표시로 바뀌므로 리사이즈 필요
+        if (enabled && this._visible) {
+            requestAnimationFrame(() => this._resizeRenderer());
+        }
+    }
+
+    toggleLive() {
+        this.setLiveEnabled(!this._liveEnabled);
+    }
+
+    _updateLiveToggleBtn() {
+        const btn = document.getElementById('loc-live-toggle-btn');
+        if (btn) {
+            btn.classList.toggle('active', this._liveEnabled);
+            btn.title = 'Live Viewer 접기 (구독/렌더 중지)';
+        }
+        // OFF 시 뷰어 접기(캔버스/액션 숨김) + 펼치기 버튼만 노출
+        const viewerEl = document.getElementById('localization-live-viewer');
+        if (viewerEl) viewerEl.classList.toggle('collapsed', !this._liveEnabled);
     }
 
     toggleTopView(enable) {
@@ -6536,6 +6949,14 @@ class SlamLiveViewer {
         this._savedCameraUp = null;
         this._savedTarget = null;
         this._resizeObserver = null;
+        this._backendSubscribed = false;
+        this._wsConnectGen = 0;
+        // Live On/Off 토글: 렌더 루프 + 구독을 켜고 끌 수 있음 (기본 ON, localStorage 저장)
+        this._liveEnabled = (() => {
+            try { return localStorage.getItem('slamLiveEnabled') !== '0'; }
+            catch (e) { return true; }
+        })();
+        this._renderLoopRunning = false;
     }
 
     _waitForThree() {
@@ -6585,8 +7006,11 @@ class SlamLiveViewer {
     }
 
     _startRenderLoop() {
+        if (this._renderLoopRunning) return;
+        this._renderLoopRunning = true;
         const LERP = 0.08;
         const animate = () => {
+            if (!this._renderLoopRunning) { this._animFrameId = null; return; }
             this._animFrameId = requestAnimationFrame(animate);
 
             // Camera follow: pan camera+target together toward robot (preserves orbit angle)
@@ -6676,11 +7100,20 @@ class SlamLiveViewer {
         // 브라우저 레이아웃 계산 완료 후 리사이즈 (display:none → block 직후 clientHeight가 0일 수 있음)
         await new Promise(resolve => requestAnimationFrame(resolve));
         this._resizeRenderer();
-        this._connectAndSubscribe();
+        this._updateLiveToggleBtn();
+        if (this._liveEnabled) {
+            this._startRenderLoop();
+            await this._connectAndSubscribe();
+        } else {
+            // Live OFF 상태로 시작 → 렌더 루프 정지, 구독 안 함 (CPU 절감)
+            this._stopRenderLoop();
+        }
     }
 
     hide() {
         this._visible = false;
+        this._wsConnectGen++;
+        this._backendSubscribed = false;
         this._unsubscribeAll();
         this._clearLiveObjects();
         const viewerEl = document.getElementById('slam-live-viewer');
@@ -6753,48 +7186,81 @@ class SlamLiveViewer {
         this._knownFrames.clear();
     }
 
-    _connectAndSubscribe() {
+    async _connectAndSubscribe() {
+        if (this._backendSubscribed) return;
+
         const loadingEl = document.getElementById('slam-live-viewer-loading');
+        if (loadingEl) {
+            loadingEl.textContent = '백엔드 WebSocket 연결 중...';
+            loadingEl.style.display = 'block';
+        }
+        if (typeof ensureWebuiPortsReady === 'function') {
+            await ensureWebuiPortsReady();
+        }
+
+        // PC2/Path는 Python 백엔드 WS(8881) — rosbridge 연결과 무관하게 즉시 구독
+        console.log('[SlamLiveViewer] Subscribing binary topics (backend WS 8881)');
+        this._subscribeBinaryTopics();
+        this._backendSubscribed = true;
+        if (loadingEl) loadingEl.style.display = 'none';
+
+        const onRosbridgeReady = () => {
+            this._subscribeRosbridgeTopics();
+        };
+
         if (window.plotState && plotState.ros && plotState.ros.isConnected) {
-            this._ros = plotState.ros;
-            if (loadingEl) loadingEl.style.display = 'none';
-            this._subscribeAll();
-        } else {
-            if (loadingEl) loadingEl.style.display = 'flex';
-            try {
-                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
-                this._ros.on('connection', () => {
-                    console.log('[SlamLiveViewer] rosbridge connected');
-                    if (loadingEl) loadingEl.style.display = 'none';
-                    this._subscribeAll();
-                });
-                this._ros.on('error', (err) => {
-                    console.error('[SlamLiveViewer] rosbridge error:', err);
-                });
-                this._ros.on('close', () => {
-                    console.warn('[SlamLiveViewer] rosbridge connection closed');
-                });
-            } catch (e) {
-                console.error('[SlamLiveViewer] failed to init rosbridge:', e);
-            }
+            _verifyRosbridgeAlive(plotState.ros, 2500).then((alive) => {
+                if (alive) {
+                    this._ros = plotState.ros;
+                    onRosbridgeReady();
+                } else {
+                    console.warn('[SlamLiveViewer] plotState.ros stale — own rosbridge connection');
+                    this._connectOwnRosbridge(onRosbridgeReady);
+                }
+            });
+            return;
+        }
+
+        this._connectOwnRosbridge(onRosbridgeReady);
+    }
+
+    _connectOwnRosbridge(onRosbridgeReady) {
+        try {
+            const url = _getRosbridgeUrl();
+            console.log('[SlamLiveViewer] rosbridge connecting (TF/loopLine):', url);
+            this._ros = new ROSLIB.Ros({ url });
+            this._ros.on('connection', () => {
+                console.log('[SlamLiveViewer] rosbridge connected:', url);
+                onRosbridgeReady();
+            });
+            this._ros.on('error', (err) => {
+                console.error('[SlamLiveViewer] rosbridge error:', url, err);
+            });
+            this._ros.on('close', () => {
+                console.warn('[SlamLiveViewer] rosbridge connection closed:', url);
+            });
+        } catch (e) {
+            console.error('[SlamLiveViewer] failed to init rosbridge:', e);
         }
     }
 
-    _subscribeAll() {
-        // PointCloud2: 바이너리 WebSocket(8081) 구독
+    _subscribeBinaryTopics() {
         this._subscribePC2Binary('/cloud_registered', 'cloud_registered');
         this._subscribePC2Binary('/kf_node', 'kf_node');
-
-        // Path: 바이너리 WebSocket(8081) — rosbridge JSON 오버헤드 제거
-        this._subscribePathBinary('/path', 'path', 0x00ff44);         // 녹색
-        this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffffff); // 흰색
-
-        // Marker: ROSLIB via rosbridge
-        this._subscribeMarker('/loopLine');
-
-        // TF: ROSLIB via rosbridge (LocalizationLiveViewer와 동일)
-        this._subscribeTF('/tf');
+        this._subscribePathBinary('/path', 'path', 0x00ff44);
+        this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffffff);
         this._initMapAccumulator();
+    }
+
+    _subscribeRosbridgeTopics() {
+        if (!this._ros) return;
+        this._subscribeMarker('/loopLine');
+        this._subscribeTF('/tf');
+    }
+
+    _subscribeAll() {
+        this._subscribeBinaryTopics();
+        this._subscribeRosbridgeTopics();
     }
 
     _initMapAccumulator() {
@@ -7084,49 +7550,35 @@ class SlamLiveViewer {
     }
 
     _subscribePC2Binary(topic, key) {
-        const hostname = window.location.hostname || 'localhost';
-        const ws = new WebSocket(`ws://${hostname}:8081`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ cmd: 'subscribe', topic }));
-        };
-
-        ws.onmessage = (ev) => {
-            if (!(ev.data instanceof ArrayBuffer)) return;
-            const parsed = this._parseBinaryPC2(ev.data);
-            if (parsed) this._updatePointCloud(key, parsed);
-            // Forward cloud_registered to accumulator worker
-            if (parsed && key === 'cloud_registered' && this._mapAccWorker &&
-                parsed.positions && parsed.colors) {
-                const posCopy = new Float32Array(parsed.positions);
-                const colCopy = new Float32Array(parsed.colors);
-                this._mapAccWorker.postMessage(
-                    { cmd: 'addPoints', positions: posCopy, colors: colCopy },
-                    [posCopy.buffer, colCopy.buffer]
-                );
+        const viewer = this;
+        const sub = _createLiveViewerBackendWs(
+            viewer,
+            'SlamLiveViewer',
+            (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe', topic })); },
+            (buffer) => {
+                const parsed = viewer._parseBinaryPC2(buffer);
+                if (parsed) viewer._updatePointCloud(key, parsed);
+                if (parsed && key === 'cloud_registered' && viewer._mapAccWorker &&
+                    parsed.positions && parsed.colors) {
+                    const posCopy = new Float32Array(parsed.positions);
+                    const colCopy = new Float32Array(parsed.colors);
+                    const rp = viewer._robotPos;
+                    viewer._mapAccWorker.postMessage(
+                        { cmd: 'addPoints', positions: posCopy, colors: colCopy,
+                          pose: rp ? [rp.x, rp.y, rp.z] : null },
+                        [posCopy.buffer, colCopy.buffer]
+                    );
+                }
             }
-        };
-
-        ws.onerror = (e) => console.error(`[SlamLiveViewer] PC2 WS error (${topic}):`, e);
-
-        this._subscriptions.push({
-            unsubscribe: () => {
-                try {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ cmd: 'unsubscribe', topic }));
-                    }
-                    ws.close();
-                } catch (e) { /* ignore */ }
-            }
-        });
+        );
+        this._subscriptions.push(sub);
     }
 
     _subscribePath(topic, key, color) {
         const t = new ROSLIB.Topic({
             ros: this._ros,
             name: topic,
-            messageType: 'nav_msgs/msg/Path',
+            messageType: getMsgType('nav_msgs/Path', 'nav_msgs/msg/Path'),
             throttle_rate: 200,
             queue_length: 1
         });
@@ -7197,33 +7649,19 @@ class SlamLiveViewer {
     // ── Path 바이너리 WS 구독 ────────────────────────────────────────────────
 
     _subscribePathBinary(topic, key, color) {
-        const hostname = window.location.hostname || 'localhost';
-        const ws = new WebSocket(`ws://${hostname}:8081`);
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ cmd: 'subscribe_path', topic }));
-        };
-
-        ws.onmessage = (ev) => {
-            if (!(ev.data instanceof ArrayBuffer)) return;
-            const parsed = this._parseBinaryPath(ev.data);
-            if (!parsed || !this._scene) return;
-            this._updatePathIncremental(key, color, parsed);
-        };
-
-        ws.onerror = (e) => console.error(`[SlamLiveViewer] Path WS error (${topic}):`, e);
-
-        this._subscriptions.push({
-            unsubscribe: () => {
-                try {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ cmd: 'unsubscribe_path', topic }));
-                    }
-                    ws.close();
-                } catch (e) { /* ignore */ }
+        const viewer = this;
+        const sub = _createLiveViewerBackendWs(
+            viewer,
+            'SlamLiveViewer',
+            (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe_path', topic })); },
+            (buffer) => {
+                const parsed = viewer._parseBinaryPath(buffer);
+                if (parsed && viewer._scene) {
+                    viewer._updatePathIncremental(key, color, parsed);
+                }
             }
-        });
+        );
+        this._subscriptions.push(sub);
     }
 
     // ── 증분 Path 렌더링 ─────────────────────────────────────────────────────
@@ -7270,7 +7708,7 @@ class SlamLiveViewer {
         const t = new ROSLIB.Topic({
             ros: this._ros,
             name: topic,
-            messageType: 'visualization_msgs/msg/Marker',
+            messageType: getMsgType('visualization_msgs/Marker', 'visualization_msgs/msg/Marker'),
             throttle_rate: 500,
             queue_length: 1
         });
@@ -7330,7 +7768,7 @@ class SlamLiveViewer {
         const t = new ROSLIB.Topic({
             ros: this._ros,
             name: topic,
-            messageType: 'tf2_msgs/msg/TFMessage',
+            messageType: getMsgType('tf2_msgs/TFMessage', 'tf2_msgs/msg/TFMessage'),
             throttle_rate: 200,
             queue_length: 1
         });
@@ -7412,6 +7850,56 @@ class SlamLiveViewer {
         this._followMode = (force !== undefined) ? force : !this._followMode;
         const btn = document.getElementById('slam-live-follow-btn');
         if (btn) btn.classList.toggle('active', this._followMode);
+    }
+
+    _stopRenderLoop() {
+        this._renderLoopRunning = false;
+        if (this._animFrameId !== null) {
+            cancelAnimationFrame(this._animFrameId);
+            this._animFrameId = null;
+        }
+    }
+
+    // Live On/Off 토글: 실시간 구독(PC2/Path 바이너리 WS, loopLine/TF) + 렌더 루프를 함께 제어
+    setLiveEnabled(enabled, persist = true) {
+        enabled = !!enabled;
+        this._liveEnabled = enabled;
+        if (persist) {
+            try { localStorage.setItem('slamLiveEnabled', enabled ? '1' : '0'); } catch (e) { /* ignore */ }
+        }
+        if (this._visible) {
+            if (enabled) {
+                // 구독 재개 + 렌더 재개
+                this._startRenderLoop();
+                if (!this._backendSubscribed) this._connectAndSubscribe();
+            } else {
+                // 구독 해제 + 렌더 정지 → SLAM 성능 확보 (마지막 프레임은 화면에 정지 상태로 유지)
+                this._wsConnectGen++;
+                this._backendSubscribed = false;
+                this._unsubscribeAll();
+                this._stopRenderLoop();
+            }
+        }
+        this._updateLiveToggleBtn();
+        // 접힌 상태에서 펼칠 때 캔버스가 display:none → 표시로 바뀌므로 리사이즈 필요
+        if (enabled && this._visible) {
+            requestAnimationFrame(() => this._resizeRenderer());
+        }
+    }
+
+    toggleLive() {
+        this.setLiveEnabled(!this._liveEnabled);
+    }
+
+    _updateLiveToggleBtn() {
+        const btn = document.getElementById('slam-live-toggle-btn');
+        if (btn) {
+            btn.classList.toggle('active', this._liveEnabled);
+            btn.title = 'Live Viewer 접기 (구독/렌더 중지)';
+        }
+        // OFF 시 뷰어 접기(캔버스/액션 숨김) + 펼치기 버튼만 노출
+        const viewerEl = document.getElementById('slam-live-viewer');
+        if (viewerEl) viewerEl.classList.toggle('collapsed', !this._liveEnabled);
     }
 
     toggleTopView(enable) {
@@ -8944,9 +9432,21 @@ document.addEventListener('webkitfullscreenchange', () => {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('[DOMContentLoaded] Page loaded');
 
-    // 8081 WebSocket은 Plot 탭 여부와 무관하게 항상 연결 유지
+    ensureWebuiPortsReady().then((cfg) => {
+        const webChip = document.getElementById('web-port-chip');
+        const pc2Chip = document.getElementById('pc2-ws-port-chip');
+        const rosChip = document.getElementById('rosbridge-status-chip');
+        if (webChip) webChip.textContent = `Web: ${cfg.webPort}`;
+        if (pc2Chip) pc2Chip.textContent = `PC2 WS: ${cfg.pc2WsPort}`;
+        if (rosChip) rosChip.textContent = `rosbridge: ${cfg.rosbridgePort || 9090}`;
+    });
+
+    // PC2 WebSocket은 Plot 탭 여부와 무관하게 항상 연결 유지
     // (KITTI 변환 진행률 등 전역 백엔드 이벤트 수신에 필요)
     _initBackendWs();
+
+    // rosbridge도 페이지 로드 시 즉시 연결 시도 (SLAM/3D Viewer 탭에서도 사용)
+    initRosbridge();
 
     // bag 슬라이더 드래그 중에는 폴링 업데이트가 썸 위치를 덮어쓰지 않도록 플래그 관리
     const bagSlider = document.getElementById('bag-slider');
@@ -9035,7 +9535,7 @@ class SlamAnalyticsDashboard {
             this._doSubscribe();
         } else {
             try {
-                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
+                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl() });
                 this._ros.on('connection', () => {
                     console.log('[SlamAnalyticsDashboard] rosbridge connected');
                     this._doSubscribe();
@@ -9063,7 +9563,7 @@ class SlamAnalyticsDashboard {
         this._subscription = new ROSLIB.Topic({
             ros: this._ros,
             name: '/lio_analytics',
-            messageType: 'fast_lio/msg/LioAnalytics',
+            messageType: getMsgType('fast_lio/LioAnalytics', 'fast_lio/msg/LioAnalytics'),
             queue_length: 1
         });
         this._subscription.subscribe((msg) => {
@@ -9640,7 +10140,7 @@ class LocAnalyticsDashboard {
             this._doSubscribe();
         } else {
             try {
-                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl(9090) });
+                this._ros = new ROSLIB.Ros({ url: _getRosbridgeUrl() });
                 this._ros.on('connection', () => this._doSubscribe());
                 this._ros.on('error', (e) => console.error('[LocAnalytics] rosbridge error:', e));
                 this._ros.on('close', ()  => console.warn('[LocAnalytics] rosbridge closed'));
@@ -9655,7 +10155,7 @@ class LocAnalyticsDashboard {
         this._subscription = new ROSLIB.Topic({
             ros: this._ros,
             name: '/loc_analytics',
-            messageType: 'fast_lio/msg/LocAnalytics',
+            messageType: getMsgType('fast_lio/LocAnalytics', 'fast_lio/msg/LocAnalytics'),
             queue_length: 1
         });
         this._subscription.subscribe((msg) => this._onMessage(msg));

@@ -32,7 +32,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from builtin_interfaces.msg import Time
+import rospy
 from sensor_msgs.msg import Image, Imu, PointCloud2, PointField
 
 # 변환(bag 쓰기) 전용 의존성 - 없어도 직접 재생(scan/play)은 정상 동작
@@ -837,12 +837,9 @@ class KittiConverter:
         except Exception:
             return 0
 
-    def _ns_to_time_msg(self, ns: int) -> Time:
-        """나노초 정수를 builtin_interfaces/Time 메시지로 변환한다."""
-        msg = Time()
-        msg.sec = int(ns // 1_000_000_000)
-        msg.nanosec = int(ns % 1_000_000_000)
-        return msg
+    def _ns_to_time_msg(self, ns: int) -> rospy.Time:
+        """나노초 정수를 rospy.Time 메시지로 변환한다."""
+        return rospy.Time(int(ns // 1_000_000_000), int(ns % 1_000_000_000))
 
     # ──────────────────────────────────────────────────────────────
     # Private helpers - OXTS 데이터
@@ -1007,9 +1004,7 @@ class KittiConverter:
         """
         transforms = []
         if stamp is None:
-            stamp = Time()
-            stamp.sec = 0
-            stamp.nanosec = 0
+            stamp = rospy.Time(0, 0)
 
         # base_link → imu_link (identity transform)
         t0 = TransformStamped()

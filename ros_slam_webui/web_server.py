@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 
-import rclpy
-from rclpy.node import Node
-from rclpy.time import Time
-from rclpy.serialization import serialize_message
+import rospy
 from std_msgs.msg import Bool
 from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, TransformStamped, TwistStamped
 from nav_msgs.msg import Odometry, Path as NavPath
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from cv_bridge import CvBridge
 import cv2
 import struct
@@ -33,6 +29,7 @@ except ImportError:
 class ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     """HTTP 서버: 요청마다 새 스레드로 처리해 저장 작업 중 폴링 응답 지연 제거"""
     daemon_threads = True
+    allow_reuse_address = True
 
 
 # 센서 워커가 한 프레임을 처리한 뒤 고정 sleep으로 CPU를 양보하는 시간(초).
@@ -120,7 +117,8 @@ import signal
 import math
 import yaml
 from pathlib import Path as PathLib
-import rosbag2_py
+rosbag2_py = None
+ROSBAG2_AVAILABLE = False
 
 # ── Optional: numpy (PointCloud2 binary 파싱용) ──────────────────────────────
 try:
@@ -154,13 +152,17 @@ except ImportError:
     LIVOX_AVAILABLE = False
     print("Warning: livox_ros_driver2 messages not available. LiDAR publishing will be disabled.")
 
-# Try to import pose_graph_optimization service
+# Try to import pose_graph_optimization service (ROS1)
 try:
-    from pose_graph_optimization.srv import SaveMap
+    from fast_lio.srv import SaveMap
     SAVEMAP_AVAILABLE = True
 except ImportError:
-    SAVEMAP_AVAILABLE = False
-    print("Warning: pose_graph_optimization SaveMap service not available. Map saving will be disabled.")
+    try:
+        from pose_graph_optimization.srv import SaveMap
+        SAVEMAP_AVAILABLE = True
+    except ImportError:
+        SAVEMAP_AVAILABLE = False
+        print("Warning: SaveMap service not available. Map saving will be disabled.")
 
 try:
     from std_srvs.srv import Trigger as RosTrigger
@@ -171,6 +173,29 @@ except ImportError:
 # Global variables for signal handling
 _web_server = None
 _ros_node = None
+_web_server_thread = None
+
+
+def _format_port_in_use_error(port, param_name):
+    """Build a helpful log message when a TCP port is already bound."""
+    msg = f'Port {port} is already in use.'
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ['ss', '-ltnp'], stderr=subprocess.DEVNULL, text=True, timeout=1.0
+        )
+        for line in out.splitlines():
+            if f':{port}' in line:
+                msg += f' ({line.strip()})'
+                break
+    except Exception:
+        pass
+    msg += (
+        f' Stop the previous ros_slam_webui_node'
+        f' (e.g. rosnode kill /ros_slam_webui_node)'
+        f' or change ~{param_name} in launch.'
+    )
+    return msg
 
 # File Player PointCloud2 토픽 (create_publisher 이름과 반드시 동일 — API·UI 동기화의 단일 출처)
 KITTI_FILE_PLAYER_PC2_TOPIC = '/kitti/velo/pointcloud'
@@ -188,105 +213,8 @@ _MULRAN_CLOCK_MIN_INTERVAL_NS = 10_000_000
 
 
 def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
-    """rosbags-convert 가 ROS1 latching=0 인 /tf_static 에 빈 QoS를 쓰는 경우 보정.
-
-    ROS 2 /tf_static 은 TRANSIENT_LOCAL 이어야 tf2·RViz·웹 뷰어가 latched 변환을 받는다.
-    """
-    import sqlite3
-    from pathlib import Path
-
-    try:
-        from rosbags.convert.converter import LATCH
-        from rosbags.rosbag2.metadata import dump_qos_v8, dump_qos_v9
-    except ImportError:
-        logger.warning('[convert_ros1] rosbags import failed; skip tf_static QoS patch')
-        return
-
-    out = Path(output_dir)
-    db_paths = list(out.glob('*.db3'))
-    if not db_paths:
-        db_paths = list(out.rglob('*.db3'))
-    if not db_paths:
-        logger.info(f'[convert_ros1] No .db3 in {output_dir}; skip tf_static QoS patch')
-        return
-
-    meta_path = out / 'metadata.yaml'
-    version = 9
-    if meta_path.is_file():
-        try:
-            with open(meta_path, encoding='utf-8') as f:
-                meta = yaml.safe_load(f)
-            ver = meta.get('rosbag2_bagfile_information', {}).get('version')
-            if ver is not None:
-                version = int(ver)
-        except Exception as exc:
-            logger.warning(f'[convert_ros1] metadata version read failed ({exc}); assume v9')
-
-    # rosbag2 v9+: metadata.yaml 의 offered_qos_profiles 는 YAML 시퀀스(맵 리스트)여야 함.
-    # 문자열로 넣으면 yaml-cpp 가 vector<QoS> 변환 시 bad conversion (bag info 실패).
-    if version >= 9:
-        qos_meta = dump_qos_v9(LATCH)
-        if not qos_meta:
-            logger.warning('[convert_ros1] Empty dump_qos_v9(LATCH); skip tf_static patch')
-            return
-        qos_sqlite = yaml.dump(
-            qos_meta,
-            default_flow_style=False,
-            allow_unicode=True,
-        ).strip()
-    else:
-        qos_sqlite = dump_qos_v8(LATCH)
-        qos_meta = qos_sqlite
-        if not qos_sqlite:
-            logger.warning('[convert_ros1] Empty QoS string for LATCH; skip tf_static patch')
-            return
-
-    for db_path in db_paths:
-        try:
-            conn = sqlite3.connect(str(db_path))
-            try:
-                cur = conn.execute(
-                    "SELECT COUNT(*) FROM topics WHERE name = '/tf_static' OR name LIKE '%/tf_static'"
-                )
-                if cur.fetchone()[0] == 0:
-                    continue
-                conn.execute(
-                    'UPDATE topics SET offered_qos_profiles = ? WHERE name = ? OR name LIKE ?',
-                    (qos_sqlite, '/tf_static', '%/tf_static'),
-                )
-                conn.commit()
-                logger.info(f'[convert_ros1] tf_static QoS patched in {db_path.name}')
-            finally:
-                conn.close()
-        except Exception as exc:
-            logger.error(f'[convert_ros1] tf_static QoS sqlite patch failed ({db_path}): {exc}')
-
-    if meta_path.is_file():
-        try:
-            with open(meta_path, encoding='utf-8') as f:
-                data = yaml.safe_load(f)
-            info = data.get('rosbag2_bagfile_information')
-            if isinstance(info, dict):
-                for row in info.get('topics_with_message_count') or []:
-                    if not isinstance(row, dict):
-                        continue
-                    tm = row.get('topic_metadata')
-                    if not isinstance(tm, dict):
-                        continue
-                    name = tm.get('name', '')
-                    if name == '/tf_static' or name.endswith('/tf_static'):
-                        tm['offered_qos_profiles'] = qos_meta
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    yaml.safe_dump(
-                        data,
-                        f,
-                        default_flow_style=False,
-                        allow_unicode=True,
-                        sort_keys=False,
-                    )
-                logger.info('[convert_ros1] metadata.yaml tf_static offered_qos_profiles updated')
-        except Exception as exc:
-            logger.warning(f'[convert_ros1] metadata.yaml tf_static patch skipped: {exc}')
+    """ROS1 환경에서는 ROS2 bag QoS 패치가 불필요하므로 no-op."""
+    return
 
 
 class Ros1BagPlayerThread(threading.Thread):
@@ -319,6 +247,8 @@ class Ros1BagPlayerThread(threading.Thread):
         self._elapsed_sec = 0.0
         self._total_sec = 0.0
         self._lock = threading.Lock()
+        self._timing_reset_requested = False
+        self._seek_pause_restore = False
 
         # 동적으로 생성된 ROS2 publisher 캐시 {topic_name: publisher}
         self._publishers = {}
@@ -337,6 +267,7 @@ class Ros1BagPlayerThread(threading.Thread):
         self._play_event.set()
         with self._lock:
             self._status = 'playing'
+            self._timing_reset_requested = True
 
     def stop(self):
         """스레드 종료 요청"""
@@ -353,6 +284,7 @@ class Ros1BagPlayerThread(threading.Thread):
         """
         with self._lock:
             self._playback_rate = max(new_rate, 0.01)
+            self._timing_reset_requested = True
 
     def set_loop(self, loop: bool):
         """루프 재생 여부 설정.
@@ -368,8 +300,14 @@ class Ros1BagPlayerThread(threading.Thread):
         Args:
             time_sec (float): 이동할 시간(초). 0 이상 total_sec 이하.
         """
-        self._seek_to_sec = max(0.0, float(time_sec))
-        self._seek_requested = True
+        with self._lock:
+            clamped = max(0.0, float(time_sec))
+            if self._total_sec > 0.0:
+                clamped = min(clamped, self._total_sec)
+            self._seek_to_sec = clamped
+            self._seek_requested = True
+            self._timing_reset_requested = True
+            self._seek_pause_restore = (self._status == 'paused')
         self._play_event.set()  # 일시정지 중이면 block 해제
 
     def get_status(self):
@@ -398,7 +336,7 @@ class Ros1BagPlayerThread(threading.Thread):
             ros1_type_str (str): 예) 'sensor_msgs/msg/Image' 또는 'sensor_msgs/Image'
 
         Returns:
-            type | None: 성공 시 메시지 클래스, 실패 시 None
+            type: 성공 시 메시지 클래스, 실패 시 None
         """
         import importlib
         # ROS1 tf/tfMessage → ROS2 tf2_msgs/msg/TFMessage (tf 패키지는 ROS2에 없음)
@@ -420,57 +358,28 @@ class Ros1BagPlayerThread(threading.Thread):
         except Exception:
             return None
 
-    def _publisher_qos(self, topic_name: str, msg_cls):
-        """대용량 백 재생 시 구독자·브리지 적체 완화: 센서류는 최신 1개만 유지."""
-        if topic_name == '/tf_static':
-            return QoSProfile(
-                depth=1,
-                durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                reliability=ReliabilityPolicy.RELIABLE,
-            )
-        cls_name = getattr(msg_cls, '__name__', '')
-        # PointCloud2 / Image / LaserScan 등: 큐 쌓임 방지(느린 웹/시각화와 조합 시 전체 지연 완화)
-        if cls_name in ('PointCloud2', 'Image', 'LaserScan', 'CompressedImage'):
-            # depth=1 로 구독자 측 적체 완화; RELIABLE 유지(rosbridge 등 기본 구독과 QoS 호환)
-            return QoSProfile(
-                history=HistoryPolicy.KEEP_LAST,
-                depth=1,
-                reliability=ReliabilityPolicy.RELIABLE,
-            )
-        if topic_name == '/tf':
-            return QoSProfile(
-                history=HistoryPolicy.KEEP_LAST,
-                depth=30,
-                reliability=ReliabilityPolicy.RELIABLE,
-            )
-        return QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=10, reliability=ReliabilityPolicy.RELIABLE)
-
-    def _get_or_create_publisher(self, topic_name, ros1_type_str, msg_cls):
-        """토픽별 ROS2 publisher를 캐시해서 반환 (없으면 생성).
-
-        /tf_static은 TRANSIENT_LOCAL QoS 사용 (tf2 구독자와 호환).
+    def _get_or_create_publisher(self, topic_name, msg_cls):
+        """토픽별 ROS1 publisher를 캐시해서 반환 (없으면 생성).
 
         Args:
             topic_name (str): publish할 토픽 이름
-            ros1_type_str (str): ROS1 메시지 타입 문자열 (로그용)
-            msg_cls (type): ROS2 메시지 클래스
+            msg_cls (type): 메시지 클래스
 
         Returns:
-            rclpy Publisher | None
+            rospy.Publisher | None
         """
         if topic_name in self._publishers:
             return self._publishers[topic_name]
 
         try:
-            qos = self._publisher_qos(topic_name, msg_cls)
-            pub = self._ros_node.create_publisher(msg_cls, topic_name, qos)
+            latch = (topic_name == '/tf_static')
+            q_size = 1 if topic_name in ('/tf_static',) else 10
+            pub = rospy.Publisher(topic_name, msg_cls, queue_size=q_size, latch=latch)
             self._publishers[topic_name] = pub
-            self._ros_node.get_logger().info(
-                f'[Ros1BagPlayer] Created publisher: {topic_name} ({ros1_type_str})'
-            )
+            rospy.loginfo(f'[Ros1BagPlayer] Created publisher: {topic_name}')
             return pub
         except Exception as e:
-            self._ros_node.get_logger().error(
+            rospy.logerr(
                 f'[Ros1BagPlayer] Failed to create publisher for {topic_name}: {e}'
             )
             return None
@@ -479,7 +388,7 @@ class Ros1BagPlayerThread(threading.Thread):
         """생성한 모든 publisher 정리"""
         for topic_name, pub in self._publishers.items():
             try:
-                self._ros_node.destroy_publisher(pub)
+                pub.unregister()
             except Exception:
                 pass
         self._publishers.clear()
@@ -488,20 +397,11 @@ class Ros1BagPlayerThread(threading.Thread):
     # 메인 실행 루프
     # ------------------------------------------------------------------
     def run(self):
-        """rosbags Reader로 순차 읽기 → rclpy publisher로 publish.
-
-        rosbags 최신 API:
-          - get_typestore(Stores.ROS1_NOETIC) 로 typestore 생성 (reader.typestore 없음)
-          - typestore.deserialize_ros1(rawdata, conn.msgtype) 로 역직렬화
-          - 역직렬화 결과는 dataclass 기반 객체 (NamedTuple 아님)
-        """
+        """rosbag 모듈로 ROS1 .bag 순차 읽기 → rospy.Publisher로 publish (Phase 3 ROS1)."""
         try:
-            from rosbags.rosbag1 import Reader
-            from rosbags.typesys import get_typestore, Stores
+            import rosbag
         except ImportError as e:
-            self._ros_node.get_logger().error(
-                f'[Ros1BagPlayer] rosbags not available: {e}'
-            )
+            rospy.logerr(f'[Ros1BagPlayer] rosbag not available: {e}')
             with self._lock:
                 self._status = 'stopped'
             return
@@ -510,207 +410,200 @@ class Ros1BagPlayerThread(threading.Thread):
             self._status = 'playing'
 
         try:
-            # typestore는 Reader 밖에서 한 번만 생성
-            typestore = get_typestore(Stores.ROS1_NOETIC)
-            src_typestore = get_typestore(Stores.ROS2_JAZZY)
+            # 메타 정보는 별도 핸들에서 1회만 읽는다.
+            with rosbag.Bag(self._bag_path, 'r') as bag_meta:
+                start_time_sec = bag_meta.get_start_time()
+                end_time_sec = bag_meta.get_end_time()
+                total_sec = end_time_sec - start_time_sec
+            with self._lock:
+                self._total_sec = total_sec
 
-            def _ensure_typestore_has(ros2_type: str) -> bool:
-                """ROS1 typestore에 타입이 없으면 ROS2에서 등록 (tf2_msgs 등 ROS1_NOETIC에 없는 타입)."""
-                if ros2_type in typestore.fielddefs:
-                    return True
-                try:
-                    from rosbags.typesys import get_types_from_msg
-                    msgdef = src_typestore.generate_msgdef(ros2_type, ros_version=1)[0]
-                    typs = get_types_from_msg(msgdef, ros2_type)
-                    typs.pop('std_msgs/msg/Header', None)
-                    typestore.register(typs)
-                    return True
-                except Exception:
-                    return False
+            PREFETCH_QUEUE_SIZE = 256
+            SENTINEL_SEEK = ('__SEEK__', None, None)
+            SENTINEL_END = ('__END__', None, None)
+            start_offset_sec = 0.0
 
-            with Reader(self._bag_path) as reader:
-                # 전체 재생 시간 계산 (nanoseconds → seconds)
-                total_ns = reader.end_time - reader.start_time
+            while True:
                 with self._lock:
-                    self._total_sec = total_ns / 1e9
+                    start_offset_sec = max(0.0, min(start_offset_sec, self._total_sec))
+                    self._elapsed_sec = start_offset_sec
+                    self._timing_reset_requested = True
 
-                # 토픽별 메시지 타입 정보 수집
-                # reader.topics: {topic_name: TopicInfo}
-                topic_type_map = {}  # topic_name → ros1_type_str
-                for topic_name, topic_info in reader.topics.items():
-                    if self._topics is not None and topic_name not in self._topics:
-                        continue
-                    topic_type_map[topic_name] = topic_info.msgtype
+                selected = list(self._topics) if self._topics else None
 
-                # ROS1 typestore에 tf2_msgs 등 누락 타입 등록 (역직렬화 가능하도록)
-                for _t in topic_type_map.values():
-                    _ensure_typestore_has(_t)
+                # seek 지점부터 재시작할 수 있도록 rosbag 시작 시간 지정
+                start_time_obj = None
+                if start_offset_sec > 0.0:
+                    start_time_obj = rospy.Time.from_sec(start_time_sec + start_offset_sec)
 
-                # publisher 사전 생성 + msg_cls 캐시 (매 메시지마다 resolve 제거)
-                publishable_topics = set()
-                msg_cls_cache = {}  # topic_name -> msg_cls
-                for topic_name, ros1_type_str in topic_type_map.items():
-                    msg_cls = self._resolve_ros2_type(ros1_type_str)
-                    if msg_cls is not None:
-                        pub = self._get_or_create_publisher(topic_name, ros1_type_str, msg_cls)
-                        if pub is not None:
-                            publishable_topics.add(topic_name)
-                            msg_cls_cache[topic_name] = msg_cls
-                    else:
-                        self._ros_node.get_logger().warn(
-                            f'[Ros1BagPlayer] Skipping {topic_name} ({ros1_type_str}): '
-                            'ROS2 type not found'
-                        )
+                prefetch_queue = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
+                reader_cancel = threading.Event()
 
-                if not publishable_topics:
-                    self._ros_node.get_logger().warn(
-                        '[Ros1BagPlayer] No publishable topics found. Stopping.'
-                    )
-                    with self._lock:
-                        self._status = 'stopped'
-                    return
+                def _push_sentinel(sentinel):
+                    placed = False
+                    while not placed:
+                        try:
+                            prefetch_queue.put(sentinel, timeout=0.1)
+                            placed = True
+                        except queue.Full:
+                            if self._stop_flag or reader_cancel.is_set():
+                                return
 
-                # 루프 재생 지원: _loop 플래그가 True이면 완료 후 처음부터 재시작
-                # seek 지원: messages(start=...)로 특정 시점부터 재생
-                # Producer-Consumer: Reader 스레드가 디스크 I/O로 prefetch, 메인 스레드는 변환+publish (I/O 오버랩)
-                PREFETCH_QUEUE_SIZE = 5
-                SENTINEL_SEEK = ('__SEEK__', None, None)
-                SENTINEL_END = ('__END__', None, None)
-
-                start_param = None  # None = 처음부터, int(ns) = 해당 시점부터
-                while True:
-                    prev_ros_time = None
-                    start_ns = reader.start_time
-
-                    with self._lock:
-                        if start_param is not None:
-                            self._elapsed_sec = (start_param - start_ns) / 1e9
-                        else:
-                            self._elapsed_sec = 0.0
-
-                    prefetch_queue = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
-
+                with rosbag.Bag(self._bag_path, 'r') as bag_reader:
                     def _reader_task():
                         try:
-                            msg_iter = (reader.messages(connections=(), start=start_param, stop=None)
-                                        if start_param is not None else reader.messages())
-                            for conn, timestamp, rawdata in msg_iter:
-                                if self._stop_flag:
-                                    prefetch_queue.put(SENTINEL_END)
+                            msg_iter = bag_reader.read_messages(topics=selected, start_time=start_time_obj)
+                            for topic, msg, t in msg_iter:
+                                if self._stop_flag or reader_cancel.is_set():
                                     return
                                 if self._seek_requested:
-                                    prefetch_queue.put(SENTINEL_SEEK)
+                                    _push_sentinel(SENTINEL_SEEK)
                                     return
-                                prefetch_queue.put((conn, timestamp, rawdata))
-                        except Exception:
-                            pass
+                                placed = False
+                                while not placed:
+                                    try:
+                                        prefetch_queue.put((topic, msg, t), timeout=0.1)
+                                        placed = True
+                                    except queue.Full:
+                                        if self._stop_flag or reader_cancel.is_set():
+                                            return
+                                        if self._seek_requested:
+                                            _push_sentinel(SENTINEL_SEEK)
+                                            return
+                        except Exception as e:
+                            rospy.logwarn(f'[Ros1BagPlayer] reader task error: {e}')
                         finally:
-                            try:
-                                prefetch_queue.put(SENTINEL_END)
-                            except Exception:
-                                pass
+                            _push_sentinel(SENTINEL_END)
 
                     reader_thread = threading.Thread(target=_reader_task, daemon=True)
                     reader_thread.start()
 
+                    wall_anchor = time.monotonic()
+                    bag_elapsed_at_anchor = start_offset_sec
                     seek_break = False
+                    ended = False
+
                     while True:
+                        if self._stop_flag:
+                            break
+
                         try:
-                            item = prefetch_queue.get(timeout=0.5)
+                            item = prefetch_queue.get(timeout=0.1)
                         except queue.Empty:
-                            if self._stop_flag:
-                                seek_break = False
+                            if self._seek_requested:
+                                seek_break = True
                                 break
                             continue
 
                         if item == SENTINEL_END:
+                            ended = True
                             break
+
                         if item == SENTINEL_SEEK:
-                            start_param = int(start_ns + self._seek_to_sec * 1e9)
-                            start_param = max(reader.start_time, min(start_param, reader.end_time))
-                            with self._lock:
-                                self._elapsed_sec = self._seek_to_sec
-                            self._seek_requested = False
                             seek_break = True
                             break
 
-                        conn, timestamp, rawdata = item
-                        if self._stop_flag:
-                            break
-
-                        # 일시정지 대기 (blocking)
-                        self._play_event.wait()
-                        if self._stop_flag:
-                            break
-
-                        topic_name = conn.topic
-                        ros1_type_str = conn.msgtype
-
-                        # 선택되지 않은 토픽 스킵
-                        if topic_name not in publishable_topics:
-                            continue
-
-                        # elapsed 업데이트
-                        elapsed_ns = timestamp - start_ns
+                        topic, msg, t = item
+                        msg_elapsed = t.to_sec() - start_time_sec
                         with self._lock:
-                            self._elapsed_sec = elapsed_ns / 1e9
+                            self._elapsed_sec = msg_elapsed
 
-                        # 메시지 간 시간차 기반 sleep (속도 제어)
-                        if prev_ros_time is not None:
-                            dt_ns = timestamp - prev_ros_time
-                            if dt_ns > 0:
-                                sleep_sec = (dt_ns / 1e9) / self._playback_rate
-                                # 최대 2초 sleep 제한 (긴 공백 방지)
-                                time.sleep(min(sleep_sec, 2.0))
-                        prev_ros_time = timestamp
+                        # wall-clock 기반 publish 시점 대기.
+                        while True:
+                            if self._stop_flag:
+                                break
 
-                        # 역직렬화 + publish (msg_cls 캐시 사용)
-                        try:
-                            msg_cls = msg_cls_cache.get(topic_name)
-                            if msg_cls is None:
+                            if self._seek_requested:
+                                seek_break = True
+                                break
+
+                            if not self._play_event.is_set():
+                                # pause 중에는 elapsed 진행을 정지하고, resume 시 anchor 재설정.
+                                while (not self._play_event.is_set()) and (not self._stop_flag):
+                                    if self._seek_requested:
+                                        seek_break = True
+                                        break
+                                    time.sleep(0.02)
+                                if self._stop_flag or seek_break:
+                                    break
+                                wall_anchor = time.monotonic()
+                                bag_elapsed_at_anchor = msg_elapsed
+                                with self._lock:
+                                    self._timing_reset_requested = False
                                 continue
 
-                            # rosbags 최신 API: typestore.deserialize_ros1()
-                            ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
-                            # ROS2 메시지로 변환
-                            ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
-                            if ros2_msg is None:
-                                continue
+                            with self._lock:
+                                if self._timing_reset_requested:
+                                    wall_anchor = time.monotonic()
+                                    bag_elapsed_at_anchor = msg_elapsed
+                                    self._timing_reset_requested = False
+                                rate = self._playback_rate
 
-                            pub = self._publishers.get(topic_name)
-                            if pub is not None:
-                                pub.publish(ros2_msg)
-
-                        except Exception as e:
-                            self._ros_node.get_logger().debug(
-                                f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
+                            target_wall = wall_anchor + max(
+                                0.0, (msg_elapsed - bag_elapsed_at_anchor) / max(rate, 0.01)
                             )
+                            now = time.monotonic()
+                            wait_sec = target_wall - now
+                            if wait_sec <= 0.0:
+                                break
+                            time.sleep(min(wait_sec, 0.02))
 
-                    reader_thread.join(timeout=2.0)
+                        if self._stop_flag or seek_break:
+                            break
 
-                    # seek로 탈출한 경우: start_param으로 for 루프 재시작
-                    if seek_break:
-                        continue
-                    # for 루프 완료 (정상 종료 또는 stop_flag)
-                    if self._stop_flag or not self._loop:
-                        break
-                    # 루프 재생: 타임라인 즉시 0으로 리셋 후 재시작
-                    start_param = None
+                        # publisher 생성 및 publish
+                        pub = self._get_or_create_publisher(topic, type(msg))
+                        if pub is not None:
+                            try:
+                                pub.publish(msg)
+                            except Exception as e:
+                                rospy.logdebug(
+                                    f'[Ros1BagPlayer] Publish error on {topic}: {e}'
+                                )
+
+                    reader_cancel.set()
+                    reader_thread.join(timeout=5.0)
+                    if reader_thread.is_alive():
+                        rospy.logwarn(
+                            '[Ros1BagPlayer] reader thread did not exit cleanly; '
+                            'stopping playback to avoid bag read corruption.'
+                        )
+                        self._stop_flag = True
+
+                if self._stop_flag:
+                    break
+
+                if seek_break:
                     with self._lock:
-                        self._elapsed_sec = 0.0
-                    self._ros_node.get_logger().info('[Ros1BagPlayer] Looping playback.')
+                        seek_target = max(0.0, min(self._seek_to_sec, self._total_sec))
+                        self._elapsed_sec = seek_target
+                        self._seek_requested = False
+                        self._timing_reset_requested = True
+                        restore_pause = self._seek_pause_restore
+                        self._seek_pause_restore = False
+                    start_offset_sec = seek_target
+                    if restore_pause:
+                        self._play_event.clear()
+                    continue
+
+                if not ended or not self._loop:
+                    break
+
+                start_offset_sec = 0.0
+                with self._lock:
+                    self._elapsed_sec = 0.0
+                    self._timing_reset_requested = True
+                rospy.loginfo('[Ros1BagPlayer] Looping playback.')
 
         except Exception as e:
-            self._ros_node.get_logger().error(
-                f'[Ros1BagPlayer] Fatal error during playback: {e}'
-            )
+            rospy.logerr(f'[Ros1BagPlayer] Fatal error during playback: {e}')
             import traceback
             traceback.print_exc()
         finally:
             self._destroy_publishers()
             with self._lock:
                 self._status = 'stopped'
-            self._ros_node.get_logger().info('[Ros1BagPlayer] Playback finished.')
+            rospy.loginfo('[Ros1BagPlayer] Playback finished.')
 
     @staticmethod
     def _ros2_cls_from_rosbags_name(rosbags_type_name: str):
@@ -731,16 +624,15 @@ class Ros1BagPlayerThread(threading.Thread):
                 pass
         return None
 
-    def _convert_pointcloud2_fast(self, ros1_msg) -> PointCloud2 | None:
+    def _convert_pointcloud2_fast(self, ros1_msg) -> PointCloud2:
         """PointCloud2 전용 고속 변환 (재귀 루프 생략)."""
         try:
             from std_msgs.msg import Header
-            from builtin_interfaces.msg import Time as BuiltinTime
             msg = PointCloud2()
             h = ros1_msg.header
             s = h.stamp
             msg.header = Header(
-                stamp=BuiltinTime(sec=getattr(s, 'sec', 0), nanosec=getattr(s, 'nanosec', getattr(s, 'nsec', 0))),
+                stamp=rospy.Time(getattr(s, 'sec', 0), getattr(s, 'nsec', getattr(s, 'nanosec', 0))),
                 frame_id=str(h.frame_id)
             )
             msg.height = int(ros1_msg.height)
@@ -766,16 +658,15 @@ class Ros1BagPlayerThread(threading.Thread):
         except Exception:
             return None
 
-    def _convert_image_fast(self, ros1_msg) -> Image | None:
+    def _convert_image_fast(self, ros1_msg) -> Image:
         """Image 전용 고속 변환 (재귀 루프 생략)."""
         try:
             from std_msgs.msg import Header
-            from builtin_interfaces.msg import Time as BuiltinTime
             msg = Image()
             h = ros1_msg.header
             s = h.stamp
             msg.header = Header(
-                stamp=BuiltinTime(sec=getattr(s, 'sec', 0), nanosec=getattr(s, 'nanosec', getattr(s, 'nsec', 0))),
+                stamp=rospy.Time(getattr(s, 'sec', 0), getattr(s, 'nsec', getattr(s, 'nanosec', 0))),
                 frame_id=str(h.frame_id)
             )
             msg.height = int(ros1_msg.height)
@@ -965,7 +856,7 @@ class Ros1BagRecorderThread(threading.Thread):
         예: 'sensor_msgs/msg/PointCloud2' → sensor_msgs.msg.PointCloud2
 
         Returns:
-            type | None: 성공 시 메시지 클래스, 실패 시 None
+            type: 성공 시 메시지 클래스, 실패 시 None
         """
         import importlib
         try:
@@ -982,197 +873,102 @@ class Ros1BagRecorderThread(threading.Thread):
     # 메인 실행 루프
     # ------------------------------------------------------------------
     def run(self):
-        """rclpy subscriber로 CDR bytes 수신 → rosbag1 Writer로 .bag 기록.
-
-        rosbags API 주의사항:
-          - writer.add_connection()의 msgtype은 ROS2 포맷('sensor_msgs/msg/PointCloud2')을
-            그대로 사용해야 함. ROS1 포맷('sensor_msgs/PointCloud2')은 typestore에 없어 실패.
-          - CDR → ROS1 변환은 typestore.cdr_to_ros1(cdr_bytes, typename) 을 사용.
-
-        아키텍처:
-          - 녹화 전용 임시 ROS2 노드(recorder_node)를 생성하고,
-            SingleThreadedExecutor를 이 스레드 안에서 직접 spin하여 콜백을 처리한다.
-          - 메인 스레드의 rclpy.spin()에 의존하지 않아 새 subscription이 누락되지 않는다.
-        """
+        """rospy.Subscriber로 메시지 수신 → rosbag.Bag('w')으로 .bag 기록 (Phase 3 ROS1)."""
         try:
-            from rosbags.rosbag1 import Writer
-            from rosbags.typesys import get_typestore, Stores
-            from rosbags.convert.converter import migrate_bytes
+            import rosbag
         except ImportError as e:
-            self._ros_node.get_logger().error(f'[Ros1BagRecorder] rosbags not available: {e}')
+            rospy.logerr(f'[Ros1BagRecorder] rosbag not available: {e}')
             with self._lock:
                 self._status = 'stopped'
             return
-
-        import rclpy
-        from rclpy.node import Node as RclpyNode
-        from rclpy.executors import SingleThreadedExecutor
-        from rclpy.serialization import serialize_message
 
         self._start_time = time.time()
-        msg_queue = []
-        queue_lock = threading.Lock()
-
-        # src: ROS2 typestore — CDR 역직렬화 (ROS2 Header 정의, seq 없음)
-        # dst: ROS1 typestore — ROS1 직렬화 + add_connection msgdef 생성 (Header.seq 포함)
-        # migrate_bytes()가 두 typestore 간 필드 차이(예: Header.seq)를 자동 처리함
-        src_typestore = get_typestore(Stores.ROS2_JAZZY)
-        dst_typestore = get_typestore(Stores.ROS1_NOETIC)
-        migrate_cache: dict = {}
-
-        # ── 녹화 전용 임시 노드 + 전용 Executor 생성 ──────────────────────────
-        # 메인 노드(self._ros_node)의 SingleThreadedExecutor는 새 subscription을
-        # 실시간으로 감지하지 못하는 경우가 있어, 독립 노드를 사용한다.
-        recorder_node = None
-        executor = None
-        try:
-            # 노드 이름 중복 방지: 짧은 타임스탬프로 유일성 확보
-            _node_id = int(time.time() * 1000) % 100000
-            recorder_node = RclpyNode(f'ros1_bag_recorder_{_node_id}')
-            executor = SingleThreadedExecutor()
-            executor.add_node(recorder_node)
-        except Exception as e:
-            self._ros_node.get_logger().error(
-                f'[Ros1BagRecorder] Failed to create recorder node: {e}'
-            )
-            with self._lock:
-                self._status = 'stopped'
-            return
-
-        def make_callback(topic_name):
-            """토픽별 subscriber callback 생성 (closure로 topic_name 캡처)"""
-            def callback(msg):
-                if self._stop_flag:
-                    return
-                ts_ns = int(time.time() * 1e9)
-                cdr_bytes = bytes(serialize_message(msg))
-                with queue_lock:
-                    msg_queue.append((topic_name, ts_ns, cdr_bytes))
-            return callback
-
+        bag_lock = threading.Lock()
         written_count = 0
+        subs = []
+
+        def _resolve_msg_class(ros_type_str):
+            """ROS1/ROS2 타입명으로 메시지 클래스 동적 import."""
+            import importlib
+            parts = ros_type_str.split('/')
+            if len(parts) == 2:
+                pkg, cls_name = parts[0], parts[1]
+            elif len(parts) == 3 and parts[1] == 'msg':
+                pkg, cls_name = parts[0], parts[2]
+            else:
+                return None
+            try:
+                mod = importlib.import_module(f'{pkg}.msg')
+                return getattr(mod, cls_name, None)
+            except Exception:
+                return None
+
         try:
-            with Writer(self._output_path) as writer:
-                connections = {}
+            with rosbag.Bag(self._output_path, 'w') as bag:
 
-                for topic_name, ros2_type in self._topic_type_map.items():
-                    msg_cls = self._import_ros2_msg_class(ros2_type)
+                def make_callback(topic_name):
+                    def callback(msg):
+                        if self._stop_flag:
+                            return
+                        with bag_lock:
+                            try:
+                                bag.write(topic_name, msg)
+                                nonlocal written_count
+                                written_count += 1
+                            except Exception as e:
+                                rospy.logwarn(
+                                    f'[Ros1BagRecorder] Write error on {topic_name}: {e}'
+                                )
+                    return callback
 
+                for topic_name, ros_type in self._topic_type_map.items():
+                    msg_cls = _resolve_msg_class(ros_type)
                     if msg_cls is None:
-                        self._ros_node.get_logger().warn(
-                            f'[Ros1BagRecorder] Cannot import {ros2_type}, skipping {topic_name}'
+                        rospy.logwarn(
+                            f'[Ros1BagRecorder] Cannot import {ros_type}, skipping {topic_name}'
                         )
                         continue
-
-                    # rosbag1 Writer에 connection 등록
-                    # dst_typestore(ROS1_NOETIC)로 msgdef 생성 → ROS1 bag에 올바른 메시지 정의 기록
-                    # dst_typestore에 타입이 없는 경우 src_typestore에서 등록 시도
-                    if ros2_type not in dst_typestore.fielddefs:
-                        try:
-                            from rosbags.typesys import get_types_from_msg
-                            typs = get_types_from_msg(
-                                src_typestore.generate_msgdef(ros2_type, ros_version=1)[0],
-                                ros2_type,
-                            )
-                            typs.pop('std_msgs/msg/Header', None)  # Header는 ROS1 버전 유지
-                            dst_typestore.register(typs)
-                            self._ros_node.get_logger().info(
-                                f'[Ros1BagRecorder] Registered custom type in dst_typestore: {ros2_type}'
-                            )
-                        except Exception as reg_e:
-                            self._ros_node.get_logger().warn(
-                                f'[Ros1BagRecorder] Cannot register type {ros2_type} in ROS1 typestore: {reg_e}'
-                            )
-                            continue
                     try:
-                        conn = writer.add_connection(topic_name, ros2_type, typestore=dst_typestore)
-                        connections[topic_name] = conn
-                        self._ros_node.get_logger().info(
-                            f'[Ros1BagRecorder] Connection registered: {topic_name} ({ros2_type})'
+                        sub = rospy.Subscriber(
+                            topic_name, msg_cls,
+                            make_callback(topic_name),
+                            queue_size=100
                         )
+                        subs.append(sub)
+                        rospy.loginfo(f'[Ros1BagRecorder] Subscribed: {topic_name}')
                     except Exception as e:
-                        self._ros_node.get_logger().warn(
-                            f'[Ros1BagRecorder] Failed to add connection for {topic_name}: {e}'
-                        )
-                        continue
-
-                    # 녹화 전용 노드에 subscriber 생성 (메인 노드의 spin과 독립)
-                    try:
-                        recorder_node.create_subscription(
-                            msg_cls, topic_name, make_callback(topic_name), 10
-                        )
-                        self._ros_node.get_logger().info(
-                            f'[Ros1BagRecorder] Subscribed: {topic_name}'
-                        )
-                    except Exception as e:
-                        self._ros_node.get_logger().warn(
+                        rospy.logwarn(
                             f'[Ros1BagRecorder] Failed to subscribe to {topic_name}: {e}'
                         )
 
-                self._ros_node.get_logger().info(
+                rospy.loginfo(
                     f'[Ros1BagRecorder] Recording started → {self._output_path} '
-                    f'({len(connections)} topics)'
+                    f'({len(subs)} topics)'
                 )
 
                 last_log_time = time.time()
-
-                # 메인 루프 — 전용 executor를 여기서 직접 spin하여 콜백 처리 후 bag에 기록
                 while not self._stop_flag:
-                    # 이 스레드에서 recorder_node의 콜백을 직접 처리
-                    executor.spin_once(timeout_sec=0.01)
-
-                    with queue_lock:
-                        pending = list(msg_queue)
-                        msg_queue.clear()
-
-                    for topic_name, ts_ns, cdr_bytes in pending:
-                        conn = connections.get(topic_name)
-                        if conn is None:
-                            continue
-                        try:
-                            # ROS2 CDR bytes → ROS1 raw bytes 변환
-                            #
-                            # migrate_bytes()는 rosbags.convert 공식 변환 경로로:
-                            # 1. src_typestore(ROS2_JAZZY)로 CDR 역직렬화 (Header에 seq 없음)
-                            # 2. migrate_message()로 필드 매핑 (ROS1 Header의 seq=0 자동 추가 등)
-                            # 3. dst_typestore(ROS1_NOETIC)로 ROS1 직렬화
-                            raw = bytes(migrate_bytes(
-                                src_typestore, dst_typestore,
-                                conn.msgtype, conn.msgtype,
-                                migrate_cache, cdr_bytes,
-                                src_is2=True, dst_is2=False,
-                            ))
-                            writer.write(conn, ts_ns, raw)
-                            written_count += 1
-                        except Exception as e:
-                            self._ros_node.get_logger().warn(
-                                f'[Ros1BagRecorder] Write error on {topic_name} '
-                                f'({conn.msgtype}): {e}'
-                            )
-
-                    # 5초마다 진행 상황 로그
+                    time.sleep(0.05)
                     now = time.time()
                     if now - last_log_time >= 5.0:
-                        self._ros_node.get_logger().info(
+                        rospy.loginfo(
                             f'[Ros1BagRecorder] Written {written_count} messages so far...'
                         )
                         last_log_time = now
 
         except Exception as e:
-            self._ros_node.get_logger().error(f'[Ros1BagRecorder] Fatal error: {e}')
+            rospy.logerr(f'[Ros1BagRecorder] Fatal error: {e}')
             import traceback
             traceback.print_exc()
         finally:
-            # 전용 노드 정리
-            if executor is not None and recorder_node is not None:
+            for sub in subs:
                 try:
-                    executor.remove_node(recorder_node)
-                    recorder_node.destroy_node()
+                    sub.unregister()
                 except Exception:
                     pass
             with self._lock:
                 self._status = 'stopped'
-            self._ros_node.get_logger().info(
+            rospy.loginfo(
                 f'[Ros1BagRecorder] Recording finished. Total messages written: {written_count}'
             )
 
@@ -1222,10 +1018,20 @@ class PC2WebSocketServer:
     IMG_JPEG_QUALITY = 75      # JPEG 품질 (80 → 75, 화질 유지하며 전송량 절감)
     IMG_MAX_DIM      = 800     # 최대 단변 길이(픽셀): 초과 시 비율 유지 리사이즈
 
-    def __init__(self, ros_node, port: int = 8081):
+    # Path(nav_msgs/Path) WebSocket 스트리밍 설정
+    #   fast_lio /path 는 매 스캔(~20Hz)마다 "누적된 전체 경로"를 재발행하므로
+    #   메시지가 시간에 따라 선형으로 커진다. rospy 가 매 메시지를 통째로
+    #   역직렬화하면 GIL 을 오래 점유해 /Odometry·/ouster/points 스핀이 burst 로
+    #   지연된다. 아래 설정으로 (1) 수신 rate 제한, (2) 역직렬화 없이 raw 버퍼에서
+    #   좌표만 벡터 추출, (3) pose 상한 을 적용해 부하를 상수화한다.
+    PATH_THROTTLE_SEC = 0.2    # 5Hz — 경로 시각화에 충분, 역직렬화/전송 부하 1/4 감소
+    PATH_MAX_POSES    = 20_000 # pose 상한: 초과 시 균등 decimation (payload/메모리 상한)
+    PATH_BUFF_SIZE    = 8 * 1024 * 1024  # AnyMsg 수신 버퍼(누적 경로 대비 여유)
+
+    def __init__(self, ros_node, port: int = 8881):
         self._node = ros_node
         self._port = port
-        self._loop: asyncio.AbstractEventLoop | None = None
+        self._loop: asyncio.AbstractEventLoop = None
         self._lock = threading.Lock()
         # ── PointCloud2 전용 ───────────────────────────────────────────────────
         # topic_name → set[websocket]
@@ -1276,7 +1082,7 @@ class PC2WebSocketServer:
     def start(self):
         """별도 daemon 스레드에서 asyncio WebSocket 서버를 시작한다."""
         if not WEBSOCKETS_AVAILABLE or not NUMPY_AVAILABLE:
-            self._node.get_logger().warn(
+            rospy.logwarn(
                 '[PC2WS] websockets 또는 numpy 미설치 — PC2 Binary WS 비활성화')
             return
         t = threading.Thread(
@@ -1296,12 +1102,18 @@ class PC2WebSocketServer:
                     self._handler, '0.0.0.0', self._port,
                     max_size=None,
                     ping_interval=20,
-                    ping_timeout=20):
-                self._node.get_logger().info(
+                    ping_timeout=20,
+                    reuse_address=True):
+                rospy.loginfo(
                     f'[PC2WS] Binary WebSocket server on ws://0.0.0.0:{self._port}')
                 await asyncio.Future()   # 종료 없이 영원히 실행
+        except OSError as e:
+            if getattr(e, 'errno', None) == 98:
+                rospy.logerr(_format_port_in_use_error(self._port, 'pc2_ws_port'))
+            else:
+                rospy.logerr(f'[PC2WS] server error: {e}')
         except Exception as e:
-            self._node.get_logger().error(f'[PC2WS] server error: {e}')
+            rospy.logerr(f'[PC2WS] server error: {e}')
 
     async def _handler(self, websocket):
         """WebSocket 연결 핸들러 — subscribe/unsubscribe/subscribe_plot/subscribe_image 명령 수신."""
@@ -1385,7 +1197,7 @@ class PC2WebSocketServer:
     # topic → 타입 문자열 캐시 (DDS 반복 조회 방지)
     _topic_type_cache: dict = {}
 
-    def _get_topic_type(self, topic: str) -> str | None:
+    def _get_topic_type(self, topic: str) -> str:
         """토픽 타입 조회 (PointCloud2 또는 CustomMsg 등) — 결과를 캐시에 저장."""
         if topic in self._topic_type_cache:
             return self._topic_type_cache[topic]
@@ -1411,25 +1223,25 @@ class PC2WebSocketServer:
                     self._livox_clients[topic] = set()
                 self._livox_clients[topic].add(ws)
                 if topic not in self._livox_subs:
-                    sub = self._node.create_subscription(
-                        CustomMsg, topic,
+                    sub = rospy.Subscriber(
+                        topic, CustomMsg,
                         lambda m, t=topic: self._on_livox(m, t),
-                        10)
+                        queue_size=10)
                     self._livox_subs[topic] = sub
                     self._livox_last_sent[topic] = 0.0
-                    self._node.get_logger().info(f'[PC2WS] subscribed (Livox) → {topic}')
+                    rospy.loginfo(f'[PC2WS] subscribed (Livox) → {topic}')
             else:
                 if topic not in self._clients:
                     self._clients[topic] = set()
                 self._clients[topic].add(ws)
                 if topic not in self._subs:
-                    sub = self._node.create_subscription(
-                        PointCloud2, topic,
+                    sub = rospy.Subscriber(
+                        topic, PointCloud2,
                         lambda m, t=topic: self._on_pc2(m, t),
-                        1)
+                        queue_size=1)
                     self._subs[topic] = sub
                     self._last_sent[topic] = 0.0
-                    self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
+                    rospy.loginfo(f'[PC2WS] subscribed → {topic}')
 
     def _remove_client(self, topic: str, ws):
         with self._lock:
@@ -1440,7 +1252,7 @@ class PC2WebSocketServer:
                 if not s_livox:
                     self._livox_clients.pop(topic, None)
                     # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
-                    self._node.get_logger().info(f'[PC2WS] all Livox clients gone, sub kept ← {topic}')
+                    rospy.loginfo(f'[PC2WS] all Livox clients gone, sub kept ← {topic}')
                 return
             # PointCloud2 클라이언트
             s = self._clients.get(topic)
@@ -1450,7 +1262,7 @@ class PC2WebSocketServer:
             if not s:
                 self._clients.pop(topic, None)
                 # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
-                self._node.get_logger().info(f'[PC2WS] all PC2 clients gone, sub kept ← {topic}')
+                rospy.loginfo(f'[PC2WS] all PC2 clients gone, sub kept ← {topic}')
 
     def _presubscribe_pc2(self, topic: str):
         """Publisher 생성과 동시에 PointCloud2 ROS2 구독을 미리 생성해 DDS 발견을 워밍업한다.
@@ -1460,13 +1272,13 @@ class PC2WebSocketServer:
         """
         with self._lock:
             if topic not in self._subs:
-                sub = self._node.create_subscription(
-                    PointCloud2, topic,
+                sub = rospy.Subscriber(
+                    topic, PointCloud2,
                     lambda m, t=topic: self._on_pc2(m, t),
-                    10)
+                    queue_size=10)
                 self._subs[topic] = sub
                 self._last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[PC2WS] pre-subscribed (DDS warmup) → {topic}')
+                rospy.loginfo(f'[PC2WS] pre-subscribed (warmup) → {topic}')
 
     # ── TRANSIENT_LOCAL (latched) 토픽 ─────────────────────────────────────────
 
@@ -1483,20 +1295,14 @@ class PC2WebSocketServer:
                 self._latched_clients[topic] = set()
             self._latched_clients[topic].add(ws)
             if topic not in self._latched_subs:
-                qos = QoSProfile(
-                    reliability=ReliabilityPolicy.RELIABLE,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                    history=HistoryPolicy.KEEP_LAST,
-                    depth=1,
-                )
-                sub = self._node.create_subscription(
-                    PointCloud2, topic,
+                # ROS1: latch 토픽은 일반 Subscriber로 구독 (마지막 메시지 캐시는 별도 관리)
+                sub = rospy.Subscriber(
+                    topic, PointCloud2,
                     lambda m, t=topic: self._on_pc2_latched(m, t),
-                    qos,
-                )
+                    queue_size=1)
                 self._latched_subs[topic] = sub
-                self._node.get_logger().info(
-                    f'[PC2WS] subscribed (TRANSIENT_LOCAL) → {topic}')
+                rospy.loginfo(
+                    f'[PC2WS] subscribed (latched) → {topic}')
             cached_bin  = self._latched_cache.get(topic)
             cached_meta = self._latched_meta_cache.get(topic)
 
@@ -1528,8 +1334,8 @@ class PC2WebSocketServer:
         meta_json = json.dumps({
             'type':          'pc2meta',
             'topic':         topic_name,
-            'stamp_sec':     stamp.sec,
-            'stamp_nanosec': stamp.nanosec,
+            'stamp_sec':     stamp.secs,
+            'stamp_nanosec': stamp.nsecs,
             'frame_id':      msg.header.frame_id,
             'point_count':   msg.width * msg.height,
         }, separators=(',', ':'))
@@ -1557,7 +1363,7 @@ class PC2WebSocketServer:
                 except Exception:
                     pass
         except Exception as e:
-            self._node.get_logger().error(
+            rospy.logerr(
                 f'[PC2WS] latched broadcast error ({topic_name}): {e}')
 
     def _presubscribe_image(self, topic: str):
@@ -1568,13 +1374,13 @@ class PC2WebSocketServer:
         """
         with self._lock:
             if topic not in self._img_subs:
-                sub = self._node.create_subscription(
-                    Image, topic,
+                sub = rospy.Subscriber(
+                    topic, Image,
                     lambda m, t=topic: self._on_image(m, t),
-                    10)
+                    queue_size=10)
                 self._img_subs[topic] = sub
                 self._img_last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[ImgWS] pre-subscribed (DDS warmup) → {topic}')
+                rospy.loginfo(f'[ImgWS] pre-subscribed (warmup) → {topic}')
 
     # ── Image 클라이언트 / 구독 관리 ─────────────────────────────────────────
 
@@ -1585,13 +1391,13 @@ class PC2WebSocketServer:
                 self._img_clients[topic] = set()
             self._img_clients[topic].add(ws)
             if topic not in self._img_subs:
-                sub = self._node.create_subscription(
-                    Image, topic,
+                sub = rospy.Subscriber(
+                    topic, Image,
                     lambda m, t=topic: self._on_image(m, t),
-                    10)
+                    queue_size=10)
                 self._img_subs[topic]      = sub
                 self._img_last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[ImgWS] subscribed → {topic}')
+                rospy.loginfo(f'[ImgWS] subscribed → {topic}')
 
     def _remove_image_client(self, topic: str, ws):
         with self._lock:
@@ -1602,24 +1408,30 @@ class PC2WebSocketServer:
             if not s:
                 self._img_clients.pop(topic, None)
                 # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 이미지 수신
-                self._node.get_logger().info(f'[ImgWS] all clients gone, sub kept ← {topic}')
+                rospy.loginfo(f'[ImgWS] all clients gone, sub kept ← {topic}')
 
     # ── Path 클라이언트 / 구독 관리 ───────────────────────────────────────────
 
     def _add_path_client(self, topic: str, ws):
-        """nav_msgs/Path 토픽을 바이너리 PTH 패킷으로 스트리밍하기 위한 클라이언트 등록."""
+        """nav_msgs/Path 토픽을 바이너리 PTH 패킷으로 스트리밍하기 위한 클라이언트 등록.
+
+        rospy.AnyMsg 로 구독해 콜백에서 "역직렬화 없이" raw 바이트만 받는다.
+        누적 경로(수천~수만 pose)를 매 메시지마다 통째로 역직렬화하던 비용을 제거해
+        메인 스핀의 GIL 점유(→ /Odometry·points burst)를 근본적으로 줄인다.
+        """
         with self._lock:
             if topic not in self._path_clients:
                 self._path_clients[topic] = set()
             self._path_clients[topic].add(ws)
             if topic not in self._path_subs:
-                sub = self._node.create_subscription(
-                    NavPath, topic,
+                sub = rospy.Subscriber(
+                    topic, rospy.AnyMsg,
                     lambda m, t=topic: self._on_path(m, t),
-                    1)
+                    queue_size=1,
+                    buff_size=self.PATH_BUFF_SIZE)
                 self._path_subs[topic]      = sub
                 self._path_last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[PathWS] subscribed → {topic}')
+                rospy.loginfo(f'[PathWS] subscribed → {topic}')
 
     def _remove_path_client(self, topic: str, ws):
         with self._lock:
@@ -1629,15 +1441,20 @@ class PC2WebSocketServer:
             s.discard(ws)
             if not s:
                 self._path_clients.pop(topic, None)
-                self._node.get_logger().info(f'[PathWS] all clients gone, sub kept ← {topic}')
+                rospy.loginfo(f'[PathWS] all clients gone, sub kept ← {topic}')
 
     # ── rclpy 콜백 (Path) ────────────────────────────────────────────────────
 
-    def _on_path(self, msg: NavPath, topic_name: str):
-        """nav_msgs/Path 수신 → throttle → binary PTH 패킷 → asyncio 브로드캐스트."""
+    def _on_path(self, msg, topic_name: str):
+        """nav_msgs/Path(AnyMsg) 수신 → throttle → binary PTH 패킷 → asyncio 브로드캐스트.
+
+        핵심: 콜백 자체는 raw 바이트만 참조하고 즉시 리턴한다(역직렬화 X).
+        throttle/backpressure 로 대부분의 메시지를 값싸게 버려 rospy 수신 스레드가
+        GIL 을 오래 잡지 않게 한다. 실제 파싱/직렬화는 executor 스레드에서 수행.
+        """
         now = time.monotonic()
         with self._lock:
-            if now - self._path_last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+            if now - self._path_last_sent.get(topic_name, 0.0) < self.PATH_THROTTLE_SEC:
                 return
             if self._path_sending.get(topic_name, False):
                 return
@@ -1647,20 +1464,21 @@ class PC2WebSocketServer:
             self._path_last_sent[topic_name] = now
             self._path_sending[topic_name] = True
 
+        raw = getattr(msg, '_buff', None)
         loop = self._loop
-        if loop and loop.is_running():
+        if raw is not None and loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._build_and_broadcast_path(msg, topic_name, clients), loop)
+                self._build_and_broadcast_path(raw, topic_name, clients), loop)
         else:
             with self._lock:
                 self._path_sending[topic_name] = False
 
-    async def _build_and_broadcast_path(self, msg, topic_name: str, clients: set):
+    async def _build_and_broadcast_path(self, raw: bytes, topic_name: str, clients: set):
         """_build_path_payload를 thread pool에서 실행 후 브로드캐스트."""
         try:
             loop = asyncio.get_running_loop()
             payload = await loop.run_in_executor(
-                None, self._build_path_payload, msg, topic_name)
+                None, self._build_path_payload, raw, topic_name)
             if payload:
                 for ws in list(clients):
                     try:
@@ -1668,14 +1486,18 @@ class PC2WebSocketServer:
                     except Exception:
                         pass
         except Exception as e:
-            self._node.get_logger().warn(
+            rospy.logwarn(
                 f'[PathWS] broadcast error ({topic_name}): {e}')
         finally:
             with self._lock:
                 self._path_sending[topic_name] = False
 
-    def _build_path_payload(self, msg: NavPath, topic_name: str) -> bytes | None:
-        """nav_msgs/Path → PTH binary 패킷 생성.
+    def _build_path_payload(self, raw: bytes, topic_name: str) -> bytes:
+        """nav_msgs/Path raw 직렬화 바이트 → PTH binary 패킷 생성.
+
+        전체 메시지를 rospy 객체로 역직렬화하지 않고, 직렬화 레이아웃에서
+        pose 위치(XYZ)만 numpy 로 벡터 추출한다(파이썬 pose 루프 제거).
+        PATH_MAX_POSES 초과 시 균등 decimation 으로 부하/전송량을 상수화한다.
 
         Binary 패킷 포맷 (little-endian):
           [3B]  magic = b'PTH'
@@ -1688,26 +1510,78 @@ class PC2WebSocketServer:
           [count*12 B] XYZ float32 interleaved (x0,y0,z0, x1,y1,z1, ...)
         """
         try:
-            poses = msg.poses
-            if not poses:
+            frame_b, xyz = self._parse_path_positions(raw)
+            if xyz is None or xyz.size == 0:
                 return None
+            n = xyz.shape[0]
             topic_b = topic_name.encode('utf-8')
-            frame_b = (msg.header.frame_id or '').encode('utf-8')
-            n = len(poses)
-            xyz = np.empty(n * 3, dtype=np.float32)
-            for i, ps in enumerate(poses):
-                p = ps.pose.position
-                xyz[i * 3]     = p.x
-                xyz[i * 3 + 1] = p.y
-                xyz[i * 3 + 2] = p.z
             header = struct.pack('<3sBIII',
                                  b'PTH', 1,
                                  len(topic_b), len(frame_b), n)
-            return b''.join([header, topic_b, frame_b, xyz.tobytes()])
+            return b''.join([header, topic_b, frame_b,
+                             np.ascontiguousarray(xyz).tobytes()])
         except Exception as e:
-            self._node.get_logger().error(
+            rospy.logerr(
                 f'[PathWS] _build_path_payload error ({topic_name}): {e}')
             return None
+
+    def _parse_path_positions(self, raw: bytes):
+        """nav_msgs/Path 직렬화 바이트에서 (frame_id_bytes, xyz_float32) 추출.
+
+        ROS1 직렬화 레이아웃:
+          Header header      : uint32 seq, time(2×uint32), string frame_id
+          PoseStamped[] poses:
+            uint32 N
+            (per pose) Header(seq,stamp,frame_id) + Pose(pos 3×f64, quat 4×f64)
+
+        각 PoseStamped 의 frame_id 길이가 동일하면(대다수 SLAM 퍼블리셔) pose 블록
+        stride 가 상수이므로 structured dtype 로 위치만 한 번에 벡터 추출한다.
+        길이가 제각각이면 안전하게 순차 파싱으로 폴백한다.
+        반환 xyz: shape (n, 3) float32.
+        """
+        mv = memoryview(raw)
+        total = len(mv)
+        # ── outer Header ─────────────────────────────────────────────────
+        off = 4 + 8                                   # seq(4) + stamp(8)
+        outer_fl = struct.unpack_from('<I', mv, off)[0]
+        off += 4
+        frame_b = bytes(mv[off:off + outer_fl])
+        off += outer_fl
+        # ── poses 배열 길이 ──────────────────────────────────────────────
+        n = struct.unpack_from('<I', mv, off)[0]
+        off += 4
+        if n <= 0:
+            return frame_b, None
+        poses_start = off
+        # 첫 pose 헤더의 frame_id 길이로 stride 추정 (seq4 + stamp8 = 12)
+        pose_fl = struct.unpack_from('<I', mv, poses_start + 12)[0]
+        pre       = 16 + pose_fl                       # seq4+stamp8+len4+str
+        stride    = pre + 56                           # pos(24) + quat(32)
+
+        if stride > 0 and (total - poses_start) == n * stride:
+            # 빠른 경로: 상수 stride → structured dtype 로 위치만 추출
+            pose_dtype = np.dtype([
+                ('pre',  'V%d' % pre),
+                ('pos',  '<f8', (3,)),
+                ('post', 'V32'),
+            ])
+            arr = np.frombuffer(raw, dtype=pose_dtype, count=n, offset=poses_start)
+            xyz = arr['pos'].astype(np.float32)        # (n, 3)
+        else:
+            # 폴백: pose 별 frame_id 길이가 달라 stride 가 가변인 경우 순차 파싱
+            xyz = np.empty((n, 3), dtype=np.float32)
+            p = poses_start
+            for i in range(n):
+                fl = struct.unpack_from('<I', mv, p + 12)[0]
+                base = p + 16 + fl
+                xyz[i, 0], xyz[i, 1], xyz[i, 2] = struct.unpack_from('<3d', mv, base)
+                p = base + 56
+
+        # ── pose 상한 초과 시 균등 decimation ────────────────────────────
+        if xyz.shape[0] > self.PATH_MAX_POSES:
+            step = int(math.ceil(xyz.shape[0] / self.PATH_MAX_POSES))
+            xyz = xyz[::step]
+        return frame_b, xyz
 
     # ── rclpy 콜백 (Image) ────────────────────────────────────────────────────
 
@@ -1749,7 +1623,7 @@ class PC2WebSocketServer:
             with self._lock:
                 self._img_sending[topic_name] = False
 
-    def _encode_image_to_payload(self, msg: Image, topic_name: str) -> bytes | None:
+    def _encode_image_to_payload(self, msg: Image, topic_name: str) -> bytes:
         """JPEG 인코딩 (thread pool executor에서 실행 — ROS2 callback 스레드 외부).
 
         최적화:
@@ -1792,7 +1666,7 @@ class PC2WebSocketServer:
                                  len(jpeg_bytes))
             return header + topic_bytes + jpeg_bytes
         except Exception as e:
-            self._node.get_logger().warn(f'[ImgWS] encode error ({topic_name}): {e}')
+            rospy.logwarn(f'[ImgWS] encode error ({topic_name}): {e}')
             return None
 
     async def _encode_and_broadcast_image(self, msg: Image, topic_name: str, clients: set):
@@ -1811,7 +1685,7 @@ class PC2WebSocketServer:
             if payload:
                 await self._broadcast(clients, payload)
         except Exception as e:
-            self._node.get_logger().warn(
+            rospy.logwarn(
                 f'[ImgWS] async encode/broadcast error ({topic_name}): {e}')
         finally:
             with self._lock:
@@ -1851,8 +1725,8 @@ class PC2WebSocketServer:
         meta_json = json.dumps({
             'type':          'pc2meta',
             'topic':         topic_name,
-            'stamp_sec':     stamp.sec,
-            'stamp_nanosec': stamp.nanosec,
+            'stamp_sec':     stamp.secs,
+            'stamp_nanosec': stamp.nsecs,
             'frame_id':      msg.header.frame_id,
             'point_count':   msg.width * msg.height,
         }, separators=(',', ':'))
@@ -1883,7 +1757,7 @@ class PC2WebSocketServer:
                     except Exception:
                         pass
         except Exception as e:
-            self._node.get_logger().warn(
+            rospy.logwarn(
                 f'[PC2WS] async build/broadcast Livox error ({topic_name}): {e}')
         finally:
             with self._lock:
@@ -1906,7 +1780,7 @@ class PC2WebSocketServer:
                     except Exception:
                         pass
         except Exception as e:
-            self._node.get_logger().warn(f'[PC2WS] async build/broadcast error ({topic_name}): {e}')
+            rospy.logwarn(f'[PC2WS] async build/broadcast error ({topic_name}): {e}')
         finally:
             with self._lock:
                 self._pc2_sending[topic_name] = False
@@ -1999,7 +1873,7 @@ class PC2WebSocketServer:
                         self._node.destroy_subscription(sub)
                     except Exception:
                         pass
-                self._node.get_logger().info(f'[PC2WS/plot] unsubscribed ← {topic}')
+                rospy.loginfo(f'[PC2WS/plot] unsubscribed ← {topic}')
 
     def _create_plot_subscription(self, topic: str, msg_type: str = ''):
         """토픽 타입을 자동 감지하여 rclpy subscription 동적 생성.
@@ -2019,28 +1893,28 @@ class PC2WebSocketServer:
                         type_str = types[0]
                         break
             except Exception as e:
-                self._node.get_logger().error(f'[PC2WS/plot] 토픽 타입 조회 오류: {e}')
+                rospy.logerr(f'[PC2WS/plot] 토픽 타입 조회 오류: {e}')
 
         if not type_str:
-            self._node.get_logger().warn(
+            rospy.logwarn(
                 f'[PC2WS/plot] 토픽 타입 못 찾음 (msg_type 미제공, DDS 조회 실패): {topic}')
             return
 
         MsgClass = self._get_msg_class(type_str)
         if MsgClass is None:
-            self._node.get_logger().warn(
+            rospy.logwarn(
                 f'[PC2WS/plot] 메시지 타입 로드 실패: {type_str}')
             return
 
-        sub = self._node.create_subscription(
-            MsgClass,
+        sub = rospy.Subscriber(
             topic,
+            MsgClass,
             lambda msg, t=topic: self._on_plot_msg(msg, t),
-            10
+            queue_size=10
         )
         with self._lock:
             self._plot_subs[topic] = sub
-        self._node.get_logger().info(
+        rospy.loginfo(
             f'[PC2WS/plot] subscribed → {topic} ({type_str})')
 
     def _on_plot_msg(self, msg, topic_name: str):
@@ -2063,8 +1937,8 @@ class PC2WebSocketServer:
         # 타임스탬프 추출
         stamp_sec, stamp_nanosec = 0, 0
         if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
-            stamp_sec     = msg.header.stamp.sec
-            stamp_nanosec = msg.header.stamp.nanosec
+            stamp_sec     = msg.header.stamp.secs
+            stamp_nanosec = msg.header.stamp.nsecs
         else:
             t = time.time()
             stamp_sec     = int(t)
@@ -2104,13 +1978,18 @@ class PC2WebSocketServer:
         """슬래시 또는 점 표기법으로 중첩 필드 값 추출.
 
         예) 'linear_acceleration/x'  →  obj.linear_acceleration.x
-            'header/stamp/sec'       →  obj.header.stamp.sec
+            'header/stamp/secs'      →  obj.header.stamp.secs  (ROS1)
         """
         for part in field_path.replace('.', '/').split('/'):
-            if hasattr(obj, part):
-                obj = getattr(obj, part)
-            else:
-                return None
+            # ROS1 rospy.Time 호환: sec→secs, nanosec→nsecs 자동 변환
+            if not hasattr(obj, part):
+                if part == 'sec' and hasattr(obj, 'secs'):
+                    part = 'secs'
+                elif part == 'nanosec' and hasattr(obj, 'nsecs'):
+                    part = 'nsecs'
+                else:
+                    return None
+            obj = getattr(obj, part)
         if isinstance(obj, (int, float, bool)):
             return float(obj)
         if isinstance(obj, str):
@@ -2241,7 +2120,7 @@ class PC2WebSocketServer:
             return b''.join(parts)
 
         except Exception as e:
-            self._node.get_logger().error(f'[PC2WS] _build_payload error: {e}')
+            rospy.logerr(f'[PC2WS] _build_payload error: {e}')
             return None
 
     # ── Livox CustomMsg → PC2 호환 binary ──────────────────────────────────────
@@ -2283,7 +2162,7 @@ class PC2WebSocketServer:
                 header, topic_b, frame_b,
                 xyz.tobytes(), reflectivity.astype(np.float32).tobytes()])
         except Exception as e:
-            self._node.get_logger().error(f'[PC2WS] _build_livox_payload error: {e}')
+            rospy.logerr(f'[PC2WS] _build_livox_payload error: {e}')
             return None
 
     def _on_livox(self, msg, topic_name: str):
@@ -2308,8 +2187,8 @@ class PC2WebSocketServer:
         meta_json = json.dumps({
             'type': 'pc2meta',
             'topic': topic_name,
-            'stamp_sec': stamp.sec if stamp else 0,
-            'stamp_nanosec': stamp.nanosec if stamp else 0,
+            'stamp_sec': stamp.secs if stamp else 0,
+            'stamp_nanosec': stamp.nsecs if stamp else 0,
             'frame_id': frame_id,
             'point_count': point_count,
         }, separators=(',', ':'))
@@ -2323,9 +2202,12 @@ class PC2WebSocketServer:
                 self._livox_sending[topic_name] = False
 
 
-class WebGUINode(Node):
+class WebGUINode:
     def __init__(self):
-        super().__init__('web_gui_node')
+        rospy.init_node('ros_slam_webui_node', anonymous=False)
+
+        self.web_port = int(rospy.get_param('~web_port', 8880))
+        self.pc2_ws_port = int(rospy.get_param('~pc2_ws_port', 8881))
 
         # SLAM GUI state
         self.slam_map1 = ""
@@ -2349,6 +2231,22 @@ class WebGUINode(Node):
         # Localization state
         self.localization_process = None
 
+        # FAST-LIO config files used by roslaunch (config_file:=...)
+        fast_lio_paths = get_fast_lio_config_paths()
+        if fast_lio_paths.get('success'):
+            self._slam_config_file = fast_lio_paths['mapping_config']
+            self._localization_config_file = fast_lio_paths['localization_config']
+            rospy.loginfo(f'Default SLAM config: {self._slam_config_file}')
+            rospy.loginfo(f'Default localization config: {self._localization_config_file}')
+        else:
+            self._slam_config_file = None
+            self._localization_config_file = None
+            rospy.logwarn(
+                'FAST-LIO config directory not found: {}'.format(
+                    fast_lio_paths.get('message', 'unknown')
+                )
+            )
+
         # Bag Player state
         self.bag_path = ""
         self.bag_playing = False
@@ -2364,6 +2262,7 @@ class WebGUINode(Node):
         self.recorder_ros1_thread = None   # Ros1BagRecorderThread 인스턴스
         self.recorder_mode = 'ros2'        # 'ros2' | 'ros1'
         self.bag_topics = []
+        self.bag_topic_infos = []  # [{name, type, publishable}, ...] — recorder 토픽 보충용
         self.bag_selected_topics = []
         self.bag_duration = 0.0  # Duration in seconds
         self.bag_current_time = 0.0  # Current playback time in seconds
@@ -2470,10 +2369,9 @@ class WebGUINode(Node):
         self.player_seek_to_stamp  = 0      # seek 목표 타임스탬프 (HTTP 스레드→worker 전달용)
 
         # Timer for playback (matching C++ implementation)
-        self.create_timer(0.01, self.timer_callback)  # 10ms = 100Hz (이전 100μs=10,000Hz는 GIL 과도 점유)
-
+        rospy.Timer(rospy.Duration(0.01), lambda event: self.timer_callback())  # 10ms = 100Hz
         # Timer for bag playback time tracking
-        self.create_timer(0.1, self.bag_timer_callback)  # 100ms = 0.1s
+        rospy.Timer(rospy.Duration(0.1), lambda event: self.bag_timer_callback())  # 100ms = 0.1s
 
         # Setup reusable environment for subprocess calls
         self._setup_ros_environment()
@@ -2484,7 +2382,7 @@ class WebGUINode(Node):
 
         # ── PC2 Binary WebSocket 서버 (포트 8081) ─────────────────────────────
         # rosbridge를 우회해 PointCloud2를 Python에서 직접 처리 후 binary 전송
-        self.pc2_ws_server = PC2WebSocketServer(self, port=8081)
+        self.pc2_ws_server = PC2WebSocketServer(self, port=self.pc2_ws_port)
         self.pc2_ws_server.start()
 
         # ── KITTI 변환기 상태 ──────────────────────────────────────────────────
@@ -2558,41 +2456,18 @@ class WebGUINode(Node):
         self._conpr_livox_worker: '_SensorPublishWorker | None' = None
         self._conpr_cam_worker: '_SensorPublishWorker | None' = None
 
-        self.get_logger().info('Web GUI Node initialized with full ROS2 integration')
+        rospy.loginfo('Web GUI Node initialized with full ROS2 integration')
 
     def _setup_ros_environment(self):
         """
-        Setup reusable ROS2 environment for subprocess calls.
-        This avoids re-sourcing setup.bash on every subprocess call.
+        Setup reusable ROS1 environment for subprocess calls.
+        Since this node is launched from a sourced ROS environment,
+        os.environ already contains all required ROS variables.
         """
-        # Get sourced environment once and cache it
-        bash_cmd = (
-            'source /opt/ros/jazzy/setup.bash && '
-            'source /home/kkw/localization_ws/install/setup.bash && '
-            'env'
-        )
-        try:
-            result = subprocess.run(
-                ['bash', '-c', bash_cmd],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                # Parse environment variables
-                self._ros_env = os.environ.copy()
-                for line in result.stdout.split('\n'):
-                    if '=' in line:
-                        key, _, value = line.partition('=')
-                        self._ros_env[key] = value
-                self.get_logger().info('ROS2 environment cached successfully')
-            else:
-                # Fallback to current environment
-                self._ros_env = os.environ.copy()
-                self.get_logger().warn('Failed to source ROS2 environment, using current environment')
-        except Exception as e:
-            self._ros_env = os.environ.copy()
-            self.get_logger().error(f'Error setting up ROS2 environment: {str(e)}')
+        # The process is already running in a sourced ROS1 environment,
+        # so simply copy the current environment variables (no subprocess needed).
+        self._ros_env = os.environ.copy()
+        rospy.loginfo('ROS1 environment cached from current process environment')
 
         # Add DISPLAY and XAUTHORITY for GUI applications (rviz2)
         # Try to get DISPLAY from environment or default to :0
@@ -2601,12 +2476,12 @@ class WebGUINode(Node):
         else:
             # Default to :0 if not set (common for local X server)
             self._ros_env['DISPLAY'] = ':0'
-            self.get_logger().info('DISPLAY not set, defaulting to :0')
+            rospy.loginfo('DISPLAY not set, defaulting to :0')
         
         # Try to get XAUTHORITY from environment or try common locations
         if 'XAUTHORITY' in os.environ:
             self._ros_env['XAUTHORITY'] = os.environ['XAUTHORITY']
-            self.get_logger().info(f'Using XAUTHORITY from environment: {os.environ["XAUTHORITY"]}')
+            rospy.loginfo(f'Using XAUTHORITY from environment: {os.environ["XAUTHORITY"]}')
         else:
             # Try common XAUTHORITY locations (including Wayland)
             import glob
@@ -2625,13 +2500,13 @@ class WebGUINode(Node):
                         xauth_path = matches[0]  # Use first match
                         if os.path.exists(xauth_path):
                             self._ros_env['XAUTHORITY'] = xauth_path
-                            self.get_logger().info(f'Found XAUTHORITY at: {xauth_path}')
+                            rospy.loginfo(f'Found XAUTHORITY at: {xauth_path}')
                             xauth_found = True
                             break
                 else:
                     if os.path.exists(xauth_pattern):
                         self._ros_env['XAUTHORITY'] = xauth_pattern
-                        self.get_logger().info(f'Found XAUTHORITY at: {xauth_pattern}')
+                        rospy.loginfo(f'Found XAUTHORITY at: {xauth_pattern}')
                         xauth_found = True
                         break
             
@@ -2642,27 +2517,27 @@ class WebGUINode(Node):
                     wayland_auth_files = glob.glob(f'{user_run_dir}/.mutter-Xwaylandauth.*')
                     if wayland_auth_files:
                         self._ros_env['XAUTHORITY'] = wayland_auth_files[0]
-                        self.get_logger().info(f'Found Wayland XAUTHORITY at: {wayland_auth_files[0]}')
+                        rospy.loginfo(f'Found Wayland XAUTHORITY at: {wayland_auth_files[0]}')
                     else:
                         # Fallback to user's home directory (even if it doesn't exist)
                         self._ros_env['XAUTHORITY'] = os.path.expanduser('~/.Xauthority')
-                        self.get_logger().warn('XAUTHORITY not found, using ~/.Xauthority (may not exist)')
+                        rospy.logwarn('XAUTHORITY not found, using ~/.Xauthority (may not exist)')
                 else:
                     self._ros_env['XAUTHORITY'] = os.path.expanduser('~/.Xauthority')
-                    self.get_logger().warn('XAUTHORITY not found, using ~/.Xauthority (may not exist)')
+                    rospy.logwarn('XAUTHORITY not found, using ~/.Xauthority (may not exist)')
 
     def _init_common_ros_interfaces(self):
         """공통 인터페이스 초기화: /clock publisher + file_player 구독.
         ConPR/KITTI 어느 쪽이든 처음 로드 시 한 번만 호출.
         """
         if self.clock_pub is None:
-            self.clock_pub = self.create_publisher(Clock, '/clock', 1)
+            self.clock_pub = rospy.Publisher('/clock', Clock, queue_size=1)
         if self.start_sub is None:
-            self.start_sub = self.create_subscription(
-                Bool, '/file_player_start', self.file_player_start_callback, 1)
+            self.start_sub = rospy.Subscriber(
+                '/file_player_start', Bool, self.file_player_start_callback, queue_size=1)
         if self.stop_sub is None:
-            self.stop_sub = self.create_subscription(
-                Bool, '/file_player_stop', self.file_player_stop_callback, 1)
+            self.stop_sub = rospy.Subscriber(
+                '/file_player_stop', Bool, self.file_player_stop_callback, queue_size=1)
 
     def _init_file_player_ros_interfaces(self):
         """ConPR 전용 publisher 초기화 (lazy).
@@ -2674,16 +2549,16 @@ class WebGUINode(Node):
         if self._conpr_pubs_initialized:
             return
 
-        self.pose_pub     = self.create_publisher(PointStamped, '/pose/position', 10)
-        self.imu_pub      = self.create_publisher(Imu, '/imu', 20)
-        self.cam_pub      = self.create_publisher(Image, '/camera/color/image', 5)
-        self.cam_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 10)
+        self.pose_pub     = rospy.Publisher('/pose/position', PointStamped, queue_size=10)
+        self.imu_pub      = rospy.Publisher('/imu', Imu, queue_size=20)
+        self.cam_pub      = rospy.Publisher('/camera/color/image', Image, queue_size=5)
+        self.cam_info_pub = rospy.Publisher('/camera/color/camera_info', CameraInfo, queue_size=10)
 
         if LIVOX_AVAILABLE:
-            self.livox_pub = self.create_publisher(CustomMsg, '/livox/lidar', 5)
+            self.livox_pub = rospy.Publisher('/livox/lidar', CustomMsg, queue_size=5)
 
         self._conpr_pubs_initialized = True
-        self.get_logger().info('ConPR File Player publishers initialized')
+        rospy.loginfo('ConPR File Player publishers initialized')
 
     def _destroy_conpr_publishers(self):
         """ConPR publishers 정리. ROS1 bag 재생 시 /livox/lidar 등 토픽 충돌 방지.
@@ -2702,16 +2577,16 @@ class WebGUINode(Node):
         ]:
             if pub is not None:
                 try:
-                    self.destroy_publisher(pub)
+                    pub.unregister()
                 except Exception as e:
-                    self.get_logger().warn(f'[ConPR] destroy {name}: {e}')
+                    rospy.logwarn(f'[ConPR] destroy {name}: {e}')
         self.pose_pub = None
         self.imu_pub = None
         self.cam_pub = None
         self.cam_info_pub = None
         self.livox_pub = None
         self._conpr_pubs_initialized = False
-        self.get_logger().info('ConPR publishers destroyed (for bag playback)')
+        rospy.loginfo('ConPR publishers destroyed (for bag playback)')
 
     def _destroy_kaist_publishers(self):
         """KAIST publishers 정리.
@@ -2737,9 +2612,9 @@ class WebGUINode(Node):
         for name, pub in _pubs:
             if pub is not None:
                 try:
-                    self.destroy_publisher(pub)
+                    pub.unregister()
                 except Exception as e:
-                    self.get_logger().warn(f'[KAIST] destroy {name}: {e}')
+                    rospy.logwarn(f'[KAIST] destroy {name}: {e}')
         self.kaist_imu_pub = None
         self.kaist_gps_pub = None
         self.kaist_vrs_pub = None
@@ -2752,7 +2627,7 @@ class WebGUINode(Node):
         self.kaist_tf_static_pub = None
         self.kaist_tf_pub = None
         self._kaist_pubs_initialized = False
-        self.get_logger().info('KAIST publishers destroyed (DDS queue cleared)')
+        rospy.loginfo('KAIST publishers destroyed (DDS queue cleared)')
 
     def _init_kitti_ros_interfaces(self):
         """KITTI 전용 publisher 초기화 (lazy).
@@ -2764,33 +2639,28 @@ class WebGUINode(Node):
         if self._kitti_pubs_initialized:
             return
 
-        # QoS: 대용량 메시지(PC2/Image)는 depth=5, 경량 메시지(IMU/GPS/TF)는 depth=10
-        self.kitti_velo_pub = self.create_publisher(
-            PointCloud2, KITTI_FILE_PLAYER_PC2_TOPIC, 5)
+        # queue_size: 대용량 메시지(PC2/Image)는 5, 경량 메시지(IMU/GPS/TF)는 10
+        self.kitti_velo_pub = rospy.Publisher(
+            KITTI_FILE_PLAYER_PC2_TOPIC, PointCloud2, queue_size=5)
 
         # 경량 센서 데이터 publishers (IMU, GPS)
-        self.kitti_imu_pub     = self.create_publisher(Imu, '/kitti/oxts/imu', 20)
-        self.kitti_gps_fix_pub = self.create_publisher(NavSatFix, '/kitti/oxts/gps/fix', 10)
-        self.kitti_gps_vel_pub = self.create_publisher(TwistStamped, '/kitti/oxts/gps/vel', 10)
+        self.kitti_imu_pub     = rospy.Publisher('/kitti/oxts/imu', Imu, queue_size=20)
+        self.kitti_gps_fix_pub = rospy.Publisher('/kitti/oxts/gps/fix', NavSatFix, queue_size=10)
+        self.kitti_gps_vel_pub = rospy.Publisher('/kitti/oxts/gps/vel', TwistStamped, queue_size=10)
 
         # 카메라 publishers (4채널 × image + camera_info)
         for cam_id, (_, img_topic, info_topic, _enc) in _KITTI_CAM_ID_MAP.items():
-            self.kitti_cam_pubs[cam_id]      = self.create_publisher(Image,      img_topic,  5)
-            self.kitti_cam_info_pubs[cam_id] = self.create_publisher(CameraInfo, info_topic, 5)
+            self.kitti_cam_pubs[cam_id]      = rospy.Publisher(img_topic,  Image,      queue_size=5)
+            self.kitti_cam_info_pubs[cam_id] = rospy.Publisher(info_topic, CameraInfo, queue_size=5)
         # 하위호환: kitti_cam_pub → color_left
         self.kitti_cam_pub = self.kitti_cam_pubs.get('02')
 
-        # /tf_static: transient_local QoS → 늦게 subscribe해도 최신 값 수신
-        tf_static_qos = QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
-        self.kitti_tf_static_pub = self.create_publisher(TFMessage, '/tf_static', tf_static_qos)
-        self.kitti_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+        # /tf_static: latch=True → 늦게 subscribe해도 최신 값 수신
+        self.kitti_tf_static_pub = rospy.Publisher('/tf_static', TFMessage, queue_size=1, latch=True)
+        self.kitti_tf_pub = rospy.Publisher('/tf', TFMessage, queue_size=10)
 
         self._kitti_pubs_initialized = True
-        self.get_logger().info('KITTI File Player publishers initialized')
+        rospy.loginfo('KITTI File Player publishers initialized')
 
         # DDS warmup: KITTI velodyne PC2 구독 미리 생성 (첫 프레임 즉시 수신 보장)
         self.pc2_ws_server._presubscribe_pc2(KITTI_FILE_PLAYER_PC2_TOPIC)
@@ -2806,33 +2676,27 @@ class WebGUINode(Node):
             return
 
         # QoS: 대용량 메시지(PC2/LaserScan/Image)는 depth=5, 경량 메시지(IMU/GPS)는 depth=10~20
-        self.kaist_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 20)
-        self.kaist_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 10)
-        self.kaist_vrs_pub = self.create_publisher(NavSatFix, '/vrs_gps/fix', 10)
-        self.kaist_vlp_left_pub = self.create_publisher(
-            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[0], 5)
-        self.kaist_vlp_right_pub = self.create_publisher(
-            PointCloud2, KAIST_FILE_PLAYER_PC2_TOPICS[1], 5)
-        self.kaist_sick_back_pub = self.create_publisher(
-            LaserScan, '/lms511_back/scan', 5)
-        self.kaist_sick_mid_pub = self.create_publisher(
-            LaserScan, '/lms511_middle/scan', 5)
-        self.kaist_stereo_left_pub = self.create_publisher(
-            Image, '/stereo/left/image_raw', 5)
-        self.kaist_stereo_right_pub = self.create_publisher(
-            Image, '/stereo/right/image_raw', 5)
+        self.kaist_imu_pub = rospy.Publisher('/imu/data_raw', Imu, queue_size=20)
+        self.kaist_gps_pub = rospy.Publisher('/gps/fix', NavSatFix, queue_size=10)
+        self.kaist_vrs_pub = rospy.Publisher('/vrs_gps/fix', NavSatFix, queue_size=10)
+        self.kaist_vlp_left_pub = rospy.Publisher(
+            KAIST_FILE_PLAYER_PC2_TOPICS[0], PointCloud2, queue_size=5)
+        self.kaist_vlp_right_pub = rospy.Publisher(
+            KAIST_FILE_PLAYER_PC2_TOPICS[1], PointCloud2, queue_size=5)
+        self.kaist_sick_back_pub = rospy.Publisher(
+            '/lms511_back/scan', LaserScan, queue_size=5)
+        self.kaist_sick_mid_pub = rospy.Publisher(
+            '/lms511_middle/scan', LaserScan, queue_size=5)
+        self.kaist_stereo_left_pub = rospy.Publisher(
+            '/stereo/left/image_raw', Image, queue_size=5)
+        self.kaist_stereo_right_pub = rospy.Publisher(
+            '/stereo/right/image_raw', Image, queue_size=5)
 
-        tf_static_qos = QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
-        self.kaist_tf_static_pub = self.create_publisher(
-            TFMessage, '/tf_static', tf_static_qos)
-        self.kaist_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+        self.kaist_tf_static_pub = rospy.Publisher('/tf_static', TFMessage, queue_size=1, latch=True)
+        self.kaist_tf_pub = rospy.Publisher('/tf', TFMessage, queue_size=10)
 
         self._kaist_pubs_initialized = True
-        self.get_logger().info('KAIST File Player publishers initialized')
+        rospy.loginfo('KAIST File Player publishers initialized')
 
         # DDS warmup: publisher 생성과 동시에 PC2 구독을 미리 생성해 첫 프레임 즉시 수신 보장
         # (브라우저 subscribe 명령이 도달하기 전부터 DDS peer discovery 진행)
@@ -2917,25 +2781,20 @@ class WebGUINode(Node):
             return
 
         # QoS: 대용량 메시지(PC2/Image)는 depth=5, 경량 메시지(IMU/GPS)는 depth=10~20
-        self.mulran_ouster_pub = self.create_publisher(
-            PointCloud2, MULRAN_FILE_PLAYER_PC2_TOPIC, 5)
-        self.mulran_radar_pub = self.create_publisher(
-            Image, '/radar/polar', 5)
-        self.mulran_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 20)
-        self.mulran_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 10)
-        self.mulran_gt_pub = self.create_publisher(Odometry, '/gt', 10)
-        self.mulran_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+        self.mulran_ouster_pub = rospy.Publisher(
+            MULRAN_FILE_PLAYER_PC2_TOPIC, PointCloud2, queue_size=5)
+        self.mulran_radar_pub = rospy.Publisher(
+            '/radar/polar', Image, queue_size=5)
+        self.mulran_imu_pub = rospy.Publisher('/imu/data_raw', Imu, queue_size=20)
+        self.mulran_gps_pub = rospy.Publisher('/gps/fix', NavSatFix, queue_size=10)
+        self.mulran_gt_pub = rospy.Publisher('/gt', Odometry, queue_size=10)
+        self.mulran_tf_pub = rospy.Publisher('/tf', TFMessage, queue_size=10)
 
-        mulran_tf_static_qos = QoSProfile(
-            depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
-        self.mulran_tf_static_pub = self.create_publisher(
-            TFMessage, '/tf_static', mulran_tf_static_qos)
+        self.mulran_tf_static_pub = rospy.Publisher(
+            '/tf_static', TFMessage, queue_size=1, latch=True)
 
         self._mulran_pubs_initialized = True
-        self.get_logger().info('MulRan File Player publishers initialized')
+        rospy.loginfo('MulRan File Player publishers initialized')
 
         # DDS warmup: MulRan Ouster PC2 구독 미리 생성 (첫 프레임 즉시 수신 보장)
         self.pc2_ws_server._presubscribe_pc2(MULRAN_FILE_PLAYER_PC2_TOPIC)
@@ -2957,7 +2816,7 @@ class WebGUINode(Node):
             drive_path (str): KITTI 드라이브 데이터 디렉토리 경로
 
         Returns:
-            str | None: calib 파일(.txt)이 실제로 존재하는 디렉토리 경로.
+            str: calib 파일(.txt)이 실제로 존재하는 디렉토리 경로.
                         찾지 못하면 None 반환.
         """
         drive_path = os.path.realpath(drive_path)
@@ -2993,10 +2852,10 @@ class WebGUINode(Node):
             # 내부 날짜 서브디렉토리가 있으면 그 쪽을 우선, 없으면 base 자체 검사
             for calib_dir in ([inner, calib_base] if inner else [calib_base]):
                 if calib_dir and glob.glob(os.path.join(calib_dir, 'calib_*.txt')):
-                    self.get_logger().info(f'KITTI calib dir found: {calib_dir}')
+                    rospy.loginfo(f'KITTI calib dir found: {calib_dir}')
                     return calib_dir
 
-        self.get_logger().warn(f'KITTI calib dir not found for drive path: {drive_path}')
+        rospy.logwarn(f'KITTI calib dir not found for drive path: {drive_path}')
         return None
 
     def _init_slam_subscriber(self):
@@ -3008,9 +2867,9 @@ class WebGUINode(Node):
         if self.slam_complete_sub is not None:
             return  # Already initialized
 
-        self.slam_complete_sub = self.create_subscription(
-            Bool, '/lt_mapping_complete', self.slam_complete_callback, 10)
-        self.get_logger().info('SLAM subscriber (/lt_mapping_complete) initialized')
+        self.slam_complete_sub = rospy.Subscriber(
+            '/lt_mapping_complete', Bool, self.slam_complete_callback, queue_size=10)
+        rospy.loginfo('SLAM subscriber (/lt_mapping_complete) initialized')
 
     def _read_process_output(self, process, output_lock, output_attr_name, max_lines=10):
         """
@@ -3035,7 +2894,7 @@ class WebGUINode(Node):
                             current_output = '\n'.join(lines[-max_lines:])
                         setattr(self, output_attr_name, current_output)
         except Exception as e:
-            self.get_logger().error(f'Error reading process output: {str(e)}')
+            rospy.logerr(f'Error reading process output: {str(e)}')
 
     def _stop_process(self, process, process_name, output_lock=None, output_attr_name=None):
         """
@@ -3052,38 +2911,38 @@ class WebGUINode(Node):
         """
         try:
             if process and process.poll() is None:
-                self.get_logger().info(f'Stopping {process_name} process (PID: {process.pid})...')
+                rospy.loginfo(f'Stopping {process_name} process (PID: {process.pid})...')
 
                 # Get process group ID
                 try:
                     pgid = os.getpgid(process.pid)
-                    self.get_logger().info(f'Process group ID: {pgid}')
+                    rospy.loginfo(f'Process group ID: {pgid}')
 
                     # Send SIGINT (Ctrl+C) to the entire process group
                     os.killpg(pgid, signal.SIGINT)
-                    self.get_logger().info('Sent SIGINT to process group')
+                    rospy.loginfo('Sent SIGINT to process group')
 
                     # Wait for process to terminate
                     # Increase timeout for GUI applications like rviz2
                     try:
                         process.wait(timeout=8)  # Increased from 5 to 8 seconds
-                        self.get_logger().info(f'{process_name} process terminated gracefully')
+                        rospy.loginfo(f'{process_name} process terminated gracefully')
                     except subprocess.TimeoutExpired:
-                        self.get_logger().warn('Process did not terminate with SIGINT, sending SIGTERM')
+                        rospy.logwarn('Process did not terminate with SIGINT, sending SIGTERM')
                         os.killpg(pgid, signal.SIGTERM)
                         try:
                             process.wait(timeout=8)  # Increased from 5 to 8 seconds
-                            self.get_logger().info(f'{process_name} process terminated with SIGTERM')
+                            rospy.loginfo(f'{process_name} process terminated with SIGTERM')
                         except subprocess.TimeoutExpired:
-                            self.get_logger().warn('Process did not terminate with SIGTERM, sending SIGKILL')
+                            rospy.logwarn('Process did not terminate with SIGTERM, sending SIGKILL')
                             os.killpg(pgid, signal.SIGKILL)
                             process.wait(timeout=3)  # Increased from 2 to 3 seconds
-                            self.get_logger().info(f'{process_name} process killed with SIGKILL')
+                            rospy.loginfo(f'{process_name} process killed with SIGKILL')
 
                 except ProcessLookupError:
-                    self.get_logger().warn('Process already terminated')
+                    rospy.logwarn('Process already terminated')
                 except Exception as e:
-                    self.get_logger().error(f'Error during process termination: {str(e)}')
+                    rospy.logerr(f'Error during process termination: {str(e)}')
                     # Fallback: try to terminate the process directly
                     process.terminate()
                     try:
@@ -3100,10 +2959,10 @@ class WebGUINode(Node):
 
                 return True
             else:
-                self.get_logger().warn(f'No {process_name} process is running')
+                rospy.logwarn(f'No {process_name} process is running')
                 return False
         except Exception as e:
-            self.get_logger().error(f'Failed to stop {process_name} process: {str(e)}')
+            rospy.logerr(f'Failed to stop {process_name} process: {str(e)}')
             import traceback
             traceback.print_exc()
             return False
@@ -3127,7 +2986,7 @@ class WebGUINode(Node):
                         parts = line.split()
                         if len(parts) > 1:
                             pid = int(parts[1])
-                            self.get_logger().info(f'Killing process matching "{pattern}": PID {pid}')
+                            rospy.loginfo(f'Killing process matching "{pattern}": PID {pid}')
                             try:
                                 os.kill(pid, signal.SIGTERM)
                             except ProcessLookupError:
@@ -3136,18 +2995,18 @@ class WebGUINode(Node):
 
             time.sleep(0.5)
         except Exception as e:
-            self.get_logger().error(f'Error killing processes by pattern: {str(e)}')
+            rospy.logerr(f'Error killing processes by pattern: {str(e)}')
 
     # SLAM Functions
     def set_slam_map1(self, path):
         self.slam_map1 = path
         self.slam_status = f"Map 1 loaded - {path}"
-        self.get_logger().info(f'Map 1 set to: {path}')
+        rospy.loginfo(f'Map 1 set to: {path}')
 
     def set_slam_map2(self, path):
         self.slam_map2 = path
         self.slam_status = f"Map 2 loaded - {path}"
-        self.get_logger().info(f'Map 2 set to: {path}')
+        rospy.loginfo(f'Map 2 set to: {path}')
 
     def set_slam_output(self, directory_name):
         """Set output directory name (not full path, just directory name)"""
@@ -3157,11 +3016,11 @@ class WebGUINode(Node):
 
         self.slam_output = directory_name
         self.slam_status = f"Output directory set to - {directory_name}"
-        self.get_logger().info(f'Output directory name set to: {directory_name}')
+        rospy.loginfo(f'Output directory name set to: {directory_name}')
 
     def start_slam_mapping(self):
         """Start FAST_LIO mapping"""
-        self.get_logger().info('=== Starting FAST_LIO SLAM Mapping ===')
+        rospy.loginfo('=== Starting FAST_LIO SLAM Mapping ===')
 
         # Ensure SLAM subscriber is ready before launching the process
         self._init_slam_subscriber()
@@ -3172,38 +3031,28 @@ class WebGUINode(Node):
 
         # Launch mapping without capturing terminal output
         try:
-            # Create command with environment setup
-            bash_cmd = (
-                'source /opt/ros/jazzy/setup.bash && '
-                'source /home/kkw/localization_ws/install/setup.bash && '
-                'ros2 launch fast_lio mapping.launch.py'
-            )
+            # Phase 4: ROS1 roslaunch 명령으로 변환
+            cmd = ['roslaunch', 'fast_lio', 'mapping.launch', 'use_rviz:=false']
+            if hasattr(self, '_slam_config_file') and self._slam_config_file:
+                cmd.append(f'config_file:={self._slam_config_file}')
 
-            # Run command
-            cmd = ['bash', '-c', bash_cmd]
-
-            self.get_logger().info('Starting FAST_LIO mapping (no terminal capture)')
-
-            # Launch process - capture stderr to check for rviz2 errors
-            # Log DISPLAY and XAUTHORITY for debugging
-            self.get_logger().info(f'DISPLAY: {self._ros_env.get("DISPLAY", "NOT SET")}')
-            self.get_logger().info(f'XAUTHORITY: {self._ros_env.get("XAUTHORITY", "NOT SET")}')
-            
-            # Capture stderr to log rviz2 errors
-            stderr_file = open('/tmp/web_gui_slam_stderr.log', 'w')
+            rospy.loginfo('Starting FAST_LIO mapping via roslaunch')
+            # stdout/stderr는 UI에 표시하지 않으므로 DEVNULL로 버린다.
+            # PIPE로 두면 아무도 drain하지 않아 파이프 버퍼 포화 시 자식
+            # 프로세스(fast_lio)의 write()가 주기적으로 블로킹되어 토픽 hz burst 발생.
             self.slam_process = subprocess.Popen(
                 cmd,
-                env=self._ros_env,
+                env={**os.environ},
                 stdout=subprocess.DEVNULL,
-                stderr=stderr_file,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 start_new_session=True
             )
 
-            self.get_logger().info('FAST_LIO mapping started with PID: {}'.format(self.slam_process.pid))
+            rospy.loginfo('FAST_LIO mapping started with PID: {}'.format(self.slam_process.pid))
             return True
         except Exception as e:
-            self.get_logger().error(f'Failed to start FAST_LIO mapping: {str(e)}')
+            rospy.logerr(f'Failed to start FAST_LIO mapping: {str(e)}')
             import traceback
             traceback.print_exc()
             return False
@@ -3235,7 +3084,7 @@ class WebGUINode(Node):
         return True, 'Map save started'
 
     def _save_slam_map_worker(self, directory):
-        """Background worker: call save_trajectory service and wait for response"""
+        """Background worker: call save_trajectory service (ROS1) and wait for response"""
         def _finish(success, message):
             self.slam_map_saving = False
             self.slam_map_save_status = {'saving': False, 'done': True, 'success': success, 'message': message}
@@ -3245,72 +3094,48 @@ class WebGUINode(Node):
                 _finish(False, 'SaveMap service not available')
                 return
 
-            self.get_logger().info(f'Requesting to save SLAM map to directory: {directory}')
+            rospy.loginfo(f'Requesting to save SLAM map to directory: {directory}')
             self.slam_map_save_status['message'] = 'Connecting to save_trajectory service...'
 
-            client = self.create_client(SaveMap, 'save_trajectory')
-            if not client.wait_for_service(timeout_sec=5.0):
-                _finish(False, 'save_trajectory service not available. Is pose_graph_optimization node running?')
-                return
-
-            request = SaveMap.Request()
-            request.directory_name = directory
-            future = client.call_async(request)
-
+            # Phase 4: ROS1 방식 서비스 호출
+            rospy.wait_for_service('/save_trajectory', timeout=10.0)
+            proxy = rospy.ServiceProxy('/save_trajectory', SaveMap)
             self.slam_map_save_status['message'] = 'Saving map (generating point cloud, removing dynamic objects)...'
-            self.get_logger().info('save_trajectory service called. Waiting for response...')
+            rospy.loginfo('save_trajectory service called. Waiting for response...')
 
-            # spin_once 호출 금지: 메인 스레드의 rclpy.spin()이 이미 실행 중이므로
-            # time.sleep 폴링으로 대기. 취소 플래그 확인도 함께 수행.
-            start_time = time.time()
-            log_interval = 10.0
-            last_log = start_time
-            while not future.done():
-                if self.slam_map_save_cancelled:
-                    self.get_logger().info('Map save cancelled by user (C++ callback may still be running)')
-                    _finish(False, 'Cancelled by user')
-                    return
-                now = time.time()
-                elapsed = now - start_time
-                if now - last_log >= log_interval:
-                    msg = f'Saving map... ({elapsed:.0f}s elapsed)'
-                    self.get_logger().info(msg)
-                    self.slam_map_save_status['message'] = msg
-                    last_log = now
-                time.sleep(0.1)
+            resp = proxy(directory_name=directory)
 
-            response = future.result()
-            if response.success:
-                self.get_logger().info(f'Map saved successfully: {response.message}')
-                _finish(True, response.message)
+            if resp.success:
+                rospy.loginfo(f'Map saved successfully: {resp.message}')
+                _finish(True, resp.message)
             else:
-                self.get_logger().error(f'Map save failed: {response.message}')
-                _finish(False, response.message)
+                rospy.logerr(f'Map save failed: {resp.message}')
+                _finish(False, resp.message)
 
+        except rospy.ROSException as e:
+            rospy.logerr(f'save_trajectory service not available: {str(e)}')
+            _finish(False, f'Service not available: {str(e)}')
         except Exception as e:
-            self.get_logger().error(f'Failed to save map: {str(e)}')
+            rospy.logerr(f'Failed to save map: {str(e)}')
             import traceback
             traceback.print_exc()
             _finish(False, str(e))
 
     def cancel_save_slam_map(self):
-        """Signal both Python worker and C++ callback to stop"""
+        """Signal worker to stop"""
         if not self.slam_map_saving:
             return False, 'No map save in progress'
 
-        # Python 워커 루프 종료
         self.slam_map_save_cancelled = True
 
-        # C++ save_trajectory_callback 에도 취소 신호 전달
-        if TRIGGER_AVAILABLE:
-            try:
-                cancel_client = self.create_client(RosTrigger, 'cancel_save_trajectory')
-                if cancel_client.wait_for_service(timeout_sec=1.0):
-                    cancel_client.call_async(RosTrigger.Request())
-                else:
-                    self.get_logger().warn('cancel_save_trajectory service not available')
-            except Exception as e:
-                self.get_logger().warn(f'Failed to call cancel_save_trajectory: {e}')
+        # ROS1: cancel_save_trajectory 서비스 호출 (존재하는 경우)
+        try:
+            from std_srvs.srv import Trigger
+            rospy.wait_for_service('/cancel_save_trajectory', timeout=1.0)
+            cancel_proxy = rospy.ServiceProxy('/cancel_save_trajectory', Trigger)
+            cancel_proxy()
+        except Exception as e:
+            rospy.logwarn(f'Failed to call cancel_save_trajectory: {e}')
 
         return True, 'Cancel signal sent'
 
@@ -3318,10 +3143,28 @@ class WebGUINode(Node):
         """Return current save map status"""
         return dict(self.slam_map_save_status)
 
+    def set_slam_config_file(self, config_path):
+        """Register the YAML config file path for the next SLAM roslaunch."""
+        resolved = resolve_fast_lio_config_path(config_path)
+        if not resolved or not os.path.isfile(resolved):
+            return False, f'Config file not found: {config_path}'
+        self._slam_config_file = resolved
+        rospy.loginfo(f'SLAM config file set to: {resolved}')
+        return True, resolved
+
+    def set_localization_config_file(self, config_path):
+        """Register the YAML config file path for the next localization roslaunch."""
+        resolved = resolve_fast_lio_config_path(config_path)
+        if not resolved or not os.path.isfile(resolved):
+            return False, f'Config file not found: {config_path}'
+        self._localization_config_file = resolved
+        rospy.loginfo(f'Localization config file set to: {resolved}')
+        return True, resolved
+
     def start_localization_mapping(self):
         """Start Localization mapping process"""
         if self.localization_process and self.localization_process.poll() is None:
-            self.get_logger().warn('Localization mapping is already running')
+            rospy.logwarn('Localization mapping is already running')
             return True
 
         # Kill any existing Localization processes first
@@ -3331,37 +3174,28 @@ class WebGUINode(Node):
         # Launch localization without capturing terminal output
         try:
             # Create command with environment setup
-            bash_cmd = (
-                'source /opt/ros/jazzy/setup.bash && '
-                'source /home/kkw/localization_ws/install/setup.bash && '
-                'ros2 launch fast_lio localization.launch.py'
-            )
+            # Phase 4: ROS1 roslaunch 명령으로 변환
+            cmd = ['roslaunch', 'fast_lio', 'localization.launch', 'use_rviz:=false']
+            if hasattr(self, '_localization_config_file') and self._localization_config_file:
+                cmd.append(f'config_file:={self._localization_config_file}')
 
-            # Run command
-            cmd = ['bash', '-c', bash_cmd]
-
-            self.get_logger().info('Starting FAST_LIO localization (no terminal capture)')
-
-            # Launch process - capture stderr to check for rviz2 errors
-            # Log DISPLAY and XAUTHORITY for debugging
-            self.get_logger().info(f'DISPLAY: {self._ros_env.get("DISPLAY", "NOT SET")}')
-            self.get_logger().info(f'XAUTHORITY: {self._ros_env.get("XAUTHORITY", "NOT SET")}')
-            
-            # Capture stderr to log rviz2 errors
-            stderr_file = open('/tmp/web_gui_localization_stderr.log', 'w')
+            rospy.loginfo('Starting FAST_LIO localization via roslaunch')
+            # stdout/stderr는 UI에 표시하지 않으므로 DEVNULL로 버린다.
+            # PIPE로 두면 아무도 drain하지 않아 파이프 버퍼 포화 시 자식
+            # 프로세스(fast_lio)의 write()가 주기적으로 블로킹되어 토픽 hz burst 발생.
             self.localization_process = subprocess.Popen(
                 cmd,
-                env=self._ros_env,
+                env={**os.environ},
                 stdout=subprocess.DEVNULL,
-                stderr=stderr_file,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 start_new_session=True
             )
 
-            self.get_logger().info('FAST_LIO localization started with PID: {}'.format(self.localization_process.pid))
+            rospy.loginfo('FAST_LIO localization started with PID: {}'.format(self.localization_process.pid))
             return True
         except Exception as e:
-            self.get_logger().error(f'Failed to start FAST_LIO localization: {str(e)}')
+            rospy.logerr(f'Failed to start FAST_LIO localization: {str(e)}')
             import traceback
             traceback.print_exc()
             return False
@@ -3378,7 +3212,7 @@ class WebGUINode(Node):
 
     def kill_localization_processes(self):
         """Kill any running Localization processes"""
-        self._kill_processes_by_pattern(['localization.launch.py'])
+        self._kill_processes_by_pattern(['localization.launch'])
 
     def run_slam_optimization(self):
         if not self.slam_map1 or not self.slam_map2:
@@ -3394,17 +3228,17 @@ class WebGUINode(Node):
 
         # 이미 실행 중인 optimization 프로세스가 있으면 종료
         if self.slam_optimization_process and self.slam_optimization_process.poll() is None:
-            self.get_logger().info('Stopping existing optimization process before restart')
+            rospy.loginfo('Stopping existing optimization process before restart')
             self._stop_process(self.slam_optimization_process, 'Long-term Mapping')
             self.slam_optimization_process = None
 
         self.slam_opt_running = True
         self.slam_opt_status = {'running': True, 'done': False, 'success': None, 'message': 'Initializing...'}
         self.slam_status = "Running Multi-Session Optimization..."
-        self.get_logger().info('=== Starting Multi-Session SLAM Optimization ===')
-        self.get_logger().info(f'Map 1: {self.slam_map1}')
-        self.get_logger().info(f'Map 2: {self.slam_map2}')
-        self.get_logger().info(f'Output: {self.slam_output}')
+        rospy.loginfo('=== Starting Multi-Session SLAM Optimization ===')
+        rospy.loginfo(f'Map 1: {self.slam_map1}')
+        rospy.loginfo(f'Map 2: {self.slam_map2}')
+        rospy.loginfo(f'Output: {self.slam_output}')
 
         # 기존 lt_mapper 잔류 프로세스 정리
         self._kill_processes_by_pattern(['lt_mapper.launch.py', 'long_term_mapping'])
@@ -3415,16 +3249,10 @@ class WebGUINode(Node):
         time.sleep(0.1)
 
         try:
-            bash_cmd = (
-                'source /opt/ros/jazzy/setup.bash && '
-                'source /home/kkw/localization_ws/install/setup.bash && '
-                'ros2 launch long_term_mapping lt_mapper.launch.py'
-            )
-            cmd = ['bash', '-c', bash_cmd]
+            # ROS1: roslaunch 방식
+            cmd = ['roslaunch', 'long_term_mapping', 'lt_mapper.launch']
 
-            # PYTHONUNBUFFERED=1: ros2 launch(Python) stdout 버퍼링 방지
-            popen_env = dict(self._ros_env)
-            popen_env['PYTHONUNBUFFERED'] = '1'
+            popen_env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
 
             self.slam_optimization_process = subprocess.Popen(
                 cmd,
@@ -3435,7 +3263,7 @@ class WebGUINode(Node):
                 start_new_session=True
             )
 
-            self.get_logger().info(
+            rospy.loginfo(
                 f'Long-term mapping started (PID: {self.slam_optimization_process.pid})')
             self.slam_opt_status['message'] = 'Running optimization...'
 
@@ -3451,7 +3279,7 @@ class WebGUINode(Node):
             self.slam_status = f"Error: Failed to start optimization - {str(e)}"
             self.slam_opt_running = False
             self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
-            self.get_logger().error(f'Failed to start optimization: {str(e)}')
+            rospy.logerr(f'Failed to start optimization: {str(e)}')
             import traceback
             traceback.print_exc()
             return False, str(e)
@@ -3478,7 +3306,7 @@ class WebGUINode(Node):
         self.slam_opt_status = {'running': False, 'done': True, 'success': True,
                                 'message': 'Long Term SLAM Complete.'}
         self.slam_opt_running = False
-        self.get_logger().info('=== Long-term mapping completed successfully ===')
+        rospy.loginfo('=== Long-term mapping completed successfully ===')
 
     def _read_optimization_output(self, process):
         """long_term_mapping 프로세스 출력을 읽어 화이트리스트 메시지만 get_logger로 포워드.
@@ -3497,7 +3325,7 @@ class WebGUINode(Node):
                 # ── 우선순위 1: LTmapping 노드 종료 이벤트 감지 ────────────────────────
                 # ros2 launch가 출력하는 형태: "[launch]: process[LTmapping-1]: process has finished cleanly"
                 if 'LTmapping' in line and 'finished cleanly' in line:
-                    self.get_logger().info(f'[launch] LTmapping node finished: {line.strip()}')
+                    rospy.loginfo(f'[launch] LTmapping node finished: {line.strip()}')
                     self._set_opt_success(process)
                     continue
 
@@ -3506,7 +3334,7 @@ class WebGUINode(Node):
                     msg_part = line.split('[LTmapping]:')[-1].strip()
                     # 화이트리스트에 있는 메시지만 출력 및 UI 업데이트
                     if any(msg_part.startswith(w) for w in self._OPT_MSG_WHITELIST):
-                        self.get_logger().info(f'[LTmapping] {msg_part}')
+                        rospy.loginfo(f'[LTmapping] {msg_part}')
                         if self.slam_optimization_process is process \
                                 and not self.slam_opt_status.get('done'):
                             self.slam_opt_status['message'] = msg_part
@@ -3528,10 +3356,10 @@ class WebGUINode(Node):
                 self.slam_status = f"Optimization failed (exit: {process.returncode})"
                 self.slam_opt_status = {'running': False, 'done': True, 'success': False,
                                         'message': msg}
-                self.get_logger().error(f'Long-term mapping exited with code: {process.returncode}')
+                rospy.logerr(f'Long-term mapping exited with code: {process.returncode}')
         except Exception as e:
             if self.slam_optimization_process is process:
-                self.get_logger().error(f'Error reading optimization output: {str(e)}')
+                rospy.logerr(f'Error reading optimization output: {str(e)}')
                 self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
         finally:
             self.slam_opt_running = False
@@ -3551,7 +3379,7 @@ class WebGUINode(Node):
         if not proc or proc.poll() is not None:
             return False, 'No optimization process running'
 
-        self.get_logger().info('Cancelling optimization by user request')
+        rospy.loginfo('Cancelling optimization by user request')
 
         # 먼저 참조를 끊어 _read_optimization_output 스레드가 상태를 덮어쓰지 못하게 한다.
         self.slam_optimization_process = None
@@ -3567,11 +3395,11 @@ class WebGUINode(Node):
                     pgid = os.getpgid(proc.pid)
                     os.killpg(pgid, signal.SIGKILL)
                     proc.wait(timeout=5)
-                    self.get_logger().info('Optimization process killed (SIGKILL)')
+                    rospy.loginfo('Optimization process killed (SIGKILL)')
             except ProcessLookupError:
                 pass
             except Exception as e:
-                self.get_logger().error(f'Error killing optimization process: {str(e)}')
+                rospy.logerr(f'Error killing optimization process: {str(e)}')
 
         threading.Thread(target=_kill_proc, daemon=True).start()
         return True, 'Cancelled'
@@ -3586,7 +3414,7 @@ class WebGUINode(Node):
             param_file = str(lt_dir / 'config' / 'params.yaml')
         else:
             param_file = "/home/kkw/localization_ws/src/long_term_mapping/config/params.yaml"
-            self.get_logger().warn('long_term_mapping package not found in workspace; using fallback path')
+            rospy.logwarn('long_term_mapping package not found in workspace; using fallback path')
 
         try:
             with open(param_file, 'r') as f:
@@ -3602,17 +3430,17 @@ class WebGUINode(Node):
             with open(param_file, 'w') as f:
                 yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-            self.get_logger().info('SLAM parameters updated successfully')
-            self.get_logger().info(f'  directory1: {self.slam_map1}')
-            self.get_logger().info(f'  directory2: {self.slam_map2}')
-            self.get_logger().info(f'  output_directory: {self.slam_output}')
+            rospy.loginfo('SLAM parameters updated successfully')
+            rospy.loginfo(f'  directory1: {self.slam_map1}')
+            rospy.loginfo(f'  directory2: {self.slam_map2}')
+            rospy.loginfo(f'  output_directory: {self.slam_output}')
         except Exception as e:
-            self.get_logger().error(f'Failed to update SLAM parameters: {str(e)}')
+            rospy.logerr(f'Failed to update SLAM parameters: {str(e)}')
 
     def slam_complete_callback(self, msg):
         if msg.data:
             self.slam_status = "Optimization complete!"
-            self.get_logger().info('Optimization completed successfully')
+            rospy.loginfo('Optimization completed successfully')
 
     def get_slam_state(self):
         # Check if SLAM process is running
@@ -3685,20 +3513,44 @@ class WebGUINode(Node):
     def set_recorder_bag_name(self, bag_name):
         """Set the bag name for recording"""
         self.recorder_bag_name = bag_name
-        self.get_logger().info(f'Recorder bag name set to: {bag_name}')
+        rospy.loginfo(f'Recorder bag name set to: {bag_name}')
         return True
 
     def invalidate_ros_topics_list_cache(self):
         """토픽 목록 API 캐시 무효화 (load_data·bag 로드 직후 목록이 바뀔 때)."""
         self._ros_topics_list_cache = None
 
-    def get_recorder_topics(self):
-        """Get list of current ROS2 topics with type information.
+    def _is_bag_playback_active(self):
+        """rosbag play 또는 Ros1BagPlayerThread 재생 중 여부."""
+        if self.bag_playing:
+            return True
+        thread = getattr(self, 'ros1_player_thread', None)
+        if thread is None or not thread.is_alive():
+            return False
+        return thread.get_status().get('status') in ('playing', 'paused')
 
-        같은 프로세스의 rclpy 그래프를 조회한다 (ros2 topic list 서브프로세스 없음 → 지연·블로킹 감소).
+    def _merge_bag_topic_infos(self, topics, seen):
+        """bag 재생 중 master에 아직 없는 토픽을 bag 메타데이터로 보충."""
+        if not self._is_bag_playback_active():
+            return
+        for entry in getattr(self, 'bag_topic_infos', []) or []:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get('name', '')
+            tp = entry.get('type', '')
+            key = (name, tp)
+            if name and key not in seen:
+                seen.add(key)
+                topics.append({'name': name, 'type': tp})
+
+    def get_recorder_topics(self):
+        """Get list of current ROS1 topics with type information.
+
+        같은 프로세스의 rosgraph Master API로 조회한다 (ROS2 rclpy 그래프와 동일 패턴).
+        subprocess rostopic list는 PATH/환경 문제로 빈 목록을 반환할 수 있어 fallback으로만 사용.
 
         Returns:
-            list[dict]: [{'name': '/topic', 'type': 'pkg/msg/Type'}, ...]
+            list[dict]: [{'name': '/topic', 'type': 'pkg/Type'}, ...]
         """
         try:
             now = time.monotonic()
@@ -3709,21 +3561,42 @@ class WebGUINode(Node):
                 if (now - ts) < ttl and topics is not None:
                     return topics
 
-            raw = self.get_topic_names_and_types()
             topics = []
             seen = set()
-            for name, type_list in raw:
-                for tp in type_list:
-                    key = (name, tp)
-                    if key in seen:
-                        continue
+
+            import rosgraph
+            master = rosgraph.Master(rospy.get_name())
+            for name, tp in master.getTopicTypes():
+                key = (name, tp)
+                if key not in seen and name:
                     seen.add(key)
                     topics.append({'name': name, 'type': tp})
+
+            if not topics:
+                result = subprocess.run(
+                    ['rostopic', 'list', '-v'],
+                    capture_output=True, text=True, timeout=3,
+                    env={**os.environ},
+                )
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if line.startswith('*'):
+                        parts = line.split('[')
+                        if len(parts) >= 2:
+                            name = parts[0].lstrip('* ').strip()
+                            tp = parts[1].split(']')[0].strip()
+                            key = (name, tp)
+                            if key not in seen and name:
+                                seen.add(key)
+                                topics.append({'name': name, 'type': tp})
+
+            self._merge_bag_topic_infos(topics, seen)
+
             self._ros_topics_list_cache = (now, topics)
-            self.get_logger().debug(f'get_recorder_topics: {len(topics)} (rclpy graph)')
+            rospy.logdebug(f'get_recorder_topics: {len(topics)} (rosgraph master)')
             return topics
         except Exception as e:
-            self.get_logger().error(f'Error getting topics (rclpy): {str(e)}')
+            rospy.logerr(f'Error getting topics: {str(e)}')
             return []
 
     def _player_load_result(
@@ -3757,11 +3630,11 @@ class WebGUINode(Node):
         if self.recorder_recording:
             # Stop recording — ros1 thread 또는 ros2 subprocess 정리
             if self.recorder_ros1_thread:
-                self.get_logger().info('Stopping ROS1 bag recording...')
+                rospy.loginfo('Stopping ROS1 bag recording...')
                 self.recorder_ros1_thread.stop()
                 self.recorder_ros1_thread = None
             elif self.recorder_process:
-                self.get_logger().info('Stopping bag recording...')
+                rospy.loginfo('Stopping bag recording...')
                 self.recorder_process.terminate()
                 try:
                     self.recorder_process.wait(timeout=5)
@@ -3774,11 +3647,11 @@ class WebGUINode(Node):
         else:
             # Start recording
             if not self.recorder_bag_name:
-                self.get_logger().error('Bag name not set')
+                rospy.logerr('Bag name not set')
                 return False
 
             if not topics or len(topics) == 0:
-                self.get_logger().error('No topics selected')
+                rospy.logerr('No topics selected')
                 return False
 
             # topics는 문자열 리스트 또는 {name, type} dict 리스트 모두 지원
@@ -3796,25 +3669,23 @@ class WebGUINode(Node):
                     topic_names.append(t)
 
             if not topic_names:
-                self.get_logger().error('No valid topics selected')
+                rospy.logerr('No valid topics selected')
                 return False
 
-            if bag_format == 'ros1':
-                # ROS1 .bag 직접 녹화 (Ros1BagRecorderThread)
-                if not topic_type_map:
-                    self.get_logger().error('Topic type information required for ROS1 recording')
-                    return False
+            # ROS1: .bag 파일 직접 녹화
+            base_name = self.recorder_bag_name.rstrip('.bag').rstrip('/')
+            if PathLib(base_name).is_absolute():
+                output_path = f'{base_name}.bag'
+                parent_dir = str(PathLib(base_name).parent)
+                PathLib(parent_dir).mkdir(parents=True, exist_ok=True)
+            else:
+                output_path = f'/home/kkw/dataset/{base_name}.bag'
 
-                base_name = self.recorder_bag_name.rstrip('.bag').rstrip('/')
-                if PathLib(base_name).is_absolute():
-                    output_path = f'{base_name}.bag'
-                    parent_dir = str(PathLib(base_name).parent)
-                    PathLib(parent_dir).mkdir(parents=True, exist_ok=True)
-                else:
-                    output_path = f'/home/kkw/dataset/{base_name}.bag'
-                self.get_logger().info(f'Starting ROS1 bag recording to: {output_path}')
-                self.get_logger().info(f'Recording topics: {", ".join(topic_names)}')
+            rospy.loginfo(f'Starting bag recording to: {output_path}')
+            rospy.loginfo(f'Recording topics: {", ".join(topic_names)}')
 
+            if topic_type_map:
+                # Ros1BagRecorderThread 방식 (타입 정보 있을 때)
                 try:
                     self.recorder_ros1_thread = Ros1BagRecorderThread(
                         output_path, topic_type_map, self
@@ -3822,50 +3693,29 @@ class WebGUINode(Node):
                     self.recorder_ros1_thread.start()
                     self.recorder_recording = True
                     self.recorder_mode = 'ros1'
-                    self.get_logger().info('ROS1 bag recording started')
+                    rospy.loginfo('ROS1 bag recording started (thread mode)')
                     return True
                 except Exception as e:
-                    self.get_logger().error(f'Failed to start ROS1 recording: {str(e)}')
+                    rospy.logerr(f'Failed to start ROS1 recording: {str(e)}')
                     return False
             else:
-                # ros2 bag record subprocess (mcap 또는 sqlite3)
-                storage_flag = '-s sqlite3' if bag_format == 'ros2_db3' else ''
-                bag_name = self.recorder_bag_name
-                if PathLib(bag_name).is_absolute():
-                    output_dir = bag_name
-                    cd_dir = str(PathLib(bag_name).parent)
-                    PathLib(cd_dir).mkdir(parents=True, exist_ok=True)
-                    record_arg = bag_name
-                else:
-                    cd_dir = '/home/kkw/dataset'
-                    output_dir = f'/home/kkw/dataset/{bag_name}'
-                    record_arg = bag_name
-
-                record_cmd = f'ros2 bag record -o {record_arg} {storage_flag} ' + ' '.join(topic_names)
-                cmd = [
-                    'bash', '-c',
-                    f'cd {cd_dir} && '
-                    f'source /opt/ros/jazzy/setup.bash && '
-                    + record_cmd.strip()
-                ]
-
-                self.get_logger().info(f'Starting bag recording in: {output_dir}')
-                self.get_logger().info(f'Recording topics: {", ".join(topic_names)}')
-
+                # rosbag record subprocess 방식 (타입 정보 없을 때)
+                PathLib(output_path).parent.mkdir(parents=True, exist_ok=True)
+                cmd = ['rosbag', 'record', '-O', output_path] + topic_names
                 try:
                     self.recorder_process = subprocess.Popen(
                         cmd,
-                        env=self._ros_env,
+                        env={**os.environ},
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         start_new_session=True
                     )
                     self.recorder_recording = True
-                    self.recorder_mode = bag_format  # 'ros2_mcap' or 'ros2_db3'
-                    self.get_logger().info(f'Bag recording started (format: {bag_format})')
+                    self.recorder_mode = 'ros1'
+                    rospy.loginfo('ROS1 bag recording started (subprocess mode)')
                     return True
                 except Exception as e:
-                    self.get_logger().error(f'Failed to start recording: {str(e)}')
+                    rospy.logerr(f'Failed to start recording: {str(e)}')
                     return False
 
     def get_recorder_state(self):
@@ -3956,12 +3806,12 @@ class WebGUINode(Node):
             conv = KittiConverter()
             timestamps_ns = conv._load_timestamps(ts_file)
         except Exception as e:
-            self.get_logger().error(f'Failed to read KITTI timestamps: {e}')
+            rospy.logerr(f'Failed to read KITTI timestamps: {e}')
             return self._player_load_result(
                 False, str(e), 'kitti', None)
 
         if not timestamps_ns:
-            self.get_logger().error(f'No valid timestamps in {ts_file}')
+            rospy.logerr(f'No valid timestamps in {ts_file}')
             return self._player_load_result(
                 False, f'No valid timestamps in {ts_file}', 'kitti', None)
 
@@ -3972,7 +3822,7 @@ class WebGUINode(Node):
                 self.data_stamp[ts_ns] = f'{idx:010d}'
 
         if not self.data_stamp:
-            self.get_logger().error('data_stamp is empty after parsing KITTI timestamps')
+            rospy.logerr('data_stamp is empty after parsing KITTI timestamps')
             return self._player_load_result(
                 False, 'data_stamp empty', 'kitti', None)
 
@@ -4036,12 +3886,8 @@ class WebGUINode(Node):
                 calib_cam_to_cam = conv._parse_calib_file(
                     os.path.join(calib_dir, 'calib_cam_to_cam.txt'))
                 self.kitti_calib_cam_to_cam = calib_cam_to_cam  # camera_info 발행용 저장
-                # stamp: ROS2 tf_static 구독자 호환을 위해 현재 시각 사용
-                now = self.get_clock().now()
-                from builtin_interfaces.msg import Time as TimeMsg
-                stamp = TimeMsg()
-                stamp.sec = now.nanoseconds // 1_000_000_000
-                stamp.nanosec = int(now.nanoseconds % 1_000_000_000)
+                # stamp: 현재 시각 사용
+                stamp = rospy.Time.now()
                 static_tf_msg = conv._build_static_tf(
                     calib_imu_to_velo, calib_velo_to_cam,
                     calib_cam_to_cam=calib_cam_to_cam,
@@ -4056,18 +3902,18 @@ class WebGUINode(Node):
                     if n_tf >= 2:
                         t = static_tf_msg.transforms[1].transform.translation
                         dbg = f' imu→velo=({t.x:.2f},{t.y:.2f},{t.z:.2f})'
-                    self.get_logger().info(
+                    rospy.loginfo(
                         f'KITTI static TF from {calib_dir}: {n_tf} transforms{dbg}')
             except Exception as e:
-                self.get_logger().warn(f'KITTI static TF publish failed: {e}')
+                rospy.logwarn(f'KITTI static TF publish failed: {e}')
         else:
-            self.get_logger().warn(f'KITTI calib directory not found near: {path}')
+            rospy.logwarn(f'KITTI calib directory not found near: {path}')
             # calib 없어도 velo_link 연결을 위해 identity chain 생성
             try:
                 static_tf_msg = conv._build_static_tf({}, {}, stamp=None)
                 if static_tf_msg and static_tf_msg.transforms:
                     self.kitti_static_tf_msg = static_tf_msg
-                    self.get_logger().info('KITTI fallback identity TF chain created')
+                    rospy.loginfo('KITTI fallback identity TF chain created')
             except Exception:
                 pass
 
@@ -4088,18 +3934,18 @@ class WebGUINode(Node):
                             self.kitti_origin_oxts = first_oxts
                             self.kitti_mercator_scale = math.cos(
                                 math.radians(first_oxts[0]))
-                            self.get_logger().info(
+                            rospy.loginfo(
                                 f'KITTI oxts loaded: {len(self.kitti_oxts_files)} files, '
                                 f'origin lat={first_oxts[0]:.4f}'
                             )
             except Exception as e:
-                self.get_logger().warn(f'KITTI oxts parsing failed: {e}')
+                rospy.logwarn(f'KITTI oxts parsing failed: {e}')
         else:
-            self.get_logger().warn(f'KITTI oxts timestamps not found: {oxts_ts_file}')
+            rospy.logwarn(f'KITTI oxts timestamps not found: {oxts_ts_file}')
 
         self.player_data_loaded = True
 
-        self.get_logger().info(
+        rospy.loginfo(
             f'KITTI drive loaded: {path} '
             f'({len(self.data_stamp)} frames, '
             f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
@@ -4148,8 +3994,6 @@ class WebGUINode(Node):
         Velodyne PC2 읽기(~4MB)와 Camera PNG 읽기(최대 4채널)는 백그라운드 워커로
         비블로킹 처리 (OusterThread 패턴). OXTS(경량 텍스트)와 TF는 동기 처리.
         """
-        from builtin_interfaces.msg import Time as TimeMsg
-
         drive_path = self.kitti_drive_path
         if not drive_path:
             return
@@ -4159,9 +4003,7 @@ class WebGUINode(Node):
             self._kitti_conv = KittiConverter()
         conv = self._kitti_conv
 
-        stamp_msg = TimeMsg()
-        stamp_msg.sec      = int(stamp_ns // 1_000_000_000)
-        stamp_msg.nanosec  = int(stamp_ns %  1_000_000_000)
+        stamp_msg = rospy.Time(int(stamp_ns // 1_000_000_000), int(stamp_ns % 1_000_000_000))
 
         # ── Velodyne PointCloud2 → 백그라운드 워커 ──────────────────────────
         bin_path = os.path.join(
@@ -4273,7 +4115,7 @@ class WebGUINode(Node):
         try:
             conv = KaistConverter()
         except Exception as e:
-            self.get_logger().error(f'Failed to import KaistConverter: {e}')
+            rospy.logerr(f'Failed to import KaistConverter: {e}')
             return self._player_load_result(
                 False, str(e), 'kaist', None)
 
@@ -4410,7 +4252,7 @@ class WebGUINode(Node):
                 ]
         else:
             stereo_stamps = []
-            self.get_logger().debug(
+            rospy.logdebug(
                 f'KAIST stereo: image/stereo_left/ not found in {sensor_dir}, skipping stereo stamps')
         _stereo_set = set(ts for ts in stereo_stamps if ts > 0)
         all_stamps.update(_stereo_set)
@@ -4419,7 +4261,7 @@ class WebGUINode(Node):
         self.kaist_stereo_right_dir = _stereo_right_dir
 
         if not all_stamps:
-            self.get_logger().error('KAIST: No valid timestamps from any sensor')
+            rospy.logerr('KAIST: No valid timestamps from any sensor')
             return self._player_load_result(
                 False, 'No valid timestamps', 'kaist', None)
 
@@ -4427,7 +4269,7 @@ class WebGUINode(Node):
         self.data_stamp = {ts_ns: str(ts_ns) for ts_ns in all_stamps if ts_ns > 0}
 
         if not self.data_stamp:
-            self.get_logger().error('data_stamp is empty after parsing KAIST timestamps')
+            rospy.logerr('data_stamp is empty after parsing KAIST timestamps')
             return self._player_load_result(
                 False, 'data_stamp empty', 'kaist', None)
 
@@ -4469,15 +4311,15 @@ class WebGUINode(Node):
                 if static_tf_msg and self.kaist_tf_static_pub:
                     self.kaist_tf_static_pub.publish(static_tf_msg)
                     self.kaist_static_tf_msg = static_tf_msg  # 매 프레임 /tf 재발행용 저장
-                    self.get_logger().info(f'KAIST static TF published from: {calib_dir}')
+                    rospy.loginfo(f'KAIST static TF published from: {calib_dir}')
             except Exception as e:
-                self.get_logger().warn(f'KAIST static TF publish failed: {e}')
+                rospy.logwarn(f'KAIST static TF publish failed: {e}')
         else:
-            self.get_logger().warn(f'KAIST calibration directory not found: {calib_dir}')
+            rospy.logwarn(f'KAIST calibration directory not found: {calib_dir}')
 
         self.player_data_loaded = True
 
-        self.get_logger().info(
+        rospy.loginfo(
             f'KAIST sequence loaded: {path} '
             f'({len(self.data_stamp)} frames, '
             f'{(sorted_stamps[-1] - sorted_stamps[0]) / 1e9:.1f}s)'
@@ -4505,7 +4347,7 @@ class WebGUINode(Node):
             conv = MulRanConverter()
             ctx = conv._load_sequence_context(path)
         except Exception as e:
-            self.get_logger().error(f'MulRan load failed: {e}')
+            rospy.logerr(f'MulRan load failed: {e}')
             return self._player_load_result(False, str(e), 'mulran', None)
 
         if not ctx['data_stamps']:
@@ -4554,11 +4396,11 @@ class WebGUINode(Node):
         if tf_static_msg and getattr(self, 'mulran_tf_static_pub', None):
             self.mulran_tf_static_pub.publish(tf_static_msg)
             self.mulran_static_tf_msg = tf_static_msg   # 매 프레임 /tf 재발행용 저장
-            self.get_logger().info(
+            rospy.loginfo(
                 'MulRan /tf_static published: base_link → ouster, radar_polar (고정 외장 상수)')
 
         self.player_data_loaded = True
-        self.get_logger().info(
+        rospy.loginfo(
             f'MulRan sequence loaded: {path} ({len(self.data_stamp)} timeline stamps)'
         )
         pc2_topics = [MULRAN_FILE_PLAYER_PC2_TOPIC] if ctx.get('ouster_dir') else []
@@ -4663,7 +4505,7 @@ class WebGUINode(Node):
             if last is None or (stamp_ns - last) >= _MULRAN_CLOCK_MIN_INTERVAL_NS:
                 self._mulran_last_clock_pub_ns = stamp_ns
                 clock_msg = Clock()
-                clock_msg.clock = Time(nanoseconds=stamp_ns).to_msg()
+                clock_msg.clock = rospy.Time(stamp_ns // 10**9, stamp_ns % 10**9)
                 self.clock_pub.publish(clock_msg)
 
     # ── KAIST 백그라운드 워커 함수 ─────────────────────────────────────────────
@@ -4888,7 +4730,7 @@ class WebGUINode(Node):
         self.livox_cache = {}
         self.cam_cache = {}
 
-        self.get_logger().info(f'Loaded ROS2 bag for player: {bag_dir}')
+        rospy.loginfo(f'Loaded ROS2 bag for player: {bag_dir}')
         return self._player_load_result(
             True, 'ROS2 bag path set', 'ros2_bag', None)
 
@@ -4929,7 +4771,7 @@ class WebGUINode(Node):
         self.livox_cache = {}
         self.cam_cache = {}
 
-        self.get_logger().info(f'Loaded ROS1 bag for player: {path}')
+        rospy.loginfo(f'Loaded ROS1 bag for player: {path}')
         return self._player_load_result(
             True, 'ROS1 bag path set', 'ros1_bag', None)
 
@@ -4939,27 +4781,27 @@ class WebGUINode(Node):
 
         # KITTI drive 디렉토리인 경우 직접 플레이어로 로드
         if self._is_kitti_drive_path(path):
-            self.get_logger().info(f'Detected KITTI drive path: {path}')
+            rospy.loginfo(f'Detected KITTI drive path: {path}')
             return self._load_kitti_direct(path)
 
         # MulRan (KAIST와 data_stamp.csv 경로가 겹칠 수 있어 KAIST보다 먼저 판별)
         if self._is_mulran_dataset_path(path):
-            self.get_logger().info(f'Detected MulRan sequence path: {path}')
+            rospy.loginfo(f'Detected MulRan sequence path: {path}')
             return self._load_mulran_direct(path)
 
         # KAIST 시퀀스 디렉토리인 경우 직접 플레이어로 로드
         if self._is_kaist_dataset_path(path):
-            self.get_logger().info(f'Detected KAIST sequence path: {path}')
+            rospy.loginfo(f'Detected KAIST sequence path: {path}')
             return self._load_kaist_direct(path)
 
         # ROS1 .bag 파일인 경우 ROS1 bag player 인프라로 위임
         if path.endswith('.bag') and os.path.isfile(path):
-            self.get_logger().info(f'Detected ROS1 .bag path: {path}')
+            rospy.loginfo(f'Detected ROS1 .bag path: {path}')
             return self._load_ros1_bag_player(path)
 
         # ROS2 bag 경로인 경우 기존 bag playback 인프라로 위임
         if self._is_ros2_bag_path(path):
-            self.get_logger().info(f'Detected ROS2 bag path: {path}')
+            rospy.loginfo(f'Detected ROS2 bag path: {path}')
             return self._load_ros2_bag_player(path)
 
         # 기존 재생 스레드를 완전히 정지시킨 후 새 데이터 로드
@@ -5004,7 +4846,7 @@ class WebGUINode(Node):
             # Check if data_stamp.csv exists
             stamp_file = os.path.join(path, 'data_stamp.csv')
             if not os.path.exists(stamp_file):
-                self.get_logger().error(f'data_stamp.csv not found in {path}')
+                rospy.logerr(f'data_stamp.csv not found in {path}')
                 return self._player_load_result(
                     False, f'data_stamp.csv not found in {path}', 'conpr', [])
 
@@ -5019,11 +4861,11 @@ class WebGUINode(Node):
                             data_name = parts[1]
                             self.data_stamp[stamp] = data_name
                     except ValueError as e:
-                        self.get_logger().warn(f'Skipping malformed line in data_stamp.csv: {line.strip()} - {str(e)}')
+                        rospy.logwarn(f'Skipping malformed line in data_stamp.csv: {line.strip()} - {str(e)}')
                         continue
 
             if not self.data_stamp:
-                self.get_logger().error('No valid data found in data_stamp.csv')
+                rospy.logerr('No valid data found in data_stamp.csv')
                 return self._player_load_result(
                     False, 'No valid data in data_stamp.csv', 'conpr', [])
 
@@ -5032,7 +4874,7 @@ class WebGUINode(Node):
             self.player_last_stamp = timestamps[-1]
             self.player_timestamp = self.player_initial_stamp
 
-            self.get_logger().info(f'Loaded {len(self.data_stamp)} data stamps')
+            rospy.loginfo(f'Loaded {len(self.data_stamp)} data stamps')
 
             # Load pose data
             pose_file = os.path.join(path, 'pose.csv')
@@ -5047,9 +4889,9 @@ class WebGUINode(Node):
                                 x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
                                 self.pose_data[stamp] = (x, y, z)
                         except ValueError as e:
-                            self.get_logger().warn(f'Skipping malformed line in pose.csv: {line.strip()} - {str(e)}')
+                            rospy.logwarn(f'Skipping malformed line in pose.csv: {line.strip()} - {str(e)}')
                             continue
-                self.get_logger().info(f'Loaded {len(self.pose_data)} pose data points')
+                rospy.loginfo(f'Loaded {len(self.pose_data)} pose data points')
 
             # Load IMU data (stamp, q_x, q_y, q_z, q_w, w_x, w_y, w_z, a_x, a_y, a_z)
             imu_file = os.path.join(path, 'imu.csv')
@@ -5065,9 +4907,9 @@ class WebGUINode(Node):
                                 imu = tuple(float(p) for p in parts[1:11])
                                 self.imu_data[stamp] = imu
                         except ValueError as e:
-                            self.get_logger().warn(f'Skipping malformed line in imu.csv: {line.strip()} - {str(e)}')
+                            rospy.logwarn(f'Skipping malformed line in imu.csv: {line.strip()} - {str(e)}')
                             continue
-                self.get_logger().info(f'Loaded {len(self.imu_data)} IMU data points')
+                rospy.loginfo(f'Loaded {len(self.imu_data)} IMU data points')
 
             # Load LiDAR file list + stamp→path 맵 (O(1) 룩업, os.path.exists 제거)
             lidar_dir = os.path.join(path, 'LiDAR')
@@ -5079,11 +4921,11 @@ class WebGUINode(Node):
                         self.livox_stamp_to_path[int(os.path.splitext(os.path.basename(_fpath))[0])] = _fpath
                     except ValueError:
                         pass
-                self.get_logger().info(f'Found {len(self.livox_file_list)} LiDAR files')
+                rospy.loginfo(f'Found {len(self.livox_file_list)} LiDAR files')
             else:
                 self.livox_file_list = []
                 self.livox_stamp_to_path = {}
-                self.get_logger().warn('LiDAR directory not found')
+                rospy.logwarn('LiDAR directory not found')
 
             # Load Camera file list + stamp→path 맵 (O(1) 룩업)
             cam_dir = os.path.join(path, 'Camera')
@@ -5099,11 +4941,11 @@ class WebGUINode(Node):
                         self.cam_stamp_to_path[int(os.path.splitext(os.path.basename(_fpath))[0])] = _fpath
                     except ValueError:
                         pass
-                self.get_logger().info(f'Found {len(self.cam_file_list)} camera images in Camera/')
+                rospy.loginfo(f'Found {len(self.cam_file_list)} camera images in Camera/')
             else:
                 self.cam_file_list = []
                 self.cam_stamp_to_path = {}
-                self.get_logger().warn('Camera directory not found (expected: {}/Camera/)'.format(path))
+                rospy.logwarn('Camera directory not found (expected: {}/Camera/)'.format(path))
 
             self.player_data_loaded = True
             # Lazy-initialize File Player ROS2 publishers/subscribers on first load
@@ -5114,7 +4956,7 @@ class WebGUINode(Node):
                 True, 'ConPR data loaded', 'conpr', [])
 
         except Exception as e:
-            self.get_logger().error(f'Failed to load player data: {str(e)}')
+            rospy.logerr(f'Failed to load player data: {str(e)}')
             import traceback
             traceback.print_exc()
             return self._player_load_result(False, str(e), 'conpr', [])
@@ -5134,12 +4976,12 @@ class WebGUINode(Node):
             from ros_slam_webui.kitti_converter import KittiConverter
             converter = KittiConverter()
             result = converter.scan_directory(path)
-            self.get_logger().info(
+            rospy.loginfo(
                 f'KITTI scan complete: date={result["date"]}, '
                 f'{len(result["drive_dirs"])} drive(s) found')
             return {'success': True, 'scan_result': result}
         except Exception as e:
-            self.get_logger().error(f'KITTI scan failed: {str(e)}')
+            rospy.logerr(f'KITTI scan failed: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
@@ -5185,7 +5027,7 @@ class WebGUINode(Node):
                         'message': msg,
                     })
 
-                self.get_logger().info(
+                rospy.loginfo(
                     f'KITTI conversion started: {data_path} → {final_output_path} '
                     f'[format={bag_format}]')
 
@@ -5206,13 +5048,13 @@ class WebGUINode(Node):
                         progress_cb=_progress_cb,
                     )
 
-                self.get_logger().info(f'KITTI conversion complete: {final_output_path}')
+                rospy.loginfo(f'KITTI conversion complete: {final_output_path}')
                 self.pc2_ws_server.broadcast_json_all({
                     'type': 'kitti_convert_done',
                     'bag_path': final_output_path,
                 })
             except Exception as e:
-                self.get_logger().error(f'KITTI conversion failed: {str(e)}')
+                rospy.logerr(f'KITTI conversion failed: {str(e)}')
                 import traceback
                 traceback.print_exc()
                 self.pc2_ws_server.broadcast_json_all({
@@ -5242,11 +5084,11 @@ class WebGUINode(Node):
             from ros_slam_webui.kaist_converter import KaistConverter
             converter = KaistConverter()
             result = converter.scan_directory(path)
-            self.get_logger().info(
+            rospy.loginfo(
                 f'KAIST scan complete: {len(result["sequences"])} sequence(s) found')
             return result
         except Exception as e:
-            self.get_logger().error(f'KAIST scan failed: {str(e)}')
+            rospy.logerr(f'KAIST scan failed: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
@@ -5255,7 +5097,7 @@ class WebGUINode(Node):
         self,
         sequence_dir: str,
         output_path: str,
-        sensors: list | None = None,
+        sensors: list = None,
         bag_format: str = 'ros2',
     ) -> dict:
         """KAIST 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
@@ -5295,7 +5137,7 @@ class WebGUINode(Node):
                         'message': msg,
                     })
 
-                self.get_logger().info(
+                rospy.loginfo(
                     f'KAIST conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
 
                 if bag_format == 'ros1':
@@ -5313,13 +5155,13 @@ class WebGUINode(Node):
                         progress_cb=_progress_cb,
                     )
 
-                self.get_logger().info(f'KAIST conversion complete: {output_bag_path}')
+                rospy.loginfo(f'KAIST conversion complete: {output_bag_path}')
                 self.pc2_ws_server.broadcast_json_all({
                     'type': 'kaist_convert_done',
                     'bag_path': output_bag_path,
                 })
             except Exception as e:
-                self.get_logger().error(f'KAIST conversion failed: {str(e)}')
+                rospy.logerr(f'KAIST conversion failed: {str(e)}')
                 import traceback
                 traceback.print_exc()
                 self.pc2_ws_server.broadcast_json_all({
@@ -5340,11 +5182,11 @@ class WebGUINode(Node):
             from ros_slam_webui.mulran_converter import MulRanConverter
             converter = MulRanConverter()
             result = converter.scan_directory(path)
-            self.get_logger().info(
+            rospy.loginfo(
                 f'MulRan scan complete: {len(result["sequences"])} sequence(s) found')
             return result
         except Exception as e:
-            self.get_logger().error(f'MulRan scan failed: {str(e)}')
+            rospy.logerr(f'MulRan scan failed: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
@@ -5353,7 +5195,7 @@ class WebGUINode(Node):
         self,
         sequence_dir: str,
         output_path: str,
-        sensors: list | None = None,
+        sensors: list = None,
         bag_format: str = 'ros2',
     ) -> dict:
         """MulRan 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다."""
@@ -5381,7 +5223,7 @@ class WebGUINode(Node):
                         'message': msg,
                     })
 
-                self.get_logger().info(
+                rospy.loginfo(
                     f'MulRan conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
 
                 if bag_format == 'ros1':
@@ -5399,13 +5241,13 @@ class WebGUINode(Node):
                         progress_cb=_progress_cb,
                     )
 
-                self.get_logger().info(f'MulRan conversion complete: {output_bag_path}')
+                rospy.loginfo(f'MulRan conversion complete: {output_bag_path}')
                 self.pc2_ws_server.broadcast_json_all({
                     'type': 'mulran_convert_done',
                     'bag_path': output_bag_path,
                 })
             except Exception as e:
-                self.get_logger().error(f'MulRan conversion failed: {str(e)}')
+                rospy.logerr(f'MulRan conversion failed: {str(e)}')
                 import traceback
                 traceback.print_exc()
                 self.pc2_ws_server.broadcast_json_all({
@@ -5464,7 +5306,7 @@ class WebGUINode(Node):
             num_points = len(data) // point_size
 
             msg = CustomMsg()
-            msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+            msg.header.stamp = rospy.Time(stamp // 10**9, stamp % 10**9)
             msg.header.frame_id = 'livox'
             msg.timebase = stamp
             msg.point_num = num_points
@@ -5500,7 +5342,7 @@ class WebGUINode(Node):
             return msg
 
         except Exception as e:
-            self.get_logger().error(f'Failed to load LiDAR data for stamp {stamp}: {str(e)}')
+            rospy.logerr(f'Failed to load LiDAR data for stamp {stamp}: {str(e)}')
             return None
 
     def load_camera_data(self, stamp):
@@ -5522,7 +5364,7 @@ class WebGUINode(Node):
 
             # Convert to ROS Image message
             img_msg = self.cv_bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
-            img_msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+            img_msg.header.stamp = rospy.Time(stamp // 10**9, stamp % 10**9)
             img_msg.header.frame_id = 'camera'
 
             # Create CameraInfo message (with default values)
@@ -5537,7 +5379,7 @@ class WebGUINode(Node):
             return (img_msg, cam_info_msg)
 
         except Exception as e:
-            self.get_logger().error(f'Failed to load camera data for stamp {stamp}: {str(e)}')
+            rospy.logerr(f'Failed to load camera data for stamp {stamp}: {str(e)}')
             return None
 
     def timer_callback(self):
@@ -5557,7 +5399,7 @@ class WebGUINode(Node):
             try:
                 clock_ns = self.player_initial_stamp + self.player_processed_stamp
                 clock_msg = Clock()
-                clock_msg.clock = Time(nanoseconds=clock_ns).to_msg()
+                clock_msg.clock = rospy.Time(clock_ns // 10**9, clock_ns % 10**9)
                 self.clock_pub.publish(clock_msg)
             except Exception:
                 pass
@@ -5582,23 +5424,23 @@ class WebGUINode(Node):
     def player_play_toggle(self):
         """Toggle play/stop"""
         if not self.player_data_loaded:
-            self.get_logger().warn('No data loaded. Please load data first.')
+            rospy.logwarn('No data loaded. Please load data first.')
             return False
 
         # ── ROS2 bag 모드: bag_play_toggle()로 위임 ────────────────────────
         if getattr(self, 'player_is_ros2_bag', False):
-            self.get_logger().info('ROS2 bag mode: delegating to bag_play_toggle()')
+            rospy.loginfo('ROS2 bag mode: delegating to bag_play_toggle()')
             return self.bag_play_toggle()
 
         # ── ROS1 .bag 모드: start/stop_ros1_playback()으로 위임 ─────────────
         if getattr(self, 'player_is_ros1_bag', False):
             thread = self.ros1_player_thread
             if thread is not None and thread.is_alive():
-                self.get_logger().info('ROS1 bag mode: stopping playback')
+                rospy.loginfo('ROS1 bag mode: stopping playback')
                 self.stop_ros1_playback()
                 return True
             else:
-                self.get_logger().info(
+                rospy.loginfo(
                     f'ROS1 bag mode: starting playback ({self.bag_path})')
                 return self.start_ros1_playback(
                     self.bag_path,
@@ -5610,7 +5452,7 @@ class WebGUINode(Node):
         self.player_paused = False
 
         if self.player_playing:
-            self.get_logger().info('Starting playback...')
+            rospy.loginfo('Starting playback...')
 
             # 이전 스레드가 살아 있으면 완전히 종료 후 새로 시작
             # (디렉토리 재선택 후 재생 안 되는 버그 근본 해결)
@@ -5629,7 +5471,7 @@ class WebGUINode(Node):
             self.playback_thread.start()
         else:
             # End 버튼: 처음 위치로 리셋, 스레드도 정지
-            self.get_logger().info('Stopping playback - resetting to beginning...')
+            rospy.loginfo('Stopping playback - resetting to beginning...')
             if self.playback_active:
                 self.playback_active = False
                 old_thread = self.playback_thread
@@ -5650,7 +5492,7 @@ class WebGUINode(Node):
         if self.player_playing:
             self.player_paused = not self.player_paused
             status = "Paused" if self.player_paused else "Resumed"
-            self.get_logger().info(f'Playback {status}')
+            rospy.loginfo(f'Playback {status}')
             if self.player_paused:
                 # 일시정지 시 워커 큐 클리어: 잔여 대용량 프레임 publish 방지
                 self._clear_all_sensor_workers()
@@ -5665,66 +5507,45 @@ class WebGUINode(Node):
         - other → ROS2 bag (parsed via ros2 bag info command)
         """
         if not self.bag_path:
-            self.get_logger().warn('No bag file loaded.')
+            rospy.logwarn('No bag file loaded.')
             return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
 
-        if self.bag_path.endswith('.bag'):
+        # ROS1: 모든 .bag 파일은 _get_ros1_bag_info()로 처리
+        if self.bag_path.endswith('.bag') or os.path.isfile(self.bag_path):
             return self._get_ros1_bag_info()
 
         try:
-            # Use ros2 bag info to get topic list and duration
-            cmd = ['ros2', 'bag', 'info', self.bag_path]
+            # rosbag info (ROS1)
+            cmd = ['rosbag', 'info', '--yaml', self.bag_path]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
             if result.returncode != 0:
-                self.get_logger().error(f'Failed to get bag info: {result.stderr}')
-                return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
+                rospy.logerr(f'Failed to get bag info: {result.stderr}')
+                return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1'}
 
-            # Parse output to extract topics and duration
+            # Parse YAML output
             topics = []
             duration = 0.0
-            lines = result.stdout.split('\n')
-
-            self.get_logger().info('Parsing bag info output:')
-
-            for line in lines:
-                self.get_logger().info(f'  Line: {line.strip()}')
-
-                # Parse duration (e.g., "Duration: 123.456s")
-                if 'Duration' in line and 's' in line:
-                    try:
-                        # Extract duration value
-                        duration_str = line.split(':')[1].strip()
-                        # Remove 's' and convert to float
-                        duration = float(duration_str.replace('s', '').strip())
-                        self.get_logger().info(f'  Found duration: {duration}s')
-                    except:
-                        pass
-
-                # Parse topics - looking for lines with "Topic: /topic_name | Count: X | Connection: Y"
-                if 'Topic:' in line and '|' in line:
-                    try:
-                        # Extract topic name between "Topic:" and first "|"
-                        parts = line.split('|')
-                        topic_part = parts[0]
-                        topic_name = topic_part.split('Topic:')[1].strip()
-                        topics.append(topic_name)
-                        self.get_logger().info(f'  Found topic: {topic_name}')
-                    except:
-                        pass
+            try:
+                import yaml as _yaml
+                data = _yaml.safe_load(result.stdout) or {}
+                duration = float(data.get('duration', 0.0))
+                for t in (data.get('topics') or []):
+                    topics.append(t.get('topic', ''))
+            except Exception:
+                pass
 
             self.bag_topics = topics
             self.bag_duration = duration
-            self.get_logger().info(f'Bag info: {len(topics)} topics, duration: {duration}s')
-            self.get_logger().info(f'Topics: {topics}')
+            rospy.loginfo(f'Bag info: {len(topics)} topics, duration: {duration}s')
 
-            return {'topics': topics, 'duration': duration, 'bag_type': 'ros2'}
+            return {'topics': topics, 'duration': duration, 'bag_type': 'ros1'}
 
         except subprocess.TimeoutExpired:
-            self.get_logger().error('Timeout while getting bag info')
-            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
+            rospy.logerr('Timeout while getting bag info')
+            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1'}
         except Exception as e:
-            self.get_logger().error(f'Failed to get bag info: {str(e)}')
+            rospy.logerr(f'Failed to get bag info: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
@@ -5777,17 +5598,17 @@ class WebGUINode(Node):
                 return False
 
         try:
-            from rosbags.rosbag1 import Reader
-            with Reader(self.bag_path) as reader:
-                # {topic_name: TopicInfo}
-                raw_topics = reader.topics
-                duration = (reader.end_time - reader.start_time) / 1e9
+            import rosbag as _rosbag
+            with _rosbag.Bag(self.bag_path, 'r') as bag:
+                raw_topics = bag.get_type_and_topic_info().topics  # {topic: TopicTuple}
+                start_t = bag.get_start_time()
+                end_t = bag.get_end_time()
+                duration = max(0.0, end_t - start_t)
 
-            # publishable 여부 포함 딕셔너리 목록 생성
             topic_dicts = []
-            topic_names = []  # 기존 bag_topics 호환용
+            topic_names = []
             for topic_name, topic_info in raw_topics.items():
-                ros1_type = topic_info.msgtype
+                ros1_type = topic_info.msg_type   # 'sensor_msgs/PointCloud2' 형식
                 publishable = _check_publishable(ros1_type)
                 topic_dicts.append({
                     'name': topic_name,
@@ -5796,28 +5617,23 @@ class WebGUINode(Node):
                 })
                 topic_names.append(topic_name)
 
-            # 기존 호환 상태 변수 업데이트 (이름 목록)
             self.bag_topics = topic_names
+            self.bag_topic_infos = topic_dicts
             self.bag_duration = duration
 
             publishable_count = sum(1 for t in topic_dicts if t['publishable'])
-            self.get_logger().info(
+            rospy.loginfo(
                 f'ROS1 bag info: {len(topic_dicts)} topics '
                 f'({publishable_count} publishable), duration: {duration:.3f}s'
             )
             for t in topic_dicts:
-                flag = '✓' if t['publishable'] else '✗'
-                self.get_logger().info(f'  [{flag}] {t["name"]} ({t["type"]})')
+                flag = 'O' if t['publishable'] else 'X'
+                rospy.loginfo(f'  [{flag}] {t["name"]} ({t["type"]})')
 
             return {'topics': topic_dicts, 'duration': duration, 'bag_type': 'ros1'}
 
-        except ImportError:
-            self.get_logger().error(
-                'rosbags library not found. Install with: pip install rosbags'
-            )
-            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1'}
         except Exception as e:
-            self.get_logger().error(f'Failed to read ROS1 bag: {str(e)}')
+            rospy.logerr(f'Failed to read ROS1 bag: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1'}
@@ -5858,7 +5674,8 @@ class WebGUINode(Node):
         self.ros1_player_thread = Ros1BagPlayerThread(bag_path, topics, rate, self)
         self.ros1_player_thread.set_loop(self.bag_player_loop)
         self.ros1_player_thread.start()
-        self.get_logger().info(
+        self.invalidate_ros_topics_list_cache()
+        rospy.loginfo(
             f'[ROS1 Player] Started: {bag_path}, topics={topics or "ALL"}, rate={rate}x'
         )
         return True
@@ -5876,11 +5693,11 @@ class WebGUINode(Node):
         status = thread.get_status()
         if status['status'] == 'paused':
             thread.resume()
-            self.get_logger().info('[ROS1 Player] Resumed')
+            rospy.loginfo('[ROS1 Player] Resumed')
             return {'paused': False}
         else:
             thread.pause()
-            self.get_logger().info('[ROS1 Player] Paused')
+            rospy.loginfo('[ROS1 Player] Paused')
             return {'paused': True}
 
     def stop_ros1_playback(self):
@@ -5893,7 +5710,7 @@ class WebGUINode(Node):
         if thread is not None and thread.is_alive():
             thread.stop()
             thread.join(timeout=5.0)
-            self.get_logger().info('[ROS1 Player] Stopped')
+            rospy.loginfo('[ROS1 Player] Stopped')
         self.ros1_player_thread = None
         return True
 
@@ -5909,78 +5726,12 @@ class WebGUINode(Node):
         return thread.get_status()
 
     def convert_ros1_bag(self):
-        """Convert ROS1 .bag file to ROS2 bag format using rosbags-convert.
-
-        Output directory: {bag_filename_without_ext}/ (same parent directory, no _ros2 suffix)
+        """ROS1 환경에서는 ROS1→ROS2 bag 변환이 불필요하므로 비활성화.
 
         Returns:
-            dict: {'success': bool, 'output_path': str, 'error': str (on failure)}
+            dict: {'success': False, 'error': str}
         """
-        if not self.bag_path:
-            return {'success': False, 'error': 'No bag file loaded'}
-
-        if not self.bag_path.endswith('.bag'):
-            return {'success': False, 'error': 'Not a ROS1 .bag file'}
-
-        try:
-            import os
-            import shutil
-            bag_dir = os.path.dirname(self.bag_path)
-            bag_name = os.path.splitext(os.path.basename(self.bag_path))[0]
-            output_dir = os.path.join(bag_dir, bag_name)
-
-            # 이미 변환된 디렉토리가 존재하면 삭제 후 재변환
-            if os.path.isdir(output_dir):
-                self.get_logger().info(f'Removing existing output dir: {output_dir}')
-                shutil.rmtree(output_dir)
-
-            self.get_logger().info(
-                f'Converting ROS1 bag: {self.bag_path} -> {output_dir}'
-            )
-
-            # rosbags-convert 경로 탐색 (pip user install 경로 포함)
-            convert_cmd = shutil.which('rosbags-convert') or '/home/kkw/.local/bin/rosbags-convert'
-            if not os.path.isfile(convert_cmd):
-                self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
-                return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
-
-            cmd = [
-                convert_cmd,
-                '--src',
-                self.bag_path,
-                '--dst',
-                output_dir,
-                '--src-typestore',
-                'ros1_noetic',
-            ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # Allow up to 5 minutes for large bags
-            )
-
-            if result.returncode != 0:
-                error_msg = result.stderr.strip() or result.stdout.strip()
-                self.get_logger().error(f'rosbags-convert failed: {error_msg}')
-                return {'success': False, 'error': error_msg}
-
-            _patch_rosbag2_tf_static_qos(output_dir, self.get_logger())
-
-            self.get_logger().info(f'ROS1 bag converted successfully: {output_dir}')
-            return {'success': True, 'output_path': output_dir}
-
-        except subprocess.TimeoutExpired:
-            self.get_logger().error('Timeout during ROS1 bag conversion')
-            return {'success': False, 'error': 'Conversion timed out'}
-        except FileNotFoundError:
-            self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
-            return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
-        except Exception as e:
-            self.get_logger().error(f'Failed to convert ROS1 bag: {str(e)}')
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e)}
+        return {'success': False, 'error': 'ROS1 bag conversion not supported in ROS1 mode'}
 
     def convert_ros2_to_ros1_bag(self):
         """Convert ROS2 bag directory to ROS1 .bag format using rosbags-convert.
@@ -6005,17 +5756,17 @@ class WebGUINode(Node):
 
             # 이미 변환된 .bag 파일이 존재하면 삭제 후 재변환
             if os.path.isfile(output_path):
-                self.get_logger().info(f'Removing existing output file: {output_path}')
+                rospy.loginfo(f'Removing existing output file: {output_path}')
                 os.remove(output_path)
 
-            self.get_logger().info(
+            rospy.loginfo(
                 f'Converting ROS2 bag: {self.bag_path} -> {output_path}'
             )
 
             # rosbags-convert 경로 탐색 (pip user install 경로 포함)
             convert_cmd = shutil.which('rosbags-convert') or '/home/kkw/.local/bin/rosbags-convert'
             if not os.path.isfile(convert_cmd):
-                self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
+                rospy.logerr('rosbags-convert not found. Install with: pip install rosbags')
                 return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
 
             cmd = [convert_cmd, '--src', self.bag_path, '--dst', output_path]
@@ -6028,20 +5779,20 @@ class WebGUINode(Node):
 
             if result.returncode != 0:
                 error_msg = result.stderr.strip() or result.stdout.strip()
-                self.get_logger().error(f'rosbags-convert failed: {error_msg}')
+                rospy.logerr(f'rosbags-convert failed: {error_msg}')
                 return {'success': False, 'error': error_msg}
 
-            self.get_logger().info(f'ROS2 bag converted to ROS1 successfully: {output_path}')
+            rospy.loginfo(f'ROS2 bag converted to ROS1 successfully: {output_path}')
             return {'success': True, 'output_path': output_path}
 
         except subprocess.TimeoutExpired:
-            self.get_logger().error('Timeout during ROS2→ROS1 bag conversion')
+            rospy.logerr('Timeout during ROS2→ROS1 bag conversion')
             return {'success': False, 'error': 'Conversion timed out'}
         except FileNotFoundError:
-            self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
+            rospy.logerr('rosbags-convert not found. Install with: pip install rosbags')
             return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
         except Exception as e:
-            self.get_logger().error(f'Failed to convert ROS2 bag to ROS1: {str(e)}')
+            rospy.logerr(f'Failed to convert ROS2 bag to ROS1: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
@@ -6055,7 +5806,7 @@ class WebGUINode(Node):
             rate (float): 재생 속도 배율 (기본 1.0, 예: 0.5 = 절반 속도)
         """
         if not self.bag_path:
-            self.get_logger().warn('No bag file loaded. Please load a bag file first.')
+            rospy.logwarn('No bag file loaded. Please load a bag file first.')
             return False
 
         with self._bag_play_lock:
@@ -6065,7 +5816,7 @@ class WebGUINode(Node):
         """bag_play_toggle의 실제 구현 (락 획득 후 호출)."""
         if self.bag_playing:
             # Stop playback
-            self.get_logger().info('Stopping bag playback...')
+            rospy.loginfo('Stopping bag playback...')
             # stop+restart 방식 일시정지 상태: bag_process가 None일 수 있으므로 guard
             if self.bag_process:
                 self.bag_process.terminate()
@@ -6080,72 +5831,63 @@ class WebGUINode(Node):
             self.bag_start_real_time = 0.0
             self._bag_stop_pause_offset = None
         else:
-            # Start playback using ros2 bag play
-            self.get_logger().info(f'Starting bag playback: {self.bag_path}')
+            # Start playback using rosbag play (ROS1)
+            rospy.loginfo(f'Starting bag playback: {self.bag_path}')
             try:
-                # Build command with topic selection
-                cmd = ['ros2', 'bag', 'play', self.bag_path]
+                # Build command with topic selection (ROS1 rosbag play)
+                cmd = ['rosbag', 'play', self.bag_path]
 
                 # Add start offset if specified
                 if start_offset is not None and start_offset > 0:
-                    cmd.extend(['--start-offset', str(start_offset)])
+                    cmd.extend(['-s', str(start_offset)])
                     self.bag_start_offset = start_offset
                     self.bag_current_time = start_offset
-                    self.get_logger().info(f'Starting from offset: {start_offset}s')
+                    rospy.loginfo(f'Starting from offset: {start_offset}s')
                 else:
                     self.bag_start_offset = 0.0
                     self.bag_current_time = 0.0
 
-                # Add playback rate (ros2 bag play --rate <rate>)
+                # Add playback rate (rosbag play -r <rate>)
                 rate = max(0.01, float(rate))
-                self.bag_playback_rate = rate  # 현재 속도 저장
+                self.bag_playback_rate = rate
                 if rate != 1.0:
-                    cmd.extend(['--rate', str(rate)])
-                self.get_logger().info(f'Playback rate: {rate}x')
+                    cmd.extend(['-r', str(rate)])
+                rospy.loginfo(f'Playback rate: {rate}x')
 
-                # --loop 플래그는 사용하지 않음: 루프 재시작을 _bag_process_monitor에서
-                # 직접 처리하여 항상 position 0부터 재시작하도록 보장
                 if self.bag_player_loop:
-                    self.get_logger().info('Loop playback enabled (managed by monitor thread)')
+                    rospy.loginfo('Loop playback enabled (managed by monitor thread)')
 
                 # Add topic filter if topics are selected
-                # ROS1 bag player 참조: /tf, /tf_static는 3D Viewer 좌표 변환에 필수.
-                # 토픽 선택 시 항상 /tf, /tf_static 포함 (나올때가 있고 안나올때가 있는 문제 해결)
-                # ros2 bag play는 bag에 없는 토픽은 무시하므로 항상 추가해도 무방
                 if selected_topics and len(selected_topics) > 0:
                     topics_to_play = list(selected_topics)
                     for tf_topic in ('/tf', '/tf_static'):
                         if tf_topic not in topics_to_play:
                             topics_to_play.append(tf_topic)
-                            self.get_logger().info(f'[bag play] Including {tf_topic} for 3D Viewer TF')
+                            rospy.loginfo(f'[bag play] Including {tf_topic} for 3D Viewer TF')
                     self.bag_selected_topics = topics_to_play
-                    cmd.append('--topics')
                     cmd.extend(topics_to_play)
-                    self.get_logger().info(f'Playing selected topics: {topics_to_play}')
+                    rospy.loginfo(f'Playing selected topics: {topics_to_play}')
                 else:
-                    self.get_logger().info('Playing all topics')
+                    rospy.loginfo('Playing all topics')
 
-                self.get_logger().info(f'Command: {" ".join(cmd)}')
-
-                # Debug: print environment variables
-                self.get_logger().info(f'ROS_DOMAIN_ID: {self._ros_env.get("ROS_DOMAIN_ID", "not set")}')
-                self.get_logger().info(f'ROS_DISTRO: {self._ros_env.get("ROS_DISTRO", "not set")}')
+                rospy.loginfo(f'Command: {" ".join(cmd)}')
 
                 self.bag_process = subprocess.Popen(cmd,
-                                                     env=self._ros_env,
+                                                     env={**os.environ},
                                                      stdout=subprocess.PIPE,
-                                                     stderr=subprocess.STDOUT)  # Combine stderr with stdout
+                                                     stderr=subprocess.STDOUT)
                 self.bag_playing = True
                 self.bag_paused = False
                 self.bag_start_real_time = time.time()
-                self.get_logger().info('Bag playback started successfully')
+                self.invalidate_ros_topics_list_cache()
+                rospy.loginfo('Bag playback started successfully')
 
                 # Start thread to read output
                 import threading
                 def read_output():
                     for line in iter(self.bag_process.stdout.readline, b''):
                         if line:
-                            self.get_logger().info(f'[bag play] {line.decode().strip()}')
+                            rospy.loginfo(f'[bag play] {line.decode().strip()}')
                 threading.Thread(target=read_output, daemon=True).start()
 
                 # Start monitor thread: detect natural process exit → update playing state
@@ -6156,7 +5898,7 @@ class WebGUINode(Node):
                     daemon=True
                 ).start()
             except Exception as e:
-                self.get_logger().error(f'Failed to start bag playback: {str(e)}')
+                rospy.logerr(f'Failed to start bag playback: {str(e)}')
                 return False
 
         return True
@@ -6179,7 +5921,7 @@ class WebGUINode(Node):
 
             if not self.bag_player_loop:
                 # 비루프: 재생 완료 → 상태 리셋
-                self.get_logger().info('[bag monitor] Bag ended naturally → resetting state')
+                rospy.loginfo('[bag monitor] Bag ended naturally → resetting state')
                 self.bag_playing = False
                 self.bag_process = None
                 self.bag_current_time = 0.0
@@ -6187,7 +5929,7 @@ class WebGUINode(Node):
                 return
 
             # 루프: 락 안에서 직접 프로세스 재시작 (bag_play_toggle 재진입 방지)
-            self.get_logger().info('[bag monitor] Bag ended → restarting from position 0 (loop)')
+            rospy.loginfo('[bag monitor] Bag ended → restarting from position 0 (loop)')
             try:
                 cmd = ['ros2', 'bag', 'play', self.bag_path]
                 rate = self.bag_playback_rate
@@ -6215,7 +5957,7 @@ class WebGUINode(Node):
                 def _read_loop_output():
                     for line in iter(new_proc.stdout.readline, b''):
                         if line:
-                            self.get_logger().info(f'[bag loop] {line.decode().strip()}')
+                            rospy.loginfo(f'[bag loop] {line.decode().strip()}')
                 threading.Thread(target=_read_loop_output, daemon=True).start()
                 threading.Thread(
                     target=self._bag_process_monitor,
@@ -6227,7 +5969,7 @@ class WebGUINode(Node):
                 self.bag_playing = False
                 self.bag_process = None
                 self.bag_current_time = 0.0
-                self.get_logger().error(f'[bag monitor] Loop restart failed: {e}')
+                rospy.logerr(f'[bag monitor] Loop restart failed: {e}')
 
     def bag_pause_toggle(self):
         """Toggle bag playback pause/resume.
@@ -6245,73 +5987,43 @@ class WebGUINode(Node):
         """
         # stop+restart 일시정지 상태(bag_process=None, bag_paused=True)도 허용
         if not self.bag_playing:
-            self.get_logger().warn('No bag playback in progress')
+            rospy.logwarn('No bag playback in progress')
             return False
         if not self.bag_process and not self.bag_paused:
-            self.get_logger().warn('No bag playback process found')
+            rospy.logwarn('No bag playback process found')
             return False
 
-        try:
-            from rosbag2_interfaces.srv import Pause, Resume
-            ros2_interfaces_available = True
-        except ImportError:
-            ros2_interfaces_available = False
-
+        # ROS1: rosbag play에는 Pause/Resume 서비스가 없으므로 stop+restart 방식 사용
         if self.bag_paused:
             # ── Resume ────────────────────────────────────────────────────────
-            self.get_logger().info('Resuming bag playback...')
+            rospy.loginfo('Resuming bag playback...')
             success = False
-
-            # 1순위: ROS2 서비스 (프로세스가 살아있는 경우)
-            if ros2_interfaces_available and self.bag_process:
+            pause_offset = self._bag_stop_pause_offset
+            if pause_offset is not None:
+                rospy.loginfo(f'Resuming via stop+restart at offset {pause_offset:.2f}s')
                 try:
-                    client = self.create_client(Resume, '/rosbag2_player/resume')
-                    if client.wait_for_service(timeout_sec=2.0):
-                        future = client.call_async(Resume.Request())
-                        start = time.time()
-                        while not future.done() and time.time() - start < 3.0:
-                            time.sleep(0.01)
-                        if future.done() and future.result() is not None:
-                            success = True
-                            self.get_logger().info('Resumed via /rosbag2_player/resume service')
+                    new_proc = self._start_bag_process_at_offset(pause_offset)
+                    if new_proc:
+                        self.bag_process = new_proc
+                        self._bag_stop_pause_offset = None
+                        success = True
+                        rospy.loginfo('Resumed via stop+restart')
                 except Exception as e:
-                    self.get_logger().warn(f'rosbag2 resume service failed: {e}')
-
-            # 2순위: stop+restart (서비스 실패 or 프로세스가 이미 없는 경우)
-            if not success:
-                pause_offset = self._bag_stop_pause_offset
-                if pause_offset is not None:
-                    self.get_logger().info(
-                        f'Resuming via stop+restart at offset {pause_offset:.2f}s'
-                    )
-                    try:
-                        new_proc = self._start_bag_process_at_offset(pause_offset)
-                        if new_proc:
-                            self.bag_process = new_proc
-                            self._bag_stop_pause_offset = None
-                            success = True
-                            self.get_logger().info('Resumed via stop+restart fallback')
-                    except Exception as e:
-                        self.get_logger().error(f'stop+restart resume failed: {e}')
-                else:
-                    # 서비스 일시정지였으나 재개 서비스도 실패한 극단적 케이스
-                    # → 재시작 offset이 없으므로 현재 bag_current_time 기준으로 재시작
-                    self.get_logger().warn(
-                        'No pause offset recorded; restarting from current position'
-                    )
-                    try:
-                        new_proc = self._start_bag_process_at_offset(self.bag_current_time)
-                        if new_proc:
-                            if self.bag_process:
-                                try:
-                                    self.bag_process.terminate()
-                                    self.bag_process.wait(timeout=2)
-                                except Exception:
-                                    pass
-                            self.bag_process = new_proc
-                            success = True
-                    except Exception as e:
-                        self.get_logger().error(f'Fallback restart failed: {e}')
+                    rospy.logerr(f'stop+restart resume failed: {e}')
+            else:
+                try:
+                    new_proc = self._start_bag_process_at_offset(self.bag_current_time)
+                    if new_proc:
+                        if self.bag_process:
+                            try:
+                                self.bag_process.terminate()
+                                self.bag_process.wait(timeout=2)
+                            except Exception:
+                                pass
+                        self.bag_process = new_proc
+                        success = True
+                except Exception as e:
+                    rospy.logerr(f'Fallback restart failed: {e}')
 
             if success:
                 self.bag_paused = False
@@ -6321,29 +6033,13 @@ class WebGUINode(Node):
 
         else:
             # ── Pause ─────────────────────────────────────────────────────────
-            self.get_logger().info('Pausing bag playback...')
+            rospy.loginfo('Pausing bag playback...')
             success = False
 
-            # 1순위: ROS2 서비스
-            if ros2_interfaces_available and self.bag_process:
-                try:
-                    client = self.create_client(Pause, '/rosbag2_player/pause')
-                    if client.wait_for_service(timeout_sec=2.0):
-                        future = client.call_async(Pause.Request())
-                        start = time.time()
-                        while not future.done() and time.time() - start < 3.0:
-                            time.sleep(0.01)
-                        if future.done() and future.result() is not None:
-                            success = True
-                            self._bag_stop_pause_offset = None  # 서비스 방식 → offset 불필요
-                            self.get_logger().info('Paused via /rosbag2_player/pause service')
-                except Exception as e:
-                    self.get_logger().warn(f'rosbag2 pause service failed: {e}')
-
-            # 2순위: 프로세스 종료 + 위치 기록 (SIGSTOP 대신)
-            if not success and self.bag_process:
+            # ROS1: 프로세스 종료 + 위치 기록 방식
+            if self.bag_process:
                 self._bag_stop_pause_offset = self.bag_current_time
-                self.get_logger().info(
+                rospy.loginfo(
                     f'Pausing via process stop (offset={self._bag_stop_pause_offset:.2f}s); '
                     'will restart from this position on resume'
                 )
@@ -6364,27 +6060,24 @@ class WebGUINode(Node):
             return success
 
     def _start_bag_process_at_offset(self, start_offset: float):
-        """지정 offset(초)에서 ros2 bag play 서브프로세스를 새로 시작한다.
+        """지정 offset(초)에서 rosbag play 서브프로세스를 새로 시작한다 (ROS1).
 
         stop+restart 방식의 pause/resume fallback에서 사용.
         bag_start_real_time / bag_start_offset 은 호출 측에서 관리한다.
         """
-        cmd = ['ros2', 'bag', 'play', self.bag_path]
+        cmd = ['rosbag', 'play', self.bag_path]
         if start_offset > 0.0:
-            cmd.extend(['--start-offset', str(start_offset)])
+            cmd.extend(['-s', str(start_offset)])
         rate = getattr(self, 'bag_playback_rate', 1.0)
         if rate != 1.0:
-            cmd.extend(['--rate', str(rate)])
-        if self.bag_player_loop:
-            cmd.append('--loop')
+            cmd.extend(['-r', str(rate)])
         topics = getattr(self, 'bag_selected_topics', [])
         if topics:
-            cmd.append('--topics')
             cmd.extend(topics)
-        self.get_logger().info(f'[restart] {" ".join(cmd)}')
+        rospy.loginfo(f'[restart] {" ".join(cmd)}')
         proc = subprocess.Popen(
             cmd,
-            env=self._ros_env,
+            env={**os.environ},
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
@@ -6392,7 +6085,7 @@ class WebGUINode(Node):
         def _read_output():
             for line in iter(proc.stdout.readline, b''):
                 if line:
-                    self.get_logger().info(f'[bag play] {line.decode().strip()}')
+                    rospy.loginfo(f'[bag play] {line.decode().strip()}')
         threading.Thread(target=_read_output, daemon=True).start()
         return proc
 
@@ -6408,7 +6101,7 @@ class WebGUINode(Node):
         if thread is not None and thread.is_alive():
             thread.set_seek(target_time)
             self.bag_current_time = target_time
-            self.get_logger().info(f'[ROS1] Set bag position to {target_time}s ({position_ratio*100}%)')
+            rospy.loginfo(f'[ROS1] Set bag position to {target_time}s ({position_ratio*100}%)')
             return True
 
         # ROS2 bag: 기존 로직
@@ -6420,14 +6113,13 @@ class WebGUINode(Node):
             self.bag_current_time = target_time
             self.bag_start_offset = target_time
 
-        self.get_logger().info(f'Set bag position to {target_time}s ({position_ratio*100}%)')
+        rospy.loginfo(f'Set bag position to {target_time}s ({position_ratio*100}%)')
         return True
 
     def set_bag_playback_rate(self, rate: float) -> dict:
-        """ROS2 bag 재생 중 속도 변경.
+        """ROS1 bag 재생 중 속도 변경.
 
-        재생 중이면 /rosbag2_player/set_rate 서비스를 호출해 즉시 반영.
-        정지/일시정지 상태면 self.bag_playback_rate만 갱신하여 다음 재생에 적용.
+        ROS1에서는 rosbag play -r 옵션으로만 속도 설정 가능 → stop+restart 방식 사용.
 
         Args:
             rate (float): 새 속도 배율 (> 0)
@@ -6438,65 +6130,31 @@ class WebGUINode(Node):
         rate = max(0.01, float(rate))
 
         if not self.bag_playing or not self.bag_process:
-            # 재생 중이 아님 – 다음 Play 시 적용
             self.bag_playback_rate = rate
-            self.get_logger().info(f'[bag set_rate] Stored rate={rate}x (not playing)')
+            rospy.loginfo(f'[bag set_rate] Stored rate={rate}x (not playing)')
             return {'success': True, 'rate': rate, 'message': 'Rate stored for next playback'}
 
-        # 재생 중: /rosbag2_player/set_rate 서비스 호출
+        # ROS1: 현재 위치에서 새 속도로 재시작
         try:
-            from rosbag2_interfaces.srv import SetRate
-        except ImportError:
-            self.get_logger().warn(
-                '[bag set_rate] rosbag2_interfaces not available; cannot change rate live'
-            )
-            return {
-                'success': False, 'rate': rate,
-                'message': 'rosbag2_interfaces not available'
-            }
-
-        client = self.create_client(SetRate, '/rosbag2_player/set_rate')
-        if not client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn('[bag set_rate] /rosbag2_player/set_rate service not available')
-            return {
-                'success': False, 'rate': rate,
-                'message': '/rosbag2_player/set_rate service not available'
-            }
-
-        req = SetRate.Request()
-        req.rate = rate
-        future = client.call_async(req)
-
-        # 동기 대기 (폴링, 최대 2초)
-        # rclpy.spin()이 메인 스레드에서 실행 중이므로 HTTP 핸들러 스레드에서는
-        # future.done()을 폴링하는 방식으로 완료를 기다린다.
-        timeout = 2.0
-        start = time.time()
-        while not future.done() and time.time() - start < timeout:
-            time.sleep(0.01)
-
-        if not future.done():
-            self.get_logger().warn(f'[bag set_rate] Service call timed out for rate={rate}')
-            return {'success': False, 'rate': rate, 'message': 'Service call timed out'}
-
-        try:
-            result = future.result()
-            if result is not None and result.success:
-                # 속도 변경 성공 시, 타임라인 추적 기준을 현재 시점으로 재설정
-                # 이전 속도로 진행된 bag 시간을 새 시작 오프셋으로 저장
+            current_offset = self.bag_current_time
+            self.bag_playback_rate = rate
+            new_proc = self._start_bag_process_at_offset(current_offset)
+            if new_proc:
+                old_proc = self.bag_process
+                self.bag_process = new_proc
+                if old_proc:
+                    try:
+                        old_proc.terminate()
+                        old_proc.wait(timeout=2)
+                    except Exception:
+                        pass
                 now = time.time()
-                if not self.bag_paused:
-                    elapsed = now - self.bag_start_real_time
-                    self.bag_start_offset = self.bag_start_offset + elapsed * self.bag_playback_rate
-                    self.bag_start_real_time = now
-                self.bag_playback_rate = rate
-                self.get_logger().info(f'[bag set_rate] Rate changed to {rate}x via service')
+                self.bag_start_real_time = now
+                rospy.loginfo(f'[ROS1 bag set_rate] Rate changed to {rate}x via restart')
                 return {'success': True, 'rate': rate, 'message': f'Rate set to {rate}x'}
-            else:
-                self.get_logger().warn(f'[bag set_rate] Service returned failure for rate={rate}')
-                return {'success': False, 'rate': rate, 'message': 'Service returned failure'}
+            return {'success': False, 'rate': rate, 'message': 'Failed to restart bag process'}
         except Exception as e:
-            self.get_logger().error(f'[bag set_rate] Service call failed: {e}')
+            rospy.logerr(f'[bag set_rate] Service call failed: {e}')
             return {'success': False, 'rate': rate, 'message': str(e)}
 
     def set_ros1_bag_rate(self, rate: float) -> dict:
@@ -6516,10 +6174,10 @@ class WebGUINode(Node):
         thread = self.ros1_player_thread
         if thread is not None and thread.is_alive():
             thread.set_rate(rate)
-            self.get_logger().info(f'[ROS1 set_rate] Rate changed to {rate}x during playback')
+            rospy.loginfo(f'[ROS1 set_rate] Rate changed to {rate}x during playback')
             return {'success': True, 'rate': rate, 'message': f'Rate set to {rate}x'}
         else:
-            self.get_logger().info(f'[ROS1 set_rate] Stored rate={rate}x (not playing)')
+            rospy.loginfo(f'[ROS1 set_rate] Stored rate={rate}x (not playing)')
             return {'success': True, 'rate': rate, 'message': 'Rate stored for next playback'}
 
     def get_bag_state(self):
@@ -6545,7 +6203,7 @@ class WebGUINode(Node):
         - 배속(player_speed)은 worker 내부 wall-clock으로 직접 계산
           (timer_callback 의존 제거 → KITTI/ConPR 모두 안정적 동작)
         """
-        self.get_logger().info('Playback worker started')
+        rospy.loginfo('Playback worker started')
 
         timestamps = []      # Play 시작 시 data_stamp 에서 복사
         current_idx = 0      # 다음 처리할 timestamps 인덱스
@@ -6604,7 +6262,7 @@ class WebGUINode(Node):
                 _wall_start = now
                 _proc_start = self.player_processed_stamp
                 was_paused = self.player_paused
-                self.get_logger().info(
+                rospy.loginfo(
                     f'Playback started: {len(timestamps)} stamps, speed={self.player_speed}'
                 )
             elif self.player_seek_requested:
@@ -6621,7 +6279,7 @@ class WebGUINode(Node):
                     current_idx += 1
                 _wall_start = now
                 _proc_start = self.player_processed_stamp
-                self.get_logger().info(
+                rospy.loginfo(
                     f'Seek done: stamp={seek_stamp}, idx={current_idx}'
                 )
             was_playing = True
@@ -6662,10 +6320,10 @@ class WebGUINode(Node):
                         # 클락 메시지 발행
                         if self.clock_pub:
                             clock_msg = Clock()
-                            clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                            clock_msg.clock = rospy.Time(stamp // 10**9, stamp % 10**9)
                             self.clock_pub.publish(clock_msg)
                     except Exception as e:
-                        self.get_logger().warn(f'KITTI frame publish error: {e}')
+                        rospy.logwarn(f'KITTI frame publish error: {e}')
                     # player_timestamp는 예외 여부와 무관하게 항상 갱신
                     self.player_timestamp = stamp
                     time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
@@ -6677,10 +6335,10 @@ class WebGUINode(Node):
                         self._publish_kaist_frame(stamp)
                         if self.clock_pub:
                             clock_msg = Clock()
-                            clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                            clock_msg.clock = rospy.Time(stamp // 10**9, stamp % 10**9)
                             self.clock_pub.publish(clock_msg)
                     except Exception as e:
-                        self.get_logger().warn(f'KAIST frame publish error: {e}')
+                        rospy.logwarn(f'KAIST frame publish error: {e}')
                     self.player_timestamp = stamp
                     time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드(ping 응답 등)에 CPU 양보
                     continue  # ConPR 분기 스킵
@@ -6690,7 +6348,7 @@ class WebGUINode(Node):
                         # /clock 는 _publish_mulran_frame 내부에서 10ms 간격으로 throttle
                         self._publish_mulran_frame(stamp)
                     except Exception as e:
-                        self.get_logger().warn(f'MulRan frame publish error: {e}')
+                        rospy.logwarn(f'MulRan frame publish error: {e}')
                     self.player_timestamp = stamp
                     time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
                     continue
@@ -6698,7 +6356,7 @@ class WebGUINode(Node):
                 if data_type == "pose" and stamp in self.pose_data:
                     x, y, z = self.pose_data[stamp]
                     msg = PointStamped()
-                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.stamp = rospy.Time(stamp // 10**9, stamp % 10**9)
                     msg.header.frame_id = 'imu_link'
                     msg.point.x = x
                     msg.point.y = y
@@ -6708,7 +6366,7 @@ class WebGUINode(Node):
                 elif data_type == "imu" and stamp in self.imu_data:
                     imu_values = self.imu_data[stamp]
                     msg = Imu()
-                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.stamp = rospy.Time(stamp // 10**9, stamp % 10**9)
                     msg.header.frame_id = 'imu_link'
                     # IMU data: q_x, q_y, q_z, q_w, w_x, w_y, w_z, a_x, a_y, a_z
                     msg.orientation.x = imu_values[0]
@@ -6741,10 +6399,10 @@ class WebGUINode(Node):
                 if self.clock_pub:
                     try:
                         clock_msg = Clock()
-                        clock_msg.clock = Time(nanoseconds=stamp).to_msg()
+                        clock_msg.clock = rospy.Time(stamp // 10**9, stamp % 10**9)
                         self.clock_pub.publish(clock_msg)
                     except Exception as e:
-                        self.get_logger().warn(f'Clock publish error: {e}')
+                        rospy.logwarn(f'Clock publish error: {e}')
 
                 self.player_timestamp = stamp
 
@@ -6757,7 +6415,7 @@ class WebGUINode(Node):
             # 재생 종료 체크
             if target_stamp >= self.player_last_stamp:
                 if self.player_loop:
-                    self.get_logger().info('Looping playback...')
+                    rospy.loginfo('Looping playback...')
                     self.player_processed_stamp = 0
                     self.player_timestamp = self.player_initial_stamp
                     current_idx = 0
@@ -6765,13 +6423,13 @@ class WebGUINode(Node):
                     _wall_start = now
                     _proc_start = 0
                 else:
-                    self.get_logger().info('Playback finished')
+                    rospy.loginfo('Playback finished')
                     self.player_playing = False
                     self.player_processed_stamp = 0
                     self.player_slider_pos = 0
                     current_idx = 0
 
-        self.get_logger().info('Playback worker stopped')
+        rospy.loginfo('Playback worker stopped')
 
     def reset_player_position(self, position):
         """Reset playback position (0-10000)
@@ -6793,295 +6451,78 @@ class WebGUINode(Node):
         self.player_seek_to_stamp = target_stamp
         self.player_seek_requested = True  # 마지막에 설정 (원자성 보장)
 
-        self.get_logger().info(f'Seek requested: pos={position} → stamp={target_stamp}')
+        rospy.loginfo(f'Seek requested: pos={position} → stamp={target_stamp}')
 
     def save_rosbag(self):
-        """Save loaded data to rosbag2 format"""
+        """로드된 데이터를 ROS1 .bag 형식으로 저장한다 (rosbag 네이티브 모듈 사용)."""
+        return self.save_rosbag_ros1()
+
+    def save_rosbag_ros1(self):
+        """로드된 데이터를 ROS1 .bag 형식으로 저장한다 (rosbag 네이티브 모듈 사용).
+
+        Livox 데이터는 CustomMsg 대신 sensor_msgs/PointCloud2로 변환하여 저장한다.
+        출력 경로: {player_path}/{name}.bag
+        """
         if not self.player_data_loaded:
-            self.get_logger().error('No data loaded. Please load data first.')
+            rospy.logerr('No data loaded. Please load data first.')
             return False
 
         try:
-            # KITTI와 동일한 정책: {base_dir}/{name}_bag
-            bag_name = os.path.basename(os.path.normpath(self.player_path)) or 'output'
-            bag_path = os.path.join(self.player_path, f"{bag_name}_bag")
-            self.save_bag_progress = "0%"
-            self.save_bag_message = "Starting conversion..."
-            self.get_logger().info(f'Starting rosbag conversion to: {bag_path}')
-
-            # Create writer
-            writer = rosbag2_py.SequentialWriter()
-
-            storage_options = rosbag2_py.StorageOptions(
-                uri=bag_path,
-                storage_id='sqlite3'
-            )
-
-            converter_options = rosbag2_py.ConverterOptions(
-                input_serialization_format='cdr',
-                output_serialization_format='cdr'
-            )
-
-            writer.open(storage_options, converter_options)
-
-            # Create topics with correct TopicMetadata format (id is required)
-            from rosbag2_py import TopicMetadata
-
-            pose_topic = TopicMetadata(
-                id=0,
-                name='/pose/position',
-                type='geometry_msgs/msg/PointStamped',
-                serialization_format='cdr'
-            )
-            writer.create_topic(pose_topic)
-
-            imu_topic = TopicMetadata(
-                id=1,
-                name='/imu',
-                type='sensor_msgs/msg/Imu',
-                serialization_format='cdr'
-            )
-            writer.create_topic(imu_topic)
-
-            # Create LiDAR topic if available
-            topic_id = 2
-            if LIVOX_AVAILABLE and len(self.livox_file_list) > 0:
-                livox_topic = TopicMetadata(
-                    id=topic_id,
-                    name='/livox/lidar',
-                    type='livox_ros_driver2/msg/CustomMsg',
-                    serialization_format='cdr'
-                )
-                writer.create_topic(livox_topic)
-                topic_id += 1
-
-            # Create Camera topics if available
-            if len(self.cam_file_list) > 0:
-                cam_topic = TopicMetadata(
-                    id=topic_id,
-                    name='/camera/color/image',
-                    type='sensor_msgs/msg/Image',
-                    serialization_format='cdr'
-                )
-                writer.create_topic(cam_topic)
-                topic_id += 1
-
-                cam_info_topic = TopicMetadata(
-                    id=topic_id,
-                    name='/camera/color/camera_info',
-                    type='sensor_msgs/msg/CameraInfo',
-                    serialization_format='cdr'
-                )
-                writer.create_topic(cam_info_topic)
-                topic_id += 1
-
-            # Calculate total items for progress tracking
-            livox_stamps = []
-            cam_stamps = []
-            if LIVOX_AVAILABLE and len(self.livox_file_list) > 0:
-                livox_stamps = [stamp for stamp, dtype in self.data_stamp.items() if dtype == "livox"]
-            if len(self.cam_file_list) > 0:
-                cam_stamps = [stamp for stamp, dtype in self.data_stamp.items() if dtype == "cam"]
-
-            total_items = len(self.pose_data) + len(self.imu_data) + len(livox_stamps) + len(cam_stamps)
-            processed_items = 0
-            last_pct = -1
-
-            def update_progress():
-                """퍼센트가 바뀔 때만 상태 업데이트 + GIL 반납 (최대 100회)"""
-                nonlocal processed_items, last_pct
-                processed_items += 1
-                if total_items > 0:
-                    pct = int(processed_items / total_items * 100)
-                    if pct != last_pct:
-                        self.save_bag_progress = f"{pct}%"
-                        last_pct = pct
-                        time.sleep(0)  # GIL 반납 → HTTP 스레드가 폴링 요청 처리 가능
-
-            # Write pose data
-            self.save_bag_message = "Converting pose messages..."
-            self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
-            for stamp, (x, y, z) in sorted(self.pose_data.items()):
-                msg = PointStamped()
-                msg.header.stamp = Time(nanoseconds=stamp).to_msg()
-                msg.header.frame_id = 'imu_link'
-                msg.point.x = x
-                msg.point.y = y
-                msg.point.z = z
-
-                writer.write(
-                    '/pose/position',
-                    serialize_message(msg),
-                    stamp
-                )
-                update_progress()
-
-            # Write IMU data
-            self.save_bag_message = "Converting IMU messages..."
-            self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
-            for stamp, imu_values in sorted(self.imu_data.items()):
-                msg = Imu()
-                msg.header.stamp = Time(nanoseconds=stamp).to_msg()
-                msg.header.frame_id = 'imu_link'
-                msg.orientation.x = imu_values[0]
-                msg.orientation.y = imu_values[1]
-                msg.orientation.z = imu_values[2]
-                msg.orientation.w = imu_values[3]
-                msg.angular_velocity.x = imu_values[4]
-                msg.angular_velocity.y = imu_values[5]
-                msg.angular_velocity.z = imu_values[6]
-                msg.linear_acceleration.x = imu_values[7]
-                msg.linear_acceleration.y = imu_values[8]
-                msg.linear_acceleration.z = imu_values[9]
-
-                writer.write(
-                    '/imu',
-                    serialize_message(msg),
-                    stamp
-                )
-                update_progress()
-
-            # Write LiDAR data
-            if LIVOX_AVAILABLE and len(livox_stamps) > 0:
-                self.save_bag_message = "Converting LiDAR messages..."
-                self.get_logger().info(f'Writing {len(livox_stamps)} LiDAR messages...')
-                for stamp in sorted(livox_stamps):
-                    livox_msg = self.load_livox_data(stamp)
-                    if livox_msg:
-                        writer.write(
-                            '/livox/lidar',
-                            serialize_message(livox_msg),
-                            stamp
-                        )
-                    update_progress()
-
-            # Write Camera data
-            if len(cam_stamps) > 0:
-                self.save_bag_message = "Converting camera messages..."
-                self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
-                for stamp in sorted(cam_stamps):
-                    cam_data = self.load_camera_data(stamp)
-                    if cam_data:
-                        img_msg, cam_info_msg = cam_data
-                        writer.write(
-                            '/camera/color/image',
-                            serialize_message(img_msg),
-                            stamp
-                        )
-                        writer.write(
-                            '/camera/color/camera_info',
-                            serialize_message(cam_info_msg),
-                            stamp
-                        )
-                    update_progress()
-
-            del writer
-            self.save_bag_progress = None
-            self.save_bag_message = None
-            self.get_logger().info('Rosbag conversion complete!')
-            return True
-
-        except Exception as e:
-            self.save_bag_progress = None
-            self.save_bag_message = None
-            self.get_logger().error(f'Failed to save rosbag: {str(e)}')
-            import traceback
-            traceback.print_exc()
+            import rosbag as _rosbag
+        except ImportError as e:
+            rospy.logerr(f'rosbag 모듈이 필요합니다: {e}')
             return False
 
-    def save_rosbag_ros1(self):
-        """로드된 ConPR 데이터를 ROS1 .bag 형식으로 직접 저장한다.
+        def _ns_to_rospy_time(stamp_ns: int) -> rospy.Time:
+            return rospy.Time(stamp_ns // 10 ** 9, stamp_ns % 10 ** 9)
 
-        rosbags.rosbag1.Writer + migrate_bytes()를 사용하여 ROS2 CDR 직렬화 후
-        즉시 ROS1 raw bytes로 변환하여 .bag에 기록한다.
-
-        Livox 데이터는 CustomMsg 대신 sensor_msgs/PointCloud2로 변환하여 저장한다.
-        표준 타입이므로 migrate_bytes() 캐시 적중률 100% → 변환 속도 대폭 향상.
-        또한 rosbridge 타입 호환성 보장 → 3D Viewer에서 정상 시각화 가능.
-
-        출력 경로: {player_path}/output.bag
-        """
-        if not self.player_data_loaded:
-            self.get_logger().error('No data loaded. Please load data first.')
-            return False
+        def _livox_to_pc2(livox_msg, stamp_ns: int) -> PointCloud2:
+            """Livox CustomMsg → sensor_msgs/PointCloud2 변환."""
+            _fields = [
+                PointField(name='x',         offset=0,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='y',         offset=4,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='z',         offset=8,  datatype=PointField.FLOAT32, count=1),
+                PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+                PointField(name='tag',       offset=16, datatype=PointField.UINT8,   count=1),
+                PointField(name='line',      offset=17, datatype=PointField.UINT8,   count=1),
+            ]
+            _step = 18
+            _n = len(livox_msg.points)
+            _buf = bytearray(_n * _step)
+            for _i, _pt in enumerate(livox_msg.points):
+                _off = _i * _step
+                struct.pack_into('ffff', _buf, _off, _pt.x, _pt.y, _pt.z, float(_pt.reflectivity))
+                struct.pack_into('BB', _buf, _off + 16, _pt.tag, _pt.line)
+            _pc2 = PointCloud2()
+            _pc2.header.stamp = _ns_to_rospy_time(stamp_ns)
+            _pc2.header.frame_id = getattr(livox_msg.header, 'frame_id', None) or 'livox'
+            _pc2.height = 1
+            _pc2.width = _n
+            _pc2.fields = _fields
+            _pc2.is_bigendian = False
+            _pc2.point_step = _step
+            _pc2.row_step = _step * _n
+            _pc2.data = bytes(_buf)
+            _pc2.is_dense = True
+            return _pc2
 
         try:
             from pathlib import Path as _Path
-            from rosbags.rosbag1 import Writer as Ros1Writer
-            from rosbags.typesys import get_typestore, Stores
-            from rosbags.convert.converter import migrate_bytes as _migrate_bytes
-        except ImportError as e:
-            self.get_logger().error(
-                f'rosbags 라이브러리가 필요합니다. pip install rosbags\n원인: {e}'
-            )
-            return False
-
-        try:
-            # KITTI와 동일한 정책: {base_dir}/{name}.bag
             bag_name = os.path.basename(os.path.normpath(self.player_path)) or 'output'
-            bag_path = _Path(self.player_path) / f'{bag_name}.bag'
+            bag_path = str(_Path(self.player_path) / f'{bag_name}.bag')
             self.save_bag_progress = '0%'
-            self.save_bag_message = "Starting conversion..."
-            self.get_logger().info(f'Starting ROS1 bag save to: {bag_path}')
+            self.save_bag_message = 'Starting conversion...'
+            rospy.loginfo(f'Starting ROS1 bag save to: {bag_path}')
 
-            src_store = get_typestore(Stores.ROS2_JAZZY)
-            dst_store = get_typestore(Stores.ROS1_NOETIC)
-            migrate_cache: dict = {}
-
-            def _cdr_to_ros1(conn, cdr_bytes: bytes) -> bytes:
-                return bytes(_migrate_bytes(
-                    src_store, dst_store,
-                    conn.msgtype, conn.msgtype,
-                    migrate_cache, cdr_bytes,
-                    src_is2=True, dst_is2=False,
-                ))
-
-            def _livox_custommsg_to_pointcloud2(livox_msg, stamp_ns: int) -> PointCloud2:
-                """Livox CustomMsg → sensor_msgs/PointCloud2 변환.
-
-                PointCloud2 필드: x, y, z (float32), intensity (float32 = reflectivity),
-                tag (uint8), line (uint8). point_step = 18 bytes.
-                """
-                _fields = [
-                    PointField(name='x',         offset=0,  datatype=PointField.FLOAT32, count=1),
-                    PointField(name='y',         offset=4,  datatype=PointField.FLOAT32, count=1),
-                    PointField(name='z',         offset=8,  datatype=PointField.FLOAT32, count=1),
-                    PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
-                    PointField(name='tag',       offset=16, datatype=PointField.UINT8,   count=1),
-                    PointField(name='line',      offset=17, datatype=PointField.UINT8,   count=1),
-                ]
-                _point_step = 18  # 4+4+4+4+1+1
-                _num_pts = len(livox_msg.points)
-                _buf = bytearray(_num_pts * _point_step)
-                for _i, _pt in enumerate(livox_msg.points):
-                    _off = _i * _point_step
-                    struct.pack_into('ffff', _buf, _off, _pt.x, _pt.y, _pt.z, float(_pt.reflectivity))
-                    struct.pack_into('BB', _buf, _off + 16, _pt.tag, _pt.line)
-                _pc2 = PointCloud2()
-                _pc2.header.stamp = Time(nanoseconds=stamp_ns).to_msg()
-                _pc2.header.frame_id = livox_msg.header.frame_id or 'livox'
-                _pc2.height = 1
-                _pc2.width = _num_pts
-                _pc2.fields = _fields
-                _pc2.is_bigendian = False
-                _pc2.point_step = _point_step
-                _pc2.row_step = _point_step * _num_pts
-                _pc2.data = bytes(_buf)
-                _pc2.is_dense = True
-                return _pc2
-
-            # ── Livox 프레임 수집 (PointCloud2로 저장하므로 커스텀 타입 등록 불필요) ──
             livox_stamps = []
             if LIVOX_AVAILABLE and len(self.livox_file_list) > 0:
-                livox_stamps = [s for s, dtype in self.data_stamp.items()
-                                if dtype == 'livox']
-                self.get_logger().info(
-                    f'Livox → PointCloud2: {len(livox_stamps)} frames')
+                livox_stamps = [s for s, dtype in self.data_stamp.items() if dtype == 'livox']
+                rospy.loginfo(f'Livox → PointCloud2: {len(livox_stamps)} frames')
 
-            # 데이터 크기 계산 (진행률용)
             cam_stamps = []
             if len(self.cam_file_list) > 0:
                 cam_stamps = [s for s, dtype in self.data_stamp.items() if dtype == 'cam']
+
             total_items = (len(self.pose_data) + len(self.imu_data)
                            + len(cam_stamps) + len(livox_stamps))
             processed_items = 0
@@ -7095,106 +6536,78 @@ class WebGUINode(Node):
                     if pct != last_pct:
                         self.save_bag_progress = f'{pct}%'
                         last_pct = pct
-                        time.sleep(0)
+                        time.sleep(0)  # GIL 반납
 
-            # 기존 output.bag 삭제
-            if bag_path.exists():
-                bag_path.unlink()
+            if os.path.exists(bag_path):
+                os.remove(bag_path)
 
-            with Ros1Writer(bag_path) as writer:
-                # 커넥션 등록
-                pose_conn = writer.add_connection(
-                    '/pose/position', 'geometry_msgs/msg/PointStamped', typestore=dst_store)
-                imu_conn = writer.add_connection(
-                    '/imu', 'sensor_msgs/msg/Imu', typestore=dst_store)
-                img_conn = None
-                caminfo_conn = None
-                if cam_stamps:
-                    img_conn = writer.add_connection(
-                        '/camera/color/image', 'sensor_msgs/msg/Image', typestore=dst_store)
-                    caminfo_conn = writer.add_connection(
-                        '/camera/color/camera_info', 'sensor_msgs/msg/CameraInfo',
-                        typestore=dst_store)
-                livox_conn = None
-                if livox_stamps:
-                    livox_conn = writer.add_connection(
-                        '/livox/lidar', 'sensor_msgs/msg/PointCloud2',
-                        typestore=dst_store)
-
-                def _write(conn, ros2_msg, ts_ns: int):
-                    try:
-                        cdr = bytes(serialize_message(ros2_msg))
-                        raw = _cdr_to_ros1(conn, cdr)
-                        writer.write(conn, ts_ns, raw)
-                    except Exception as _e:
-                        self.get_logger().warn(f'ROS1 write skipped: {_e}')
-
-                # Write pose data
-                self.save_bag_message = "Converting pose messages..."
-                self.get_logger().info(f'Writing {len(self.pose_data)} pose messages...')
-                for stamp, (x, y, z) in sorted(self.pose_data.items()):
+            with _rosbag.Bag(bag_path, 'w') as bag:
+                # Pose 데이터
+                self.save_bag_message = 'Converting pose messages...'
+                rospy.loginfo(f'Writing {len(self.pose_data)} pose messages...')
+                for stamp_ns, (x, y, z) in sorted(self.pose_data.items()):
                     msg = PointStamped()
-                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.stamp = _ns_to_rospy_time(stamp_ns)
                     msg.header.frame_id = 'imu_link'
                     msg.point.x = x
                     msg.point.y = y
                     msg.point.z = z
-                    _write(pose_conn, msg, stamp)
+                    bag.write('/pose/position', msg, msg.header.stamp)
                     update_progress()
 
-                # Write IMU data
-                self.save_bag_message = "Converting IMU messages..."
-                self.get_logger().info(f'Writing {len(self.imu_data)} IMU messages...')
-                for stamp, imu_values in sorted(self.imu_data.items()):
+                # IMU 데이터
+                self.save_bag_message = 'Converting IMU messages...'
+                rospy.loginfo(f'Writing {len(self.imu_data)} IMU messages...')
+                for stamp_ns, vals in sorted(self.imu_data.items()):
                     msg = Imu()
-                    msg.header.stamp = Time(nanoseconds=stamp).to_msg()
+                    msg.header.stamp = _ns_to_rospy_time(stamp_ns)
                     msg.header.frame_id = 'imu_link'
-                    msg.orientation.x = imu_values[0]
-                    msg.orientation.y = imu_values[1]
-                    msg.orientation.z = imu_values[2]
-                    msg.orientation.w = imu_values[3]
-                    msg.angular_velocity.x = imu_values[4]
-                    msg.angular_velocity.y = imu_values[5]
-                    msg.angular_velocity.z = imu_values[6]
-                    msg.linear_acceleration.x = imu_values[7]
-                    msg.linear_acceleration.y = imu_values[8]
-                    msg.linear_acceleration.z = imu_values[9]
-                    _write(imu_conn, msg, stamp)
+                    msg.orientation.x = vals[0]
+                    msg.orientation.y = vals[1]
+                    msg.orientation.z = vals[2]
+                    msg.orientation.w = vals[3]
+                    msg.angular_velocity.x = vals[4]
+                    msg.angular_velocity.y = vals[5]
+                    msg.angular_velocity.z = vals[6]
+                    msg.linear_acceleration.x = vals[7]
+                    msg.linear_acceleration.y = vals[8]
+                    msg.linear_acceleration.z = vals[9]
+                    bag.write('/imu', msg, msg.header.stamp)
                     update_progress()
 
-                # Write Livox data as PointCloud2
-                if livox_conn:
-                    self.save_bag_message = "Converting LiDAR messages..."
-                    self.get_logger().info(
-                        f'Writing {len(livox_stamps)} Livox messages as PointCloud2...')
-                    for stamp in sorted(livox_stamps):
-                        livox_msg = self.load_livox_data(stamp)
+                # Livox LiDAR 데이터 (PointCloud2로 변환)
+                if livox_stamps:
+                    self.save_bag_message = 'Converting LiDAR messages...'
+                    rospy.loginfo(f'Writing {len(livox_stamps)} Livox frames as PointCloud2...')
+                    for stamp_ns in sorted(livox_stamps):
+                        livox_msg = self.load_livox_data(stamp_ns)
                         if livox_msg:
-                            pc2_msg = _livox_custommsg_to_pointcloud2(livox_msg, stamp)
-                            _write(livox_conn, pc2_msg, stamp)
+                            pc2_msg = _livox_to_pc2(livox_msg, stamp_ns)
+                            bag.write('/livox/lidar', pc2_msg, pc2_msg.header.stamp)
                         update_progress()
 
-                # Write Camera data
-                if cam_stamps and img_conn and caminfo_conn:
-                    self.save_bag_message = "Converting camera messages..."
-                    self.get_logger().info(f'Writing {len(cam_stamps)} camera messages...')
-                    for stamp in sorted(cam_stamps):
-                        cam_data = self.load_camera_data(stamp)
+                # Camera 데이터
+                if cam_stamps:
+                    self.save_bag_message = 'Converting camera messages...'
+                    rospy.loginfo(f'Writing {len(cam_stamps)} camera frames...')
+                    for stamp_ns in sorted(cam_stamps):
+                        cam_data = self.load_camera_data(stamp_ns)
                         if cam_data:
                             img_msg, cam_info_msg = cam_data
-                            _write(img_conn, img_msg, stamp)
-                            _write(caminfo_conn, cam_info_msg, stamp)
+                            bag.write('/camera/color/image', img_msg, img_msg.header.stamp)
+                            bag.write('/camera/color/camera_info',
+                                      cam_info_msg, cam_info_msg.header.stamp)
                         update_progress()
 
             self.save_bag_progress = None
             self.save_bag_message = None
-            self.get_logger().info(f'ROS1 bag save complete: {bag_path}')
+            rospy.loginfo(f'ROS1 bag save complete: {bag_path}')
             return True
 
         except Exception as e:
             self.save_bag_progress = None
             self.save_bag_message = None
-            self.get_logger().error(f'Failed to save ROS1 bag: {str(e)}')
+            rospy.logerr(f'Failed to save ROS1 bag: {str(e)}')
             import traceback
             traceback.print_exc()
             return False
@@ -7207,7 +6620,7 @@ class WebGUINode(Node):
                         'ros1'        — ROS1 .bag 파일 (output.bag)
         """
         if self.save_bag_saving:
-            self.get_logger().warn('Bag save already in progress')
+            rospy.logwarn('Bag save already in progress')
             return False
 
         def _run():
@@ -7257,24 +6670,24 @@ class WebGUINode(Node):
         try:
             # Kill bag playback process if running
             if self.bag_process and self.bag_process.poll() is None:
-                self.get_logger().info(f'Terminating bag playback process PID: {self.bag_process.pid}')
+                rospy.loginfo(f'Terminating bag playback process PID: {self.bag_process.pid}')
                 self.bag_process.terminate()
                 try:
                     self.bag_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    self.get_logger().info('Bag process did not terminate, killing...')
+                    rospy.loginfo('Bag process did not terminate, killing...')
                     self.bag_process.kill()
                 self.bag_process = None
                 self.bag_playing = False
 
             # First try to terminate the subprocess gracefully
             if self.slam_process and self.slam_process.poll() is None:
-                self.get_logger().info(f'Terminating SLAM process PID: {self.slam_process.pid}')
+                rospy.loginfo(f'Terminating SLAM process PID: {self.slam_process.pid}')
                 self.slam_process.terminate()
                 try:
                     self.slam_process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
-                    self.get_logger().info('Process did not terminate, killing...')
+                    rospy.loginfo('Process did not terminate, killing...')
                     self.slam_process.kill()
                 self.slam_process = None
 
@@ -7286,10 +6699,10 @@ class WebGUINode(Node):
             subprocess.run(['pkill', '-9', '-f', 'lt_mapper.launch.py'], check=False,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            self.get_logger().info('SLAM processes killed')
+            rospy.loginfo('SLAM processes killed')
             self.slam_status = "Ready"
         except Exception as e:
-            self.get_logger().error(f'Error killing processes: {str(e)}')
+            rospy.logerr(f'Error killing processes: {str(e)}')
 
 
 # File browser functions
@@ -7304,18 +6717,32 @@ def _workspace_src_candidates():
     """Return likely ROS workspace src directories for sibling package discovery."""
     candidates = []
 
-    def add_candidate(path):
+    def add_candidate(path, prepend=False):
         path = PathLib(path).expanduser()
         if path.exists() and path.is_dir() and path not in candidates:
-            candidates.append(path)
+            if prepend:
+                candidates.insert(0, path)
+            else:
+                candidates.append(path)
 
-    # Source-tree execution: .../localization_ws/src/ros_slam_webui/ros_slam_webui/web_server.py
+    # Highest priority: src dir that contains the running ros_slam_webui package.
+    try:
+        import rospkg
+        pkg_path = PathLib(rospkg.RosPack().get_path('ros_slam_webui'))
+        for parent in (pkg_path, *pkg_path.parents):
+            if parent.name == 'src':
+                add_candidate(parent, prepend=True)
+                break
+    except Exception:
+        pass
+
+    # Source-tree execution: .../<ws>/src/ros_slam_webui/ros_slam_webui/web_server.py
     for parent in PathLib(__file__).resolve().parents:
         if parent.name == 'src':
-            add_candidate(parent)
+            add_candidate(parent, prepend=True)
             break
 
-    # Installed execution: use colcon/ament prefixes to infer .../localization_ws/src.
+    # Installed execution: use colcon/ament prefixes to infer workspace src.
     prefix_env = os.environ.get('COLCON_PREFIX_PATH', '') + os.pathsep + os.environ.get('AMENT_PREFIX_PATH', '')
     for prefix in [p for p in prefix_env.split(os.pathsep) if p]:
         prefix_path = PathLib(prefix).expanduser()
@@ -7324,12 +6751,22 @@ def _workspace_src_candidates():
                 add_candidate(parent.parent / 'src')
                 break
 
+    # Catkin devel/install: infer workspace src from ROS_PACKAGE_PATH.
+    ros_pkg_path = os.environ.get('ROS_PACKAGE_PATH', '')
+    for entry in [p for p in ros_pkg_path.split(os.pathsep) if p]:
+        entry_path = PathLib(entry).expanduser()
+        for parent in (entry_path, *entry_path.parents):
+            if parent.name == 'src':
+                add_candidate(parent)
+                break
+
     cwd = PathLib.cwd()
     for parent in (cwd, *cwd.parents):
         if (parent / 'src').is_dir():
             add_candidate(parent / 'src')
             break
 
+    add_candidate(PathLib.home() / 'catkin_ws' / 'src')
     add_candidate(PathLib.home() / 'localization_ws' / 'src')
     return candidates
 
@@ -7467,7 +6904,17 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed_path = urlparse(self.path)
 
-        if parsed_path.path == '/api/system/info':
+        if parsed_path.path == '/api/ros_version':
+            self.send_json_response({'version': 1})
+            return
+        elif parsed_path.path == '/api/server_config':
+            self.send_json_response({
+                'web_port': self.node.web_port,
+                'pc2_ws_port': self.node.pc2_ws_port,
+                'rosbridge_port': int(rospy.get_param('/rosbridge_websocket/port', 9090)),
+            })
+            return
+        elif parsed_path.path == '/api/system/info':
             total_ram_mb = 0
             cpu_cores = 1
             if _psutil is not None:
@@ -7735,9 +7182,9 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                     # If not in ROS2 format, return as is
                     response = {'success': True, 'config': config_data}
 
-                self.node.get_logger().info(f'Loaded config from: {config_path}')
+                rospy.loginfo(f'Loaded config from: {config_path}')
             except Exception as e:
-                self.node.get_logger().error(f'Failed to load config: {str(e)}')
+                rospy.logerr(f'Failed to load config: {str(e)}')
                 response = {'success': False, 'message': str(e)}
 
         elif parsed_path.path == '/api/slam/save_config_file':
@@ -7835,7 +7282,10 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                                 formatted_list.fa.set_flow_style()
                                 ros_params[param] = formatted_list
                     else:
-                        config_data = convert_to_commented_map(config_params)
+                        if isinstance(config_data, dict):
+                            config_data = convert_to_commented_map(config_params, config_data)
+                        else:
+                            config_data = convert_to_commented_map(config_params)
 
                     # Save with ruamel.yaml
                     with open(config_path, 'w') as f:
@@ -7902,17 +7352,35 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                             allow_unicode=True
                         )
 
-                self.node.get_logger().info(f'Saved config to: {config_path}')
+                rospy.loginfo(f'Saved config to: {config_path}')
                 response = {
                     'success': True,
                     'message': 'Config saved successfully',
                     'path': config_path,
                 }
             except Exception as e:
-                self.node.get_logger().error(f'Failed to save config: {str(e)}')
+                rospy.logerr(f'Failed to save config: {str(e)}')
                 import traceback
                 traceback.print_exc()
                 response = {'success': False, 'message': str(e)}
+
+        elif parsed_path.path == '/api/slam/set_config_file':
+            config_path = data.get('path', '')
+            success, message = self.node.set_slam_config_file(config_path)
+            response = {
+                'success': success,
+                'message': message,
+                'path': message if success else None,
+            }
+
+        elif parsed_path.path == '/api/localization/set_config_file':
+            config_path = data.get('path', '')
+            success, message = self.node.set_localization_config_file(config_path)
+            response = {
+                'success': success,
+                'message': message,
+                'path': message if success else None,
+            }
 
         # File Player API endpoints
         elif parsed_path.path == '/api/player/scan_kitti':
@@ -8163,52 +7631,68 @@ def get_local_ip():
         return "localhost"
 
 
-def run_web_server(node, port=8080):
+def run_web_server(node, port=8880):
+    global _web_server
+
+    if _web_server is not None:
+        rospy.logwarn(f'Web server already running; skipping duplicate start.')
+        return
+
     WebRequestHandler.node = node
 
-    # Determine web directory
+    # Determine web directory using rospkg (ROS1 native)
     web_dir = None
     try:
-        from ament_index_python.packages import get_package_share_directory
-        share_dir = get_package_share_directory('ros_slam_webui')
+        import rospkg
+        rospack = rospkg.RosPack()
+        share_dir = rospack.get_path('ros_slam_webui')
         web_dir = os.path.join(share_dir, 'web')
-        node.get_logger().info(f'Using web directory: {web_dir}')
+        rospy.loginfo(f'Using web directory: {web_dir}')
     except Exception as e:
         # Fallback for development
         web_dir = os.path.join(os.path.dirname(__file__), '..', 'web')
         web_dir = os.path.abspath(web_dir)
-        node.get_logger().info(f'Using fallback web directory: {web_dir}')
+        rospy.loginfo(f'Using fallback web directory: {web_dir}')
 
     # Check if web directory exists
     if not os.path.exists(web_dir):
-        node.get_logger().error(f'Web directory not found: {web_dir}')
+        rospy.logerr(f'Web directory not found: {web_dir}')
         return
 
     # Check if index.html exists
     index_path = os.path.join(web_dir, 'index.html')
     if not os.path.exists(index_path):
-        node.get_logger().error(f'index.html not found: {index_path}')
+        rospy.logerr(f'index.html not found: {index_path}')
         return
 
     WebRequestHandler.web_dir = web_dir
-    global _web_server
-    _web_server = ThreadedHTTPServer(('0.0.0.0', port), WebRequestHandler)
+    try:
+        _web_server = ThreadedHTTPServer(('0.0.0.0', port), WebRequestHandler)
+    except OSError as e:
+        if getattr(e, 'errno', None) == 98:
+            rospy.logerr(_format_port_in_use_error(port, 'web_port'))
+        else:
+            rospy.logerr(f'Failed to start web server on port {port}: {e}')
+        _web_server = None
+        return
 
     # Get local IP for network access
     local_ip = get_local_ip()
 
-    node.get_logger().info(f'======================================')
-    node.get_logger().info(f'Web server started on port {port}')
-    node.get_logger().info(f'Local access:   http://localhost:{port}')
-    node.get_logger().info(f'Network access: http://{local_ip}:{port}')
-    node.get_logger().info(f'======================================')
+    rospy.loginfo(f'======================================')
+    rospy.loginfo(f'Web server started on port {port}')
+    rospy.loginfo(f'Local access:   http://localhost:{port}')
+    rospy.loginfo(f'Network access: http://{local_ip}:{port}')
+    rospy.loginfo(f'======================================')
 
     try:
         _web_server.serve_forever()
     except Exception as e:
-        node.get_logger().error(f'Web server error: {str(e)}')
+        rospy.logerr(f'Web server error: {str(e)}')
     finally:
-        _web_server.server_close()
+        if _web_server is not None:
+            _web_server.server_close()
+            _web_server = None
 
 
 def signal_handler(signum, frame):
@@ -8218,7 +7702,7 @@ def signal_handler(signum, frame):
     signal_name = signal.Signals(signum).name
     logger_msg = f'Received {signal_name}, shutting down gracefully...'
     if _ros_node:
-        _ros_node.get_logger().info(logger_msg)
+        rospy.loginfo(logger_msg)
     else:
         print(logger_msg)
     
@@ -8226,52 +7710,53 @@ def signal_handler(signum, frame):
     if _web_server:
         shutdown_msg = 'Shutting down web server...'
         if _ros_node:
-            _ros_node.get_logger().info(shutdown_msg)
+            rospy.loginfo(shutdown_msg)
         else:
             print(shutdown_msg)
         _web_server.shutdown()
-    
+
     # Clean up ROS node
     if _ros_node:
-        _ros_node.get_logger().info('Cleaning up processes...')
+        rospy.loginfo('Cleaning up processes...')
         _ros_node.kill_slam_processes()
         _ros_node.kill_localization_processes()
-        _ros_node.destroy_node()
-        rclpy.shutdown()
-    
+
     # Exit
     import sys
     sys.exit(0)
 
+
 def main(args=None):
-    global _ros_node
-    
-    rclpy.init(args=args)
+    global _ros_node, _web_server_thread
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
     _ros_node = WebGUINode()
+    web_port = _ros_node.web_port
 
     # Start web server in a separate thread
-    web_thread = threading.Thread(target=run_web_server, args=(_ros_node, 8080), daemon=True)
-    web_thread.start()
+    if _web_server_thread is None or not _web_server_thread.is_alive():
+        _web_server_thread = threading.Thread(
+            target=run_web_server, args=(_ros_node, web_port), daemon=True
+        )
+        _web_server_thread.start()
 
     local_ip = get_local_ip()
-    _ros_node.get_logger().info(f'Web GUI is running with full ROS2 integration.')
-    _ros_node.get_logger().info(f'Open http://localhost:8080 or http://{local_ip}:8080 in your browser.')
+    rospy.loginfo(f'Web GUI is running with full ROS1 integration.')
+    rospy.loginfo(
+        f'Open http://localhost:{web_port} or http://{local_ip}:{web_port} in your browser.'
+    )
 
     try:
-        rclpy.spin(_ros_node)
+        rospy.spin()
     except KeyboardInterrupt:
-        _ros_node.get_logger().info('Keyboard interrupt received')
+        rospy.loginfo('Keyboard interrupt received')
     finally:
-        _ros_node.get_logger().info('Cleaning up...')
+        rospy.loginfo('Cleaning up...')
         _ros_node.kill_slam_processes()
         _ros_node.kill_localization_processes()
-        _ros_node.destroy_node()
-        rclpy.shutdown()
 
 
 if __name__ == '__main__':

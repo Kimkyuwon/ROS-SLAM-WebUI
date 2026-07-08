@@ -8,6 +8,15 @@
     <meta http-equiv="Expires" content="0">
     <title>ROS SLAM WEBUI</title>
     <link rel="stylesheet" href="static/style.css">
+    <!-- Import Map for Three.js (absolute paths required for ES module resolution) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "/static/vendor/three@0.128.0/build/three.module.js",
+            "three/addons/": "/static/vendor/three@0.128.0/examples/jsm/"
+        }
+    }
+    </script>
 </head>
 <body>
     <div class="page-shell">
@@ -18,7 +27,8 @@
             </div>
             <div class="topbar-status">
                 <span class="chip" id="ros-domain-chip">ROS DOMAIN ID: 0</span>
-                <span class="chip chip-soft">Web: 8080</span>
+                <span class="chip chip-soft" id="web-port-chip">Web: 8880</span>
+                <span class="chip chip-soft" id="pc2-ws-port-chip">PC2 WS: 8881</span>
                 <span class="chip chip-soft" id="rosbridge-status-chip">rosbridge: 9090</span>
                 <span class="chip chip-soft" id="latency-indicator">latency: --ms</span>
             </div>
@@ -67,6 +77,15 @@
 
                     <!-- SLAM Live Viewer -->
                     <div id="slam-live-viewer" style="display:none; margin-bottom: 12px;">
+                        <!-- Live OFF 시 접힌 상태 표시: 펼치기 버튼만 노출 -->
+                        <div class="live-viewer-collapsed-bar" id="slam-live-collapsed-bar">
+                            <button class="slam-action-btn live-expand-btn" id="slam-live-expand-btn"
+                                    onclick="slamLiveViewer && slamLiveViewer.setLiveEnabled(true)" title="Live Viewer 열기 (구독/렌더 재개)">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="18 15 12 9 6 15"/>
+                                </svg>
+                            </button>
+                        </div>
                         <div class="slam-viewer-header">
                             <input type="checkbox" id="slam-live-topview-toggle"
                                    onchange="toggleSlamLiveTopView(this.checked)" style="display:none;" />
@@ -90,6 +109,12 @@
                                     </div>
 
                                     <div id="slam-live-viewer-actions">
+                                        <button class="slam-action-btn live-toggle-btn" id="slam-live-toggle-btn"
+                                                onclick="slamLiveViewer && slamLiveViewer.toggleLive()" title="Live Viewer 접기 (구독/렌더 중지)">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                <polyline points="6 9 12 15 18 9"/>
+                                            </svg>
+                                        </button>
                                         <button class="slam-action-btn" id="slam-live-follow-btn"
                                                 onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -400,6 +425,15 @@
 
                     <!-- Localization Live Viewer -->
                     <div id="localization-live-viewer" style="display:none;">
+                        <!-- Live OFF 시 접힌 상태 표시: 펼치기 버튼만 노출 -->
+                        <div class="live-viewer-collapsed-bar" id="loc-live-collapsed-bar">
+                            <button class="slam-action-btn live-expand-btn" id="loc-live-expand-btn"
+                                    onclick="locLiveViewer && locLiveViewer.setLiveEnabled(true)" title="Live Viewer 열기 (구독/렌더 재개)">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="18 15 12 9 6 15"/>
+                                </svg>
+                            </button>
+                        </div>
                         <div class="slam-viewer-header">
                             <input type="checkbox" id="loc-viewer-topview-toggle"
                                    onchange="toggleLocTopView(this.checked)" style="display:none;" />
@@ -411,6 +445,12 @@
                                 <canvas id="loc-viewer-canvas"></canvas>
                                 <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
                                 <div id="loc-viewer-actions">
+                                    <button class="slam-action-btn live-toggle-btn" id="loc-live-toggle-btn"
+                                            onclick="locLiveViewer && locLiveViewer.toggleLive()" title="Live Viewer 접기 (구독/렌더 중지)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <polyline points="6 9 12 15 18 9"/>
+                                        </svg>
+                                    </button>
                                     <button class="slam-action-btn" id="loc-follow-btn"
                                             onclick="locLiveViewer && locLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1543,21 +1583,11 @@
     </div>
 
 
-    <!-- Import Map for Three.js -->
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/"
-        }
-    }
-    </script>
+    <!-- ROSLIB (local vendor) -->
+    <script src="static/vendor/roslib@1.1.0/build/roslib.min.js"></script>
 
-    <!-- ROSLIB -->
-    <script src="https://cdn.jsdelivr.net/npm/roslib@1.1.0/build/roslib.min.js"></script>
-
-    <!-- Plotly.js for Plot visualization -->
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <!-- Plotly.js for Plot visualization (local vendor) -->
+    <script src="static/vendor/plotly-2.27.0.min.js"></script>
 
     <!-- PlotJugglerTree -->
     <script src="static/plot_tree.js"></script>
@@ -1568,43 +1598,56 @@
     <!-- Plot Manager (DataBuffer, PlotlyPlotManager) -->
     <script src="static/plot_manager.js"></script>
     
+    <script src="static/webui_ports.js"></script>
     <script src="static/script.js"></script>
     
-    <!-- Three.js and OrbitControls as ES6 modules -->
+    <!-- Three.js and OrbitControls as ES6 modules (local vendor — offline/navifra compatible) -->
     <script type="module">
-        import * as THREE from 'three';
-        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-        import { PCDLoader } from 'three/addons/loaders/PCDLoader.js';
-        import { Line2 } from 'three/addons/lines/Line2.js';
-        import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-        import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-        import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-        import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
-        
-        // Make THREE and OrbitControls globally available
-        window.THREE = THREE;
-        window.OrbitControls = OrbitControls;
-        window.PCDLoader = PCDLoader;
-        window.Line2 = Line2;
-        window.LineGeometry = LineGeometry;
-        window.LineMaterial = LineMaterial;
-        window.LineSegments2 = LineSegments2;
-        window.LineSegmentsGeometry = LineSegmentsGeometry;
-        window.threeReady = true;
-        window.orbitControlsReady = true;
-        
-        console.log('Three.js and OrbitControls loaded successfully');
-        console.log('THREE:', typeof window.THREE);
-        console.log('OrbitControls:', typeof window.OrbitControls);
-        
-        // Trigger initialization if 3D Viewer is already active
-        if (window.threejsDisplayReady) {
-            window.threejsDisplayReady();
-        }
-        
-        // Also trigger if initialize3DViewer is waiting
-        if (window.waitingForThree) {
-            window.waitingForThree();
+        try {
+            const [
+                THREE,
+                { OrbitControls },
+                { PCDLoader },
+                { Line2 },
+                { LineGeometry },
+                { LineMaterial },
+                { LineSegments2 },
+                { LineSegmentsGeometry },
+            ] = await Promise.all([
+                import('three'),
+                import('three/addons/controls/OrbitControls.js'),
+                import('three/addons/loaders/PCDLoader.js'),
+                import('three/addons/lines/Line2.js'),
+                import('three/addons/lines/LineGeometry.js'),
+                import('three/addons/lines/LineMaterial.js'),
+                import('three/addons/lines/LineSegments2.js'),
+                import('three/addons/lines/LineSegmentsGeometry.js'),
+            ]);
+
+            window.THREE = THREE;
+            window.OrbitControls = OrbitControls;
+            window.PCDLoader = PCDLoader;
+            window.Line2 = Line2;
+            window.LineGeometry = LineGeometry;
+            window.LineMaterial = LineMaterial;
+            window.LineSegments2 = LineSegments2;
+            window.LineSegmentsGeometry = LineSegmentsGeometry;
+            window.threeReady = true;
+            window.orbitControlsReady = true;
+
+            console.log('Three.js and OrbitControls loaded successfully');
+            console.log('THREE:', typeof window.THREE);
+            console.log('OrbitControls:', typeof window.OrbitControls);
+
+            if (window.threejsDisplayReady) {
+                window.threejsDisplayReady();
+            }
+            if (window.waitingForThree) {
+                window.waitingForThree();
+            }
+        } catch (err) {
+            console.error('Three.js module load failed:', err);
+            window.threeLoadError = err;
         }
     </script>
     

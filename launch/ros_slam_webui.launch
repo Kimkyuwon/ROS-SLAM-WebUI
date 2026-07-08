@@ -1,0 +1,18 @@
+<launch>
+  <!-- rosapi: rosbridge getTopics() → /rosapi/topics (Plot/3D Viewer 토픽 목록) -->
+  <!-- ROS1 executable: rosapi_node (not rosapi). globs required or topics list is empty. -->
+  <node pkg="rosapi" type="rosapi_node" name="rosapi" output="screen">
+    <param name="topics_glob" value="[*]"/>
+    <param name="services_glob" value="[*]"/>
+    <param name="params_glob" value="[*]"/>
+  </node>
+  <node pkg="rosbridge_server" type="rosbridge_websocket"
+        name="rosbridge_websocket" output="screen">
+    <param name="port" value="9090"/>
+  </node>
+  <node pkg="ros_slam_webui" type="web_server"
+        name="ros_slam_webui_node" output="screen">
+    <param name="web_port" value="8880"/>
+    <param name="pc2_ws_port" value="8881"/>
+  </node>
+</launch>

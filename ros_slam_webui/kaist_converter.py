@@ -31,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
-from builtin_interfaces.msg import Time
+import rospy
 from sensor_msgs.msg import (
     Image,
     Imu,
@@ -958,12 +958,9 @@ class KaistConverter:
     # 타임스탬프 헬퍼
     # ──────────────────────────────────────────────────────────────
 
-    def _ns_to_time_msg(self, ns: int) -> Time:
-        """나노초 정수를 builtin_interfaces/Time 메시지로 변환한다."""
-        msg = Time()
-        msg.sec = int(ns // 1_000_000_000)
-        msg.nanosec = int(ns % 1_000_000_000)
-        return msg
+    def _ns_to_time_msg(self, ns: int) -> rospy.Time:
+        """나노초 정수를 rospy.Time 메시지로 변환한다."""
+        return rospy.Time(int(ns // 1_000_000_000), int(ns % 1_000_000_000))
 
     def _load_stamp_csv(self, filepath: str) -> list:
         """타임스탬프 CSV 파일을 읽어 나노초 정수 리스트로 반환한다.

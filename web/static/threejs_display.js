@@ -1,5 +1,69 @@
 // Three.js Direct Implementation for PointCloud2 Visualization
 
+// ROS 버전 감지 및 messageType 헬퍼 (script.js와 공유)
+window._rosVersion = (typeof window._rosVersion === 'number') ? window._rosVersion : 1;
+window.getMsgType = window.getMsgType || function getMsgType(ros1, ros2) {
+    return window._rosVersion === 1 ? ros1 : ros2;
+};
+var getMsgType = window.getMsgType;
+
+if (typeof window.getPc2WsPort !== 'function') {
+    window.getPc2WsPort = () => 8881;
+}
+if (typeof window.getWebSocketHost !== 'function') {
+    window.getWebSocketHost = () => window.location.hostname || 'localhost';
+}
+if (typeof window.getPc2WsUrl !== 'function') {
+    window.getPc2WsUrl = (host) => {
+        const h = host || window.getWebSocketHost();
+        return `ws://${h}:${window.getPc2WsPort()}`;
+    };
+}
+
+function _getViewerRosbridgeUrl() {
+    if (typeof getRosbridgeUrl === 'function') {
+        return getRosbridgeUrl();
+    }
+    const hostname = (typeof getWebSocketHost === 'function')
+        ? getWebSocketHost()
+        : (window.location.hostname || 'localhost');
+    return `ws://${hostname}:9090`;
+}
+
+/** plotState.ros 연결이 있으면 3D Viewer에 동기화 (stale 연결 검증 포함) */
+async function _syncViewerRosFromPlotState() {
+    if (!window.plotState || !plotState.ros || !plotState.ros.isConnected) {
+        return false;
+    }
+    const verifyFn = window._verifyRosbridgeAlive;
+    if (typeof verifyFn === 'function') {
+        const alive = await verifyFn(plotState.ros, 2500);
+        if (!alive) {
+            console.warn('[3D Viewer] plotState.ros stale — skip sync');
+            return false;
+        }
+    }
+    viewer3DState.ros = plotState.ros;
+    viewer3DState.rosConnected = true;
+    return true;
+}
+
+/** rosbridge stale 상태 초기화 (script.js initRosbridge에서 호출) */
+function invalidateViewerRosConnection() {
+    viewer3DState.rosConnected = false;
+    if (viewer3DState.ros && window.plotState && plotState.ros === viewer3DState.ros) {
+        viewer3DState.ros = null;
+    }
+}
+window.invalidateViewerRosConnection = invalidateViewerRosConnection;
+
+function _rosNotConnectedHint() {
+    if (typeof getRosNotConnectedHint === 'function') {
+        return getRosNotConnectedHint();
+    }
+    return 'Not connected to ROS. Make sure rosbridge_server is running.';
+}
+
 // =============================================
 // RViz 스타일 색상 팔레트 피커
 // =============================================
@@ -966,49 +1030,108 @@ function animate() {
 
 // Connect to ROS
 function connectToROS() {
-    // Get hostname dynamically for external access
-    const hostname = window.location.hostname || 'localhost';
-    const rosbridgeUrl = `ws://${hostname}:9090`;
-
-    console.log('=== ROS Connection Debug ===');
-    console.log('Attempting to connect to rosbridge...');
-    console.log('WebSocket URL:', rosbridgeUrl);
-    console.log('window.location.hostname:', window.location.hostname);
-    console.log('window.location.href:', window.location.href);
-
-    viewer3DState.ros = new ROSLIB.Ros({
-        url: rosbridgeUrl
-    });
-
-    viewer3DState.ros.on('connection', function() {
-        console.log('✓ Successfully connected to rosbridge:', rosbridgeUrl);
-        viewer3DState.rosConnected = true;
-        if (typeof updateRosbridgeStatusChip === 'function') {
-            updateRosbridgeStatusChip('connected');
+    const doConnect = async () => {
+        if (await _syncViewerRosFromPlotState()) {
+            if (typeof updateRosbridgeStatusChip === 'function') {
+                updateRosbridgeStatusChip('connected');
+            }
+            startBackgroundFrameCollection();
+            return;
         }
-        // ROS 연결 후 백그라운드 TF frame 수집 시작
-        startBackgroundFrameCollection();
-    });
 
-    viewer3DState.ros.on('error', function(error) {
-        console.error('✗ Error connecting to rosbridge:', rosbridgeUrl);
-        console.error('Error details:', error);
-        viewer3DState.rosConnected = false;
-        if (typeof updateRosbridgeStatusChip === 'function') {
-            updateRosbridgeStatusChip('disconnected');
+        if (window.plotState && plotState.ros) {
+            if (plotState.ros.isConnected) {
+                const verifyFn = window._verifyRosbridgeAlive;
+                if (typeof verifyFn === 'function') {
+                    const alive = await verifyFn(plotState.ros, 2500);
+                    if (alive) {
+                        viewer3DState.ros = plotState.ros;
+                        viewer3DState.rosConnected = true;
+                        if (typeof updateRosbridgeStatusChip === 'function') {
+                            updateRosbridgeStatusChip('connected');
+                        }
+                        startBackgroundFrameCollection();
+                        return;
+                    }
+                    console.warn('[3D Viewer] plotState.ros stale — initRosbridge()');
+                }
+            }
+            if (typeof initRosbridge === 'function') {
+                initRosbridge();
+            }
+            plotState.ros.once('connection', () => {
+                viewer3DState.ros = plotState.ros;
+                viewer3DState.rosConnected = true;
+                if (typeof updateRosbridgeStatusChip === 'function') {
+                    updateRosbridgeStatusChip('connected');
+                }
+                startBackgroundFrameCollection();
+            });
+            viewer3DState.ros = plotState.ros;
+            return;
         }
-    });
 
-    viewer3DState.ros.on('close', function() {
-        console.log('✗ Connection to rosbridge closed');
-        viewer3DState.rosConnected = false;
-        console.log('Will retry in 3 seconds...');
-        if (typeof updateRosbridgeStatusChip === 'function') {
-            updateRosbridgeStatusChip('reconnecting');
+        // plotState.ros가 없으면 전역 initRosbridge에 위임 (중복 연결 방지)
+        if (typeof initRosbridge === 'function') {
+            console.log('[3D Viewer] plotState.ros 없음 — initRosbridge() 호출');
+            initRosbridge();
+            if (window.plotState && plotState.ros) {
+                plotState.ros.once('connection', () => {
+                    viewer3DState.ros = plotState.ros;
+                    viewer3DState.rosConnected = true;
+                    if (typeof updateRosbridgeStatusChip === 'function') {
+                        updateRosbridgeStatusChip('connected');
+                    }
+                    startBackgroundFrameCollection();
+                });
+                viewer3DState.ros = plotState.ros;
+            }
+            return;
         }
-        // Try to reconnect after 3 seconds
-        setTimeout(connectToROS, 3000);
-    });
+
+        const rosbridgeUrl = _getViewerRosbridgeUrl();
+
+        console.log('[3D Viewer] ROS connection:', rosbridgeUrl,
+            '| page host:', window.location.hostname);
+
+        viewer3DState.ros = new ROSLIB.Ros({
+            url: rosbridgeUrl
+        });
+
+        viewer3DState.ros.on('connection', function() {
+            console.log('✓ Successfully connected to rosbridge:', rosbridgeUrl);
+            viewer3DState.rosConnected = true;
+            if (typeof updateRosbridgeStatusChip === 'function') {
+                updateRosbridgeStatusChip('connected');
+            }
+            startBackgroundFrameCollection();
+        });
+
+        viewer3DState.ros.on('error', function(error) {
+            console.error('✗ Error connecting to rosbridge:', rosbridgeUrl);
+            console.error('Error details:', error);
+            viewer3DState.rosConnected = false;
+            if (typeof updateRosbridgeStatusChip === 'function') {
+                updateRosbridgeStatusChip('disconnected');
+            }
+        });
+
+        viewer3DState.ros.on('close', function() {
+            console.log('✗ Connection to rosbridge closed');
+            viewer3DState.rosConnected = false;
+            console.log('Will retry in 3 seconds...');
+            if (typeof updateRosbridgeStatusChip === 'function') {
+                updateRosbridgeStatusChip('reconnecting');
+            }
+            setTimeout(connectToROS, 3000);
+        });
+    };
+
+    if (typeof ensureWebuiPortsReady === 'function') {
+        ensureWebuiPortsReady().then(doConnect);
+    } else {
+        doConnect();
+    }
 }
 
 // =============================================
@@ -1836,6 +1959,7 @@ function syncPlayerFilePointCloudSubscriptions(playerPc2Topics) {
  * MulRan direct play(/gt, /tf, /os1_points 등) 포함 모든 File Player 데이터셋에 공통 적용.
  */
 function resetViewerAfterPlayerLoad() {
+    _invalidateViewer3dTopicsCache();
     if (!viewer3DState.scene) {
         viewer3DState.tfFrameTree.clear();
         _allKnownFrames.clear();
@@ -1860,6 +1984,19 @@ function _getPC2StreamWorker() {
     // ── 스트림 워커 결과 수신 (메인 스레드) ──
     _pc2StreamWorker.onmessage = function (ev) {
         const msg = ev.data;
+
+        if (msg.type === 'connected') {
+            console.log('[PC2 Worker] Backend WS connected:', getPc2WsUrl());
+            return;
+        }
+        if (msg.type === 'disconnected') {
+            console.warn('[PC2 Worker] Backend WS disconnected, worker will retry');
+            return;
+        }
+        if (msg.type === 'error') {
+            console.warn('[PC2 Worker] Backend WS error');
+            return;
+        }
 
         // ── JSON 메타데이터 패킷 (Plot 탭용) ──────────────────────────────────
         // Python Backend가 PointCloud2 수신마다 전송:
@@ -1900,7 +2037,7 @@ function _getPC2StreamWorker() {
     // rosbridge(9090) 대신 Python 백엔드가 직접 PointCloud2를 구독하여
     // binary 패킷으로 전달 → JSON/base64 오버헤드 없음
     const hostname = window.location.hostname || 'localhost';
-    _pc2StreamWorker.postMessage({ cmd: 'connect', url: `ws://${hostname}:8081` });
+    _pc2StreamWorker.postMessage({ cmd: 'connect', url: getPc2WsUrl(hostname) });
 
     return _pc2StreamWorker;
 }
@@ -1941,7 +2078,7 @@ function _getImgStreamWorker() {
     };
 
     const hostname = window.location.hostname || 'localhost';
-    _imgStreamWorker.postMessage({ cmd: 'connect', url: `ws://${hostname}:8081` });
+    _imgStreamWorker.postMessage({ cmd: 'connect', url: getPc2WsUrl(hostname) });
 
     return _imgStreamWorker;
 }
@@ -2144,6 +2281,8 @@ function subscribeToPointCloud(topicName) {
         return viewer3DState.topicSubscriptions.get(topicName);
     }
 
+    _ensureViewer3DSceneReady();
+
     console.log('[PC2] Subscribing to topic (StreamWorker):', topicName);
 
     // PC2 frame 래퍼 그룹 (frame_id → fixedFrame 변환 적용 대상)
@@ -2185,7 +2324,26 @@ function subscribeToPointCloud(topicName) {
     };
     viewer3DState.topicSubscriptions.set(topicName, sentinel);
 
+    console.log('[PC2] Subscribe command sent to worker for:', topicName);
     return sentinel;
+}
+
+/**
+ * 3D Viewer scene이 없으면 즉시 초기화 시도 (Add Display 직후 PC2 표시용)
+ */
+function _ensureViewer3DSceneReady() {
+    if (viewer3DState.threeJSInitialized && viewer3DState.scene) {
+        return true;
+    }
+    if (typeof THREE === 'undefined') {
+        console.warn('[Viewer3D] THREE not loaded yet — scene init deferred');
+        return false;
+    }
+    if (typeof initThreeJSDisplay === 'function') {
+        console.log('[Viewer3D] Scene not ready — calling initThreeJSDisplay()');
+        initThreeJSDisplay();
+    }
+    return !!(viewer3DState.threeJSInitialized && viewer3DState.scene);
 }
 
 /**
@@ -2197,6 +2355,8 @@ function subscribeToLivox(topicName) {
     if (viewer3DState.topicSubscriptions.has(topicName)) {
         return viewer3DState.topicSubscriptions.get(topicName);
     }
+
+    _ensureViewer3DSceneReady();
 
     console.log('[Livox] Subscribing to topic (StreamWorker):', topicName);
 
@@ -2242,10 +2402,289 @@ async function waitForROSConnection(timeoutMs = 5000) {
     const startTime = Date.now();
 
     while (!viewer3DState.rosConnected && (Date.now() - startTime) < timeoutMs) {
+        if (await _syncViewerRosFromPlotState()) {
+            return true;
+        }
         await new Promise(resolve => setTimeout(resolve, 100));
     }
 
     return viewer3DState.rosConnected;
+}
+
+function _normalizeTopicTypeForViewer3d(typeName) {
+    if (!typeName || typeof typeName !== 'string') return 'unknown';
+    if (window._rosVersion === 1) return typeName;
+    if (typeName.includes('/msg/')) return typeName;
+    const slashCount = (typeName.match(/\//g) || []).length;
+    if (slashCount === 1) {
+        const parts = typeName.split('/');
+        return `${parts[0]}/msg/${parts[1]}`;
+    }
+    return typeName;
+}
+
+async function _fetchViewer3dTopicsFromBackendApi() {
+    try {
+        const result = await apiCall('/api/recorder/get_topics');
+        if (!result || !result.success || !Array.isArray(result.topics)) {
+            return { topics: [], types: [] };
+        }
+
+        const topics = [];
+        const types = [];
+        result.topics.forEach((entry) => {
+            if (typeof entry === 'string') {
+                topics.push(entry);
+                types.push('unknown');
+                return;
+            }
+            if (!entry || typeof entry !== 'object' || !entry.name) {
+                return;
+            }
+            topics.push(entry.name);
+            types.push(_normalizeTopicTypeForViewer3d(entry.type));
+        });
+        return { topics, types };
+    } catch (error) {
+        console.warn('[Viewer3D] Backend topic fallback failed:', error);
+        return { topics: [], types: [] };
+    }
+}
+
+// Add Display 모달용 토픽 목록 캐시 (rosbridge getTopics 대신 backend 우선)
+let _viewer3dTopicsCache = null;
+const _VIEWER3D_TOPICS_CACHE_TTL_MS = 30000;
+let _viewer3dTopicsInflight = null;
+let _rosTopicsInflight = null;
+
+function _invalidateViewer3dTopicsCache() {
+    _viewer3dTopicsCache = null;
+}
+
+function _topicsFromPlotState() {
+    if (typeof plotState === 'undefined' || !plotState.topics || plotState.topics.length === 0) {
+        return null;
+    }
+    if (!plotState.topicTypes || plotState.topicTypes.size === 0) {
+        return null;
+    }
+    const topics = plotState.topics;
+    const types = topics.map((name) => plotState.topicTypes.get(name) || 'unknown');
+    return { topics: topics.slice(), types: types.slice() };
+}
+
+function _getCachedViewer3dTopics() {
+    if (!_viewer3dTopicsCache) {
+        return null;
+    }
+    if (Date.now() - _viewer3dTopicsCache.fetchedAt > _VIEWER3D_TOPICS_CACHE_TTL_MS) {
+        _viewer3dTopicsCache = null;
+        return null;
+    }
+    return { topics: _viewer3dTopicsCache.topics, types: _viewer3dTopicsCache.types };
+}
+
+function _cacheViewer3dTopics(result) {
+    if (result && result.topics && result.topics.length > 0) {
+        _viewer3dTopicsCache = {
+            topics: result.topics,
+            types: result.types,
+            fetchedAt: Date.now()
+        };
+    }
+    return result;
+}
+
+function _syncViewerRosFromPlotStateQuick() {
+    if (!window.plotState || !plotState.ros || !plotState.ros.isConnected) {
+        return false;
+    }
+    viewer3DState.ros = plotState.ros;
+    viewer3DState.rosConnected = true;
+    return true;
+}
+
+async function _tryRosbridgeGetTopicsQuick(timeoutMs) {
+    const timeout = (typeof timeoutMs === 'number' && timeoutMs > 0) ? timeoutMs : 800;
+    if (!viewer3DState.rosConnected) {
+        _syncViewerRosFromPlotStateQuick();
+    }
+    const ros = viewer3DState.ros;
+    if (!ros || !ros.isConnected) {
+        return { topics: [], types: [] };
+    }
+
+    try {
+        const result = await new Promise((resolve) => {
+            let done = false;
+            const finish = (value) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                resolve(value);
+            };
+            const timer = setTimeout(() => finish({ topics: [], types: [] }), timeout);
+            try {
+                ros.getTopics(
+                    (r) => finish({ topics: (r && r.topics) || [], types: (r && r.types) || [] }),
+                    () => finish({ topics: [], types: [] })
+                );
+            } catch (e) {
+                finish({ topics: [], types: [] });
+            }
+        });
+        return result;
+    } catch (e) {
+        return { topics: [], types: [] };
+    }
+}
+
+/**
+ * Add Display / 토픽 선택 UI용 — backend API 우선, plotState·메모리 캐시 재사용.
+ * rosbridge alive verify 및 긴 연결 대기를 하지 않는다.
+ */
+async function _getViewer3dTopicsForDisplay() {
+    const fromPlot = _topicsFromPlotState();
+    if (fromPlot) {
+        return fromPlot;
+    }
+
+    const cached = _getCachedViewer3dTopics();
+    if (cached) {
+        return cached;
+    }
+
+    if (_viewer3dTopicsInflight) {
+        return _viewer3dTopicsInflight;
+    }
+
+    _viewer3dTopicsInflight = (async () => {
+        try {
+            const backend = await _fetchViewer3dTopicsFromBackendApi();
+            if (backend.topics.length > 0) {
+                console.log('[Viewer3D] Topics loaded via backend API:', backend.topics.length);
+                return _cacheViewer3dTopics(backend);
+            }
+
+            const quick = await _tryRosbridgeGetTopicsQuick(800);
+            if (quick.topics.length > 0) {
+                console.log('[Viewer3D] Topics loaded via quick rosbridge fallback:', quick.topics.length);
+                return _cacheViewer3dTopics(quick);
+            }
+
+            return { topics: [], types: [] };
+        } finally {
+            _viewer3dTopicsInflight = null;
+        }
+    })();
+
+    return _viewer3dTopicsInflight;
+}
+
+function _buildTFTopicListFromRosTopics(topics, types) {
+    const tfTopics = _filterTopicsByMessageType(
+        topics, types, 'tf2_msgs/TFMessage', 'tf2_msgs/msg/TFMessage'
+    );
+    ['/tf', '/tf_static'].forEach(function(defaultTopic) {
+        if (!tfTopics.includes(defaultTopic)) {
+            tfTopics.push(defaultTopic);
+        }
+    });
+    return tfTopics;
+}
+
+async function _getRosTopicsWithFallback() {
+    if (_rosTopicsInflight) {
+        return _rosTopicsInflight;
+    }
+
+    _rosTopicsInflight = _getRosTopicsWithFallbackImpl().finally(() => {
+        _rosTopicsInflight = null;
+    });
+    return _rosTopicsInflight;
+}
+
+async function _getRosTopicsWithFallbackImpl() {
+    if (viewer3DState.rosConnected && viewer3DState.ros) {
+        const verifyFn = window._verifyRosbridgeAlive;
+        if (typeof verifyFn === 'function') {
+            const alive = await verifyFn(viewer3DState.ros, 2000);
+            if (!alive) {
+                console.warn('[Viewer3D] Stale rosbridge — resetting before getTopics');
+                viewer3DState.rosConnected = false;
+                viewer3DState.ros = null;
+                if (typeof initRosbridge === 'function') {
+                    initRosbridge();
+                }
+            }
+        }
+    }
+
+    if (!viewer3DState.rosConnected) {
+        connectToROS();
+        const connected = await waitForROSConnection(3000);
+        if (!connected) {
+            const fallback = await _fetchViewer3dTopicsFromBackendApi();
+            if (fallback.topics.length > 0) {
+                console.warn('[Viewer3D] rosbridge unavailable, using backend topic fallback (rosgraph)');
+                return fallback;
+            }
+            return { topics: [], types: [] };
+        }
+    }
+
+    let topics = [];
+    let types = [];
+
+    try {
+        const result = await new Promise((resolve, reject) => {
+            try {
+                viewer3DState.ros.getTopics(
+                    (r) => resolve(r),
+                    (err) => reject(err)
+                );
+            } catch (err) {
+                reject(err);
+            }
+        });
+        topics = result.topics || [];
+        types = result.types || [];
+    } catch (error) {
+        console.warn('[Viewer3D] ros.getTopics failed:', error);
+        const fallback = await _fetchViewer3dTopicsFromBackendApi();
+        if (fallback.topics.length > 0) {
+            topics = fallback.topics;
+            types = fallback.types;
+            console.warn('[Viewer3D] Using backend topic fallback (rosgraph)');
+            return { topics, types };
+        }
+    }
+
+    if (topics.length === 0) {
+        const fallback = await _fetchViewer3dTopicsFromBackendApi();
+        if (fallback.topics.length > 0) {
+            topics = fallback.topics;
+            types = fallback.types;
+            console.warn('[Viewer3D] Using backend topic fallback (rosgraph)');
+        }
+    }
+
+    return { topics, types };
+}
+
+function _filterTopicsByMessageType(allTopics, allTypes, ...expectedTypes) {
+    const normalizedExpected = new Set(
+        expectedTypes.map((t) => _normalizeTopicTypeForViewer3d(t))
+    );
+    const matched = [];
+    allTopics.forEach((topic, index) => {
+        const type = allTypes[index];
+        const normalized = _normalizeTopicTypeForViewer3d(type);
+        if (normalizedExpected.has(normalized) || expectedTypes.includes(type)) {
+            matched.push(topic);
+        }
+    });
+    return matched;
 }
 
 // Get available PointCloud2 topics
@@ -2290,35 +2729,12 @@ async function getAvailableLivoxTopics() {
  * @returns {Promise<string[]>} sensor_msgs/msg/Image 토픽 목록
  */
 async function getAvailableImageTopics() {
-    if (!viewer3DState.rosConnected) {
-        console.log('[Image] Waiting for ROS connection...');
-        const connected = await waitForROSConnection(5000);
-        if (!connected) {
-            console.warn('[Image] Not connected to ROS after timeout');
-            return [];
-        }
-    }
-
-    return new Promise((resolve) => {
-        viewer3DState.ros.getTopics(function(topics) {
-            const imageTopics = [];
-
-            if (topics.topics && topics.types) {
-                topics.topics.forEach((topic, index) => {
-                    const type = topics.types[index];
-                    if (type === 'sensor_msgs/msg/Image' || type === 'sensor_msgs/Image') {
-                        imageTopics.push(topic);
-                    }
-                });
-            }
-
-            console.log('[Image] Available Image topics:', imageTopics);
-            resolve(imageTopics);
-        }, function(error) {
-            console.error('[Image] Failed to get topics:', error);
-            resolve([]);
-        });
-    });
+    const { topics, types } = await _getViewer3dTopicsForDisplay();
+    const imageTopics = _filterTopicsByMessageType(
+        topics, types, 'sensor_msgs/Image', 'sensor_msgs/msg/Image'
+    );
+    console.log('[Image] Available Image topics:', imageTopics);
+    return imageTopics;
 }
 
 /**
@@ -2566,12 +2982,7 @@ function setupImagePanelResize() {
 async function selectDisplayTopics() {
     console.log('Opening topic selection dialog...');
 
-    // rosbridge 미연결 시 즉시 알림 (5초 대기 없이)
-    if (!viewer3DState.rosConnected) {
-        alert('Not connected to ROS. Make sure rosbridge_server is running:\n\nros2 launch rosbridge_server rosbridge_websocket_launch.xml');
-        return;
-    }
-
+    // PC2 토픽 목록은 Python 백엔드 API 사용 — rosbridge 연결 불필요
     // 버튼 로딩 표시
     const btn = document.getElementById('viewer-add-topic-btn');
     const originalText = btn ? btn.textContent : '';
@@ -4077,7 +4488,7 @@ function subscribeToPath(topicName) {
     const topic = new ROSLIB.Topic({
         ros: viewer3DState.ros,
         name: topicName,
-        messageType: 'nav_msgs/msg/Path',
+        messageType: getMsgType('nav_msgs/Path', 'nav_msgs/msg/Path'),
         throttle_rate: 500,   // 2Hz
         queue_length: 1
     });
@@ -4288,7 +4699,7 @@ function subscribeToOdometry(topicName) {
     const topic = new ROSLIB.Topic({
         ros: viewer3DState.ros,
         name: topicName,
-        messageType: 'nav_msgs/msg/Odometry',
+        messageType: getMsgType('nav_msgs/Odometry', 'nav_msgs/msg/Odometry'),
         throttle_rate: 100,   // 10Hz
         queue_length: 1
     });
@@ -4467,7 +4878,7 @@ function subscribeToLaserScan(topicName) {
     const topic = new ROSLIB.Topic({
         ros: viewer3DState.ros,
         name: topicName,
-        messageType: 'sensor_msgs/msg/LaserScan',
+        messageType: getMsgType('sensor_msgs/LaserScan', 'sensor_msgs/msg/LaserScan'),
         throttle_rate: 100,   // 10Hz
         queue_length: 1
     });
@@ -4559,33 +4970,12 @@ function subscribeToLaserScan(topicName) {
  * @returns {Promise<string[]>} Path 토픽 이름 배열
  */
 async function getAvailablePathTopics() {
-    if (!viewer3DState.rosConnected) {
-        console.log('[Path] Waiting for ROS connection...');
-        const connected = await waitForROSConnection(5000);
-        if (!connected) {
-            console.warn('[Path] Not connected to ROS after timeout');
-            return [];
-        }
-    }
-
-    return new Promise((resolve) => {
-        viewer3DState.ros.getTopics(function(topics) {
-            const pathTopics = [];
-            if (topics.topics && topics.types) {
-                topics.topics.forEach((topic, index) => {
-                    const type = topics.types[index];
-                    if (type === 'nav_msgs/Path' || type === 'nav_msgs/msg/Path') {
-                        pathTopics.push(topic);
-                    }
-                });
-            }
-            console.log('[Path] Available Path topics:', pathTopics);
-            resolve(pathTopics);
-        }, function(error) {
-            console.error('[Path] Failed to get topics:', error);
-            resolve([]);
-        });
-    });
+    const { topics, types } = await _getViewer3dTopicsForDisplay();
+    const pathTopics = _filterTopicsByMessageType(
+        topics, types, 'nav_msgs/Path', 'nav_msgs/msg/Path'
+    );
+    console.log('[Path] Available Path topics:', pathTopics);
+    return pathTopics;
 }
 
 /**
@@ -4593,33 +4983,12 @@ async function getAvailablePathTopics() {
  * @returns {Promise<string[]>} Odometry 토픽 이름 배열
  */
 async function getAvailableOdometryTopics() {
-    if (!viewer3DState.rosConnected) {
-        console.log('[Odom] Waiting for ROS connection...');
-        const connected = await waitForROSConnection(5000);
-        if (!connected) {
-            console.warn('[Odom] Not connected to ROS after timeout');
-            return [];
-        }
-    }
-
-    return new Promise((resolve) => {
-        viewer3DState.ros.getTopics(function(topics) {
-            const odomTopics = [];
-            if (topics.topics && topics.types) {
-                topics.topics.forEach((topic, index) => {
-                    const type = topics.types[index];
-                    if (type === 'nav_msgs/Odometry' || type === 'nav_msgs/msg/Odometry') {
-                        odomTopics.push(topic);
-                    }
-                });
-            }
-            console.log('[Odom] Available Odometry topics:', odomTopics);
-            resolve(odomTopics);
-        }, function(error) {
-            console.error('[Odom] Failed to get topics:', error);
-            resolve([]);
-        });
-    });
+    const { topics, types } = await _getViewer3dTopicsForDisplay();
+    const odomTopics = _filterTopicsByMessageType(
+        topics, types, 'nav_msgs/Odometry', 'nav_msgs/msg/Odometry'
+    );
+    console.log('[Odom] Available Odometry topics:', odomTopics);
+    return odomTopics;
 }
 
 /**
@@ -4627,33 +4996,12 @@ async function getAvailableOdometryTopics() {
  * @returns {Promise<string[]>} LaserScan 토픽 이름 배열
  */
 async function getAvailableLaserScanTopics() {
-    if (!viewer3DState.rosConnected) {
-        console.log('[LaserScan] Waiting for ROS connection...');
-        const connected = await waitForROSConnection(5000);
-        if (!connected) {
-            console.warn('[LaserScan] Not connected to ROS after timeout');
-            return [];
-        }
-    }
-
-    return new Promise((resolve) => {
-        viewer3DState.ros.getTopics(function(topics) {
-            const lsTopics = [];
-            if (topics.topics && topics.types) {
-                topics.topics.forEach((topic, index) => {
-                    const type = topics.types[index];
-                    if (type === 'sensor_msgs/LaserScan' || type === 'sensor_msgs/msg/LaserScan') {
-                        lsTopics.push(topic);
-                    }
-                });
-            }
-            console.log('[LaserScan] Available LaserScan topics:', lsTopics);
-            resolve(lsTopics);
-        }, function(error) {
-            console.error('[LaserScan] Failed to get topics:', error);
-            resolve([]);
-        });
-    });
+    const { topics, types } = await _getViewer3dTopicsForDisplay();
+    const lsTopics = _filterTopicsByMessageType(
+        topics, types, 'sensor_msgs/LaserScan', 'sensor_msgs/msg/LaserScan'
+    );
+    console.log('[LaserScan] Available LaserScan topics:', lsTopics);
+    return lsTopics;
 }
 
 // =============================================
@@ -5000,7 +5348,7 @@ function _pruneExpiredDecayObjects(topicName, newDecaySec) {
  */
 async function selectPathTopics() {
     if (!viewer3DState.rosConnected) {
-        alert('Not connected to ROS. Make sure rosbridge_server is running:\n\nros2 launch rosbridge_server rosbridge_websocket_launch.xml');
+        alert(_rosNotConnectedHint());
         return;
     }
 
@@ -5095,7 +5443,7 @@ function confirmPathTopicSelection() {
  */
 async function selectOdometryTopics() {
     if (!viewer3DState.rosConnected) {
-        alert('Not connected to ROS. Make sure rosbridge_server is running:\n\nros2 launch rosbridge_server rosbridge_websocket_launch.xml');
+        alert(_rosNotConnectedHint());
         return;
     }
 
@@ -5703,7 +6051,7 @@ function _subscribeOneBackgroundTfTopic(config) {
         const topicOpts = {
             ros:           viewer3DState.ros,
             name:          config.name,
-            messageType:   'tf2_msgs/msg/TFMessage',
+            messageType:   getMsgType('tf2_msgs/TFMessage', 'tf2_msgs/msg/TFMessage'),
             throttle_rate: config.throttle !== undefined ? config.throttle : 100,
             queue_length:  config.queue_length !== undefined ? config.queue_length : 3
         };
@@ -5734,12 +6082,15 @@ function _subscribeCoreBackgroundTfTopics() {
 
 function _discoverExtraTfTopicsImpl() {
     if (!viewer3DState.rosConnected) return;
-    viewer3DState.ros.getTopics(function(topics) {
-        if (!topics.topics || !topics.types) return;
+    _getRosTopicsWithFallback().then(function(result) {
+        const topics = result.topics;
+        const types = result.types;
+        if (!topics.length) return;
         const toSubscribe = [];
-        topics.topics.forEach(function(topicName, idx) {
-            const type = topics.types[idx];
-            if ((type === 'tf2_msgs/TFMessage' || type === 'tf2_msgs/msg/TFMessage') &&
+        topics.forEach(function(topicName, idx) {
+            const type = types[idx];
+            const normalized = _normalizeTopicTypeForViewer3d(type);
+            if ((normalized === 'tf2_msgs/msg/TFMessage' || type === 'tf2_msgs/TFMessage') &&
                 !_bgFrameSubs.has(topicName)) {
                 toSubscribe.push(topicName);
             }
@@ -5750,7 +6101,7 @@ function _discoverExtraTfTopicsImpl() {
                 const topic = new ROSLIB.Topic({
                     ros: viewer3DState.ros,
                     name: name,
-                    messageType: 'tf2_msgs/msg/TFMessage',
+                    messageType: getMsgType('tf2_msgs/TFMessage', 'tf2_msgs/msg/TFMessage'),
                     throttle_rate: 100,
                     queue_length: 3
                 });
@@ -5765,7 +6116,7 @@ function _discoverExtraTfTopicsImpl() {
                 console.warn('[BG-TF] Failed to subscribe to', name, e);
             }
         });
-    }, function() {});
+    });
 }
 
 function _scheduleDiscoverExtraTfTopics(delayMs) {
@@ -6120,7 +6471,7 @@ function subscribeToTF(topicName) {
     const topic = new ROSLIB.Topic({
         ros:          viewer3DState.ros,
         name:         topicName,
-        messageType:  'tf2_msgs/msg/TFMessage',
+        messageType:  getMsgType('tf2_msgs/TFMessage', 'tf2_msgs/msg/TFMessage'),
         throttle_rate: 100,   // 최대 10Hz
         queue_length:  1
     });
@@ -6225,39 +6576,10 @@ function toggleTFVisible(topicName, visible) {
  * @returns {Promise<string[]>}
  */
 async function getAvailableTFTopics() {
-    if (!viewer3DState.rosConnected) {
-        console.log('[TF] Waiting for ROS connection...');
-        const connected = await waitForROSConnection(5000);
-        if (!connected) {
-            console.warn('[TF] Not connected to ROS after timeout');
-            return [];
-        }
-    }
-
-    return new Promise(function(resolve) {
-        viewer3DState.ros.getTopics(function(topics) {
-            const tfTopics = [];
-            if (topics.topics && topics.types) {
-                topics.topics.forEach(function(topic, index) {
-                    const type = topics.types[index];
-                    if (type === 'tf2_msgs/TFMessage' || type === 'tf2_msgs/msg/TFMessage') {
-                        tfTopics.push(topic);
-                    }
-                });
-            }
-            // /tf, /tf_static가 발행되지 않더라도 기본값으로 포함
-            ['/tf', '/tf_static'].forEach(function(defaultTopic) {
-                if (!tfTopics.includes(defaultTopic)) {
-                    tfTopics.push(defaultTopic);
-                }
-            });
-            console.log('[TF] Available TF topics:', tfTopics);
-            resolve(tfTopics);
-        }, function(error) {
-            console.error('[TF] Failed to get topics:', error);
-            resolve(['/tf', '/tf_static']);
-        });
-    });
+    const { topics, types } = await _getViewer3dTopicsForDisplay();
+    const tfTopics = _buildTFTopicListFromRosTopics(topics, types);
+    console.log('[TF] Available TF topics:', tfTopics);
+    return tfTopics;
 }
 
 /**
@@ -6265,7 +6587,7 @@ async function getAvailableTFTopics() {
  */
 async function selectTFTopics() {
     if (!viewer3DState.rosConnected) {
-        alert('Not connected to ROS. Make sure rosbridge_server is running:\n\nros2 launch rosbridge_server rosbridge_websocket_launch.xml');
+        alert(_rosNotConnectedHint());
         return;
     }
 
@@ -6452,7 +6774,7 @@ const ADD_DISPLAY_CATEGORIES = [
     },
     {
         type: 'Image',
-        msgType: 'sensor_msgs/msg/Image',
+        msgType: getMsgType('sensor_msgs/Image', 'sensor_msgs/msg/Image'),
         description: 'Displays sensor_msgs/Image topics as live video panels below the 3D view.',
         color: '#ab47bc',
         stateKey: 'selectedImageTopics',
@@ -6461,7 +6783,7 @@ const ADD_DISPLAY_CATEGORIES = [
     },
     {
         type: 'LaserScan',
-        msgType: 'sensor_msgs/msg/LaserScan',
+        msgType: getMsgType('sensor_msgs/LaserScan', 'sensor_msgs/msg/LaserScan'),
         description: 'Displays 2D laser scan data as points in 3D space (RViz LaserScanDisplay style).',
         color: '#00e676',
         stateKey: 'selectedLaserScanTopics',
@@ -6477,11 +6799,6 @@ let _addDisplayTopics = [[], [], [], [], [], [], []];
  * Add Display 통합 다이얼로그 열기 (RViz 스타일)
  */
 async function openAddDisplayModal() {
-    if (!viewer3DState.rosConnected) {
-        alert('Not connected to ROS. Make sure rosbridge_server is running:\n\nros2 launch rosbridge_server rosbridge_websocket_launch.xml');
-        return;
-    }
-
     // fetchTopics 함수 할당 (순환 참조 방지를 위해 런타임에 할당)
     ADD_DISPLAY_CATEGORIES[0].fetchTopics = getAvailablePointCloudTopics;
     ADD_DISPLAY_CATEGORIES[0].subscribeFn = subscribeToPointCloud;
@@ -6502,19 +6819,32 @@ async function openAddDisplayModal() {
     const tree  = document.getElementById('add-display-tree');
     if (!modal || !tree) return;
 
-    // 버튼 로딩 표시
-    const btn = document.getElementById('viewer-add-display-btn');
-    if (btn) { btn.textContent = 'Loading...'; btn.disabled = true; }
-
+    // 모달 즉시 표시 + 로딩 스피너 (rosbridge 연결/검증 대기 없음)
     tree.innerHTML = '<div class="add-display-loading">Loading topics...</div>';
     modal.style.display = 'block';
 
-    // 모든 토픽 타입 병렬 로딩
+    const btn = document.getElementById('viewer-add-display-btn');
+    if (btn) { btn.textContent = 'Loading...'; btn.disabled = true; }
+
     try {
-        const results = await Promise.all(
-            ADD_DISPLAY_CATEGORIES.map(cat => cat.fetchTopics())
-        );
-        _addDisplayTopics = results;
+        // PC2/Livox(backend) + 공통 토픽 목록 1회 조회를 병렬 실행
+        const [pc2Topics, livoxTopics, rosTopicsResult] = await Promise.all([
+            getAvailablePointCloudTopics(),
+            getAvailableLivoxTopics(),
+            _getViewer3dTopicsForDisplay()
+        ]);
+        const topics = rosTopicsResult.topics || [];
+        const types = rosTopicsResult.types || [];
+
+        _addDisplayTopics = [
+            pc2Topics,
+            _filterTopicsByMessageType(topics, types, 'nav_msgs/Path', 'nav_msgs/msg/Path'),
+            _filterTopicsByMessageType(topics, types, 'nav_msgs/Odometry', 'nav_msgs/msg/Odometry'),
+            _buildTFTopicListFromRosTopics(topics, types),
+            livoxTopics,
+            _filterTopicsByMessageType(topics, types, 'sensor_msgs/Image', 'sensor_msgs/msg/Image'),
+            _filterTopicsByMessageType(topics, types, 'sensor_msgs/LaserScan', 'sensor_msgs/msg/LaserScan')
+        ];
     } catch (err) {
         console.error('[AddDisplay] Failed to load topics:', err);
         _addDisplayTopics = [[], [], [], [], [], [], []];
@@ -6634,6 +6964,8 @@ function closeAddDisplayModal() {
  * Add Display 선택 확인: 모든 카테고리의 체크된 토픽 구독/해제 처리
  */
 function confirmAddDisplaySelection() {
+    _ensureViewer3DSceneReady();
+
     ADD_DISPLAY_CATEGORIES.forEach(function(cat, catIdx) {
         const checkboxes = document.querySelectorAll(
             '#add-display-topics-' + catIdx + ' input[type="checkbox"]'

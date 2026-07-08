@@ -32,7 +32,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
-from builtin_interfaces.msg import Time
+import rospy
 
 # 변환(bag 쓰기) 전용 의존성 — 없어도 직접 재생(scan/play)은 정상 동작
 try:
@@ -1151,12 +1151,9 @@ class MulRanConverter:
             z = 0.25 * S
         return float(x), float(y), float(z), float(w)
 
-    def _ns_to_time_msg(self, ns: int) -> Time:
-        """나노초 정수를 builtin_interfaces/Time 메시지로 변환한다."""
-        msg = Time()
-        msg.sec = int(ns // 1_000_000_000)
-        msg.nanosec = int(ns % 1_000_000_000)
-        return msg
+    def _ns_to_time_msg(self, ns: int) -> rospy.Time:
+        """나노초 정수를 rospy.Time 메시지로 변환한다."""
+        return rospy.Time(int(ns // 1_000_000_000), int(ns % 1_000_000_000))
 
     # ──────────────────────────────────────────────────────────────
     # bisect 헬퍼 (nearest stamp 검색)
