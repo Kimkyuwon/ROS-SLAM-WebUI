@@ -8,6 +8,15 @@
     <meta http-equiv="Expires" content="0">
     <title>ROS SLAM WEBUI</title>
     <link rel="stylesheet" href="static/style.css">
+    <!-- Import Map for Three.js (absolute paths required for ES module resolution) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "/static/vendor/three@0.128.0/build/three.module.js",
+            "three/addons/": "/static/vendor/three@0.128.0/examples/jsm/"
+        }
+    }
+    </script>
 </head>
 <body>
     <div class="page-shell">
@@ -18,7 +27,8 @@
             </div>
             <div class="topbar-status">
                 <span class="chip" id="ros-domain-chip">ROS DOMAIN ID: 0</span>
-                <span class="chip chip-soft">Web: 8080</span>
+                <span class="chip chip-soft" id="web-port-chip">Web: 8080</span>
+                <span class="chip chip-soft" id="pc2-ws-port-chip">PC2 WS: 8081</span>
                 <span class="chip chip-soft" id="rosbridge-status-chip">rosbridge: 9090</span>
                 <span class="chip chip-soft" id="latency-indicator">latency: --ms</span>
             </div>
@@ -1543,21 +1553,11 @@
     </div>
 
 
-    <!-- Import Map for Three.js -->
-    <script type="importmap">
-    {
-        "imports": {
-            "three": "https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js",
-            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/jsm/"
-        }
-    }
-    </script>
+    <!-- ROSLIB (local vendor) -->
+    <script src="static/vendor/roslib@1.1.0/build/roslib.min.js"></script>
 
-    <!-- ROSLIB -->
-    <script src="https://cdn.jsdelivr.net/npm/roslib@1.1.0/build/roslib.min.js"></script>
-
-    <!-- Plotly.js for Plot visualization -->
-    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <!-- Plotly.js for Plot visualization (local vendor) -->
+    <script src="static/vendor/plotly-2.27.0.min.js"></script>
 
     <!-- PlotJugglerTree -->
     <script src="static/plot_tree.js"></script>
@@ -1568,43 +1568,56 @@
     <!-- Plot Manager (DataBuffer, PlotlyPlotManager) -->
     <script src="static/plot_manager.js"></script>
     
+    <script src="static/webui_ports.js"></script>
     <script src="static/script.js"></script>
     
-    <!-- Three.js and OrbitControls as ES6 modules -->
+    <!-- Three.js and OrbitControls as ES6 modules (local vendor — offline/navifra compatible) -->
     <script type="module">
-        import * as THREE from 'three';
-        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-        import { PCDLoader } from 'three/addons/loaders/PCDLoader.js';
-        import { Line2 } from 'three/addons/lines/Line2.js';
-        import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
-        import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-        import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
-        import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
-        
-        // Make THREE and OrbitControls globally available
-        window.THREE = THREE;
-        window.OrbitControls = OrbitControls;
-        window.PCDLoader = PCDLoader;
-        window.Line2 = Line2;
-        window.LineGeometry = LineGeometry;
-        window.LineMaterial = LineMaterial;
-        window.LineSegments2 = LineSegments2;
-        window.LineSegmentsGeometry = LineSegmentsGeometry;
-        window.threeReady = true;
-        window.orbitControlsReady = true;
-        
-        console.log('Three.js and OrbitControls loaded successfully');
-        console.log('THREE:', typeof window.THREE);
-        console.log('OrbitControls:', typeof window.OrbitControls);
-        
-        // Trigger initialization if 3D Viewer is already active
-        if (window.threejsDisplayReady) {
-            window.threejsDisplayReady();
-        }
-        
-        // Also trigger if initialize3DViewer is waiting
-        if (window.waitingForThree) {
-            window.waitingForThree();
+        try {
+            const [
+                THREE,
+                { OrbitControls },
+                { PCDLoader },
+                { Line2 },
+                { LineGeometry },
+                { LineMaterial },
+                { LineSegments2 },
+                { LineSegmentsGeometry },
+            ] = await Promise.all([
+                import('three'),
+                import('three/addons/controls/OrbitControls.js'),
+                import('three/addons/loaders/PCDLoader.js'),
+                import('three/addons/lines/Line2.js'),
+                import('three/addons/lines/LineGeometry.js'),
+                import('three/addons/lines/LineMaterial.js'),
+                import('three/addons/lines/LineSegments2.js'),
+                import('three/addons/lines/LineSegmentsGeometry.js'),
+            ]);
+
+            window.THREE = THREE;
+            window.OrbitControls = OrbitControls;
+            window.PCDLoader = PCDLoader;
+            window.Line2 = Line2;
+            window.LineGeometry = LineGeometry;
+            window.LineMaterial = LineMaterial;
+            window.LineSegments2 = LineSegments2;
+            window.LineSegmentsGeometry = LineSegmentsGeometry;
+            window.threeReady = true;
+            window.orbitControlsReady = true;
+
+            console.log('Three.js and OrbitControls loaded successfully');
+            console.log('THREE:', typeof window.THREE);
+            console.log('OrbitControls:', typeof window.OrbitControls);
+
+            if (window.threejsDisplayReady) {
+                window.threejsDisplayReady();
+            }
+            if (window.waitingForThree) {
+                window.waitingForThree();
+            }
+        } catch (err) {
+            console.error('Three.js module load failed:', err);
+            window.threeLoadError = err;
         }
     </script>
     

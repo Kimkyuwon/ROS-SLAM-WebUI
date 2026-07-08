@@ -4,6 +4,24 @@ from glob import glob
 
 package_name = 'ros_slam_webui'
 
+
+def _collect_vendor_data_files():
+    """Install web/static/vendor recursively (Three.js tree, Plotly, ROSLIB)."""
+    vendor_root = os.path.join('web', 'static', 'vendor')
+    if not os.path.isdir(vendor_root):
+        return []
+
+    data_files = []
+    for root, _dirs, files in os.walk(vendor_root):
+        if not files:
+            continue
+        rel = os.path.relpath(root, 'web')
+        dest = os.path.join('share', package_name, rel)
+        src_files = [os.path.join(root, f) for f in files]
+        data_files.append((dest, src_files))
+    return data_files
+
+
 setup(
     name=package_name,
     version='0.0.1',
@@ -15,6 +33,7 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'web'), glob('web/*.*')),
         (os.path.join('share', package_name, 'web/static'), glob('web/static/*.*')),
+        *_collect_vendor_data_files(),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -23,7 +42,6 @@ setup(
     description='ROS SLAM Web UI - Web-based control interface for autonomous robot navigation, SLAM, localization, and visualization',
     license='Apache-2.0',
     tests_require=['pytest'],
-    # scripts 방식 사용 (ROS2 표준)
     scripts=[
         'scripts/web_server',
     ],

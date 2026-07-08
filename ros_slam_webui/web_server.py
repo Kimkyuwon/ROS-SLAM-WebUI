@@ -11,6 +11,7 @@ from nav_msgs.msg import Odometry, Path as NavPath
 from rosgraph_msgs.msg import Clock
 from tf2_msgs.msg import TFMessage
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
+from rclpy.serialization import deserialize_message
 from cv_bridge import CvBridge
 import cv2
 import struct
@@ -1222,6 +1223,14 @@ class PC2WebSocketServer:
     IMG_JPEG_QUALITY = 75      # JPEG 품질 (80 → 75, 화질 유지하며 전송량 절감)
     IMG_MAX_DIM      = 800     # 최대 단변 길이(픽셀): 초과 시 비율 유지 리사이즈
 
+    # Path(nav_msgs/Path) 스트리밍 설정 — burst 방지
+    #   fast_lio 등이 /path를 "누적 전체 경로"로 ~20Hz 발행하면 매 메시지 역직렬화가
+    #   SingleThreadedExecutor spin 스레드의 GIL을 장시간 점유해 다른 콜백(odom relay 등)을
+    #   블로킹한다. raw=True 구독으로 spin 스레드의 역직렬화를 제거하고, throttle을 콜백
+    #   초입에서 선처리해 실제 역직렬화/전송을 5Hz로 제한한다.
+    PATH_THROTTLE_SEC = 0.2    # 5Hz — 누적 경로는 최신 상태만 저빈도로 전송하면 충분
+    PATH_MAX_POSES    = 20000  # pose 상한 (초과 시 stride 다운샘플링)
+
     def __init__(self, ros_node, port: int = 8081):
         self._node = ros_node
         self._port = port
@@ -1613,13 +1622,21 @@ class PC2WebSocketServer:
                 self._path_clients[topic] = set()
             self._path_clients[topic].add(ws)
             if topic not in self._path_subs:
+                # 누적 경로는 최신 메시지만 필요하므로 depth=1 + BEST_EFFORT.
+                # raw=True → spin 스레드에서 역직렬화하지 않고 직렬화 bytes만 전달받아
+                #             GIL 점유(→ 타 콜백 블로킹)를 근본적으로 제거한다.
+                path_qos = QoSProfile(
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                    reliability=ReliabilityPolicy.BEST_EFFORT)
                 sub = self._node.create_subscription(
                     NavPath, topic,
                     lambda m, t=topic: self._on_path(m, t),
-                    1)
+                    path_qos,
+                    raw=True)
                 self._path_subs[topic]      = sub
                 self._path_last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[PathWS] subscribed → {topic}')
+                self._node.get_logger().info(f'[PathWS] subscribed (raw) → {topic}')
 
     def _remove_path_client(self, topic: str, ws):
         with self._lock:
@@ -1633,11 +1650,16 @@ class PC2WebSocketServer:
 
     # ── rclpy 콜백 (Path) ────────────────────────────────────────────────────
 
-    def _on_path(self, msg: NavPath, topic_name: str):
-        """nav_msgs/Path 수신 → throttle → binary PTH 패킷 → asyncio 브로드캐스트."""
+    def _on_path(self, msg, topic_name: str):
+        """nav_msgs/Path(raw bytes) 수신 → throttle 선처리 → binary PTH 패킷 → 브로드캐스트.
+
+        raw=True 구독이므로 msg는 역직렬화된 NavPath가 아니라 직렬화된 bytes다.
+        throttle/backpressure 체크를 콜백 초입에서 먼저 수행해 실제 역직렬화(무거움)는
+        thread pool에서 5Hz로만 실행 → spin 스레드 GIL 부하를 최소화한다.
+        """
         now = time.monotonic()
         with self._lock:
-            if now - self._path_last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+            if now - self._path_last_sent.get(topic_name, 0.0) < self.PATH_THROTTLE_SEC:
                 return
             if self._path_sending.get(topic_name, False):
                 return
@@ -1674,23 +1696,32 @@ class PC2WebSocketServer:
             with self._lock:
                 self._path_sending[topic_name] = False
 
-    def _build_path_payload(self, msg: NavPath, topic_name: str) -> bytes | None:
-        """nav_msgs/Path → PTH binary 패킷 생성.
+    def _build_path_payload(self, raw, topic_name: str) -> bytes | None:
+        """nav_msgs/Path(raw bytes) → 역직렬화 → PTH binary 패킷 생성.
+
+        thread pool executor에서 실행되므로(spin 스레드 밖) 여기서 역직렬화한다.
+        pose 개수가 PATH_MAX_POSES를 초과하면 stride 다운샘플링으로 상한을 둔다.
 
         Binary 패킷 포맷 (little-endian):
           [3B]  magic = b'PTH'
           [1B]  version = 1
           [4B]  uint32  topic_name 바이트 길이
           [4B]  uint32  frame_id 바이트 길이
-          [4B]  uint32  total_pose_count
+          [4B]  uint32  pose_count (다운샘플링 후)
           [N B] topic_name (UTF-8)
           [M B] frame_id  (UTF-8)
           [count*12 B] XYZ float32 interleaved (x0,y0,z0, x1,y1,z1, ...)
         """
         try:
+            msg = deserialize_message(raw, NavPath)
             poses = msg.poses
             if not poses:
                 return None
+            # pose 상한 decimation: 누적 경로가 매우 길어지면 stride로 솎아낸다.
+            total = len(poses)
+            if total > self.PATH_MAX_POSES:
+                step = (total + self.PATH_MAX_POSES - 1) // self.PATH_MAX_POSES
+                poses = poses[::step]
             topic_b = topic_name.encode('utf-8')
             frame_b = (msg.header.frame_id or '').encode('utf-8')
             n = len(poses)
@@ -2484,7 +2515,9 @@ class WebGUINode(Node):
 
         # ── PC2 Binary WebSocket 서버 (포트 8081) ─────────────────────────────
         # rosbridge를 우회해 PointCloud2를 Python에서 직접 처리 후 binary 전송
-        self.pc2_ws_server = PC2WebSocketServer(self, port=8081)
+        self.web_port = 8080
+        self.pc2_ws_port = 8081
+        self.pc2_ws_server = PC2WebSocketServer(self, port=self.pc2_ws_port)
         self.pc2_ws_server.start()
 
         # ── KITTI 변환기 상태 ──────────────────────────────────────────────────
@@ -7467,7 +7500,17 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed_path = urlparse(self.path)
 
-        if parsed_path.path == '/api/system/info':
+        if parsed_path.path == '/api/ros_version':
+            self.send_json_response({'version': 2})
+            return
+        elif parsed_path.path == '/api/server_config':
+            self.send_json_response({
+                'web_port': getattr(self.node, 'web_port', 8080),
+                'pc2_ws_port': getattr(self.node, 'pc2_ws_port', 8081),
+                'rosbridge_port': 9090,
+            })
+            return
+        elif parsed_path.path == '/api/system/info':
             total_ram_mb = 0
             cpu_cores = 1
             if _psutil is not None:
