@@ -2747,65 +2747,6 @@ h3 {
     transform: scale(0.93);
 }
 
-/* Live 접기(collapse) 버튼 — 아이콘 전용, ON 상태일 때 활성색 */
-.live-toggle-btn.active {
-    background: rgba(111, 227, 180, 0.2);
-    border-color: rgba(111, 227, 180, 0.6);
-    color: #6fe3b4;
-}
-
-.live-toggle-btn.active:hover {
-    background: rgba(111, 227, 180, 0.32);
-    border-color: rgba(111, 227, 180, 0.75);
-    color: #6fe3b4;
-}
-
-/* Live Viewer 접힘/펼침 — OFF 시 뷰어를 접고 "펼치기" 버튼만 노출 */
-.live-viewer-collapsed-bar {
-    display: none;
-}
-
-#slam-live-viewer.collapsed .slam-viewer-header,
-#slam-live-viewer.collapsed .loc-live-viewer-layout,
-#localization-live-viewer.collapsed .slam-viewer-header,
-#localization-live-viewer.collapsed .loc-live-viewer-layout {
-    display: none;
-}
-
-#slam-live-viewer.collapsed .live-viewer-collapsed-bar,
-#localization-live-viewer.collapsed .live-viewer-collapsed-bar {
-    align-items: center;
-    display: flex;
-    justify-content: center;
-    padding: 10px 0;
-}
-
-/* Live 펼치기(expand) 버튼 — 아이콘 전용, 액션 버튼과 동일 톤 */
-.live-expand-btn {
-    align-items: center;
-    background: rgba(0, 0, 0, 0.55);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px;
-    color: #ccc;
-    cursor: pointer;
-    display: flex;
-    height: 30px;
-    justify-content: center;
-    padding: 0;
-    transition: background 0.2s, color 0.2s, border-color 0.2s;
-    width: 30px;
-}
-
-.live-expand-btn:hover {
-    background: rgba(74, 214, 255, 0.18);
-    border-color: rgba(74, 214, 255, 0.5);
-    color: #fff;
-}
-
-.live-expand-btn:active {
-    transform: scale(0.93);
-}
-
 /* 풀스크린 전용 토글 버튼 (기본 숨김, 풀스크린 진입 시에만 표시) */
 .slam-fs-toggle-btn,
 .loc-fs-toggle-btn {

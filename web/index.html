@@ -77,20 +77,8 @@
 
                     <!-- SLAM Live Viewer -->
                     <div id="slam-live-viewer" style="display:none; margin-bottom: 12px;">
-                        <!-- Live OFF 시 접힌 상태 표시: 펼치기 버튼만 노출 -->
-                        <div class="live-viewer-collapsed-bar" id="slam-live-collapsed-bar">
-                            <button class="slam-action-btn live-expand-btn" id="slam-live-expand-btn"
-                                    onclick="slamLiveViewer && slamLiveViewer.setLiveEnabled(true)" title="Live Viewer 열기 (구독/렌더 재개)">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <polyline points="18 15 12 9 6 15"/>
-                                </svg>
-                            </button>
-                        </div>
-                        <div class="slam-viewer-header">
-                            <input type="checkbox" id="slam-live-topview-toggle"
-                                   onchange="toggleSlamLiveTopView(this.checked)" style="display:none;" />
-                            <button onclick="resetSlamLiveViewer()" class="small-button">Reset View</button>
-                        </div>
+                        <input type="checkbox" id="slam-live-topview-toggle"
+                               onchange="toggleSlamLiveTopView(this.checked)" style="display:none;" />
                         <div class="loc-live-viewer-layout">
                             <div class="loc-viewer-canvas-panel">
                                 <div id="slam-live-canvas-container">
@@ -109,10 +97,11 @@
                                     </div>
 
                                     <div id="slam-live-viewer-actions">
-                                        <button class="slam-action-btn live-toggle-btn" id="slam-live-toggle-btn"
-                                                onclick="slamLiveViewer && slamLiveViewer.toggleLive()" title="Live Viewer 접기 (구독/렌더 중지)">
+                                        <button class="slam-action-btn" id="slam-live-reset-btn"
+                                                onclick="resetSlamLiveViewer()" title="Reset View">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <polyline points="6 9 12 15 18 9"/>
+                                                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                                <polyline points="9 22 9 12 15 12 15 22"/>
                                             </svg>
                                         </button>
                                         <button class="slam-action-btn" id="slam-live-follow-btn"
@@ -425,30 +414,19 @@
 
                     <!-- Localization Live Viewer -->
                     <div id="localization-live-viewer" style="display:none;">
-                        <!-- Live OFF 시 접힌 상태 표시: 펼치기 버튼만 노출 -->
-                        <div class="live-viewer-collapsed-bar" id="loc-live-collapsed-bar">
-                            <button class="slam-action-btn live-expand-btn" id="loc-live-expand-btn"
-                                    onclick="locLiveViewer && locLiveViewer.setLiveEnabled(true)" title="Live Viewer 열기 (구독/렌더 재개)">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                    <polyline points="18 15 12 9 6 15"/>
-                                </svg>
-                            </button>
-                        </div>
-                        <div class="slam-viewer-header">
-                            <input type="checkbox" id="loc-viewer-topview-toggle"
-                                   onchange="toggleLocTopView(this.checked)" style="display:none;" />
-                            <button onclick="resetLocViewer()" class="small-button">Reset View</button>
-                        </div>
+                        <input type="checkbox" id="loc-viewer-topview-toggle"
+                               onchange="toggleLocTopView(this.checked)" style="display:none;" />
                         <div class="loc-live-viewer-layout">
                         <div class="loc-viewer-canvas-panel">
                             <div id="loc-viewer-canvas-container">
                                 <canvas id="loc-viewer-canvas"></canvas>
                                 <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
                                 <div id="loc-viewer-actions">
-                                    <button class="slam-action-btn live-toggle-btn" id="loc-live-toggle-btn"
-                                            onclick="locLiveViewer && locLiveViewer.toggleLive()" title="Live Viewer 접기 (구독/렌더 중지)">
+                                    <button class="slam-action-btn" id="loc-reset-btn"
+                                            onclick="resetLocViewer()" title="Reset View">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                            <polyline points="6 9 12 15 18 9"/>
+                                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                            <polyline points="9 22 9 12 15 12 15 22"/>
                                         </svg>
                                     </button>
                                     <button class="slam-action-btn" id="loc-follow-btn"
@@ -1599,7 +1577,7 @@
     <script src="static/plot_manager.js"></script>
     
     <script src="static/webui_ports.js"></script>
-    <script src="static/script.js"></script>
+    <script src="static/script.js?v=20260709d"></script>
     
     <!-- Three.js and OrbitControls as ES6 modules (local vendor — offline/navifra compatible) -->
     <script type="module">

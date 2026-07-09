@@ -1002,8 +1002,12 @@ class PC2WebSocketServer:
       { "cmd": "unsubscribe", "topic": "/ouster/points" }
     """
 
-    MAX_POINTS   = 50_000   # 다운샘플링 상한
+    MAX_POINTS   = 30_000   # 일반 PC2 다운샘플링 상한
+    CLOUD_REGISTERED_MAX_POINTS = 12_000
     THROTTLE_SEC = 0.05     # 최대 20Hz (50 ms) — binary 전송 ~600KB이므로 충분
+    # /cloud_registered 전용: 브라우저 map_accumulator가 0.3m 복셀을 하므로
+    # 서버는 가벼운 step만 적용 (np.unique 복셀은 CPU를 수백 ms 점유해 analytics max time 악화)
+    CLOUD_REGISTERED_THROTTLE_SEC = 0.1  # 10Hz — 누적 맵용이라 20Hz 불필요
 
     # PointCloud2 field datatype → numpy dtype 매핑
     _DTYPE = {
@@ -1025,7 +1029,7 @@ class PC2WebSocketServer:
     #   지연된다. 아래 설정으로 (1) 수신 rate 제한, (2) 역직렬화 없이 raw 버퍼에서
     #   좌표만 벡터 추출, (3) pose 상한 을 적용해 부하를 상수화한다.
     PATH_THROTTLE_SEC = 0.2    # 5Hz — 경로 시각화에 충분, 역직렬화/전송 부하 1/4 감소
-    PATH_MAX_POSES    = 20_000 # pose 상한: 초과 시 균등 decimation (payload/메모리 상한)
+    PATH_MAX_POSES    = 8000   # pose 상한 (초과 시 stride 다운샘플링)
     PATH_BUFF_SIZE    = 8 * 1024 * 1024  # AnyMsg 수신 버퍼(누적 경로 대비 여유)
 
     def __init__(self, ros_node, port: int = 8881):
@@ -1706,19 +1710,19 @@ class PC2WebSocketServer:
         ArrayBuffer → binary 핸들러, string → JSON 핸들러로 자동 분리된다.
         """
         now = time.monotonic()
+        throttle = (self.CLOUD_REGISTERED_THROTTLE_SEC
+                     if topic_name == '/cloud_registered' else self.THROTTLE_SEC)
         with self._lock:
-            if now - self._last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+            if now - self._last_sent.get(topic_name, 0.0) < throttle:
                 return
             # 이전 브로드캐스트가 완료되지 않았으면 skip (asyncio 큐 누적 방지)
             if self._pc2_sending.get(topic_name, False):
                 return
+            clients = self._clients.get(topic_name, set()).copy()
+            if not clients:
+                return
             self._last_sent[topic_name] = now
             self._pc2_sending[topic_name] = True
-            clients = self._clients.get(topic_name, set()).copy()
-        if not clients:
-            with self._lock:
-                self._pc2_sending[topic_name] = False
-            return
 
         # ── 1) JSON 메타데이터 패킷 (헤더 스탬프 등) ────────────────────────
         stamp = msg.header.stamp
@@ -1733,7 +1737,7 @@ class PC2WebSocketServer:
 
         # ── 2) _build_payload + broadcast를 asyncio coroutine으로 위임 ────────
         # _build_payload(numpy heavy)를 run_in_executor로 실행해
-        # rclpy 콜백 스레드 블로킹을 제거하고, 완료 후 _pc2_sending 플래그를 해제한다.
+        # rospy 콜백 스레드 블로킹을 제거하고, 완료 후 _pc2_sending 플래그를 해제한다.
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
@@ -2066,25 +2070,16 @@ class PC2WebSocketServer:
             if n == 0:
                 return None
 
-            # 다운샘플링: /cloud_registered는 복셀(0.4m), 나머지는 균등 step
-            if topic_name == '/cloud_registered':
-                xyz_valid = np.column_stack([x, y, z]).astype(np.float32)
-                voxel_coords = np.floor(xyz_valid / 0.4).astype(np.int32)
-                _, unique_idx = np.unique(voxel_coords, axis=0, return_index=True)
-                sel_idx = np.sort(unique_idx)
-                extra_step = max(1, len(sel_idx) // self.MAX_POINTS)
-                sel_idx = sel_idx[::extra_step]
-                x = xyz_valid[sel_idx, 0]
-                y = xyz_valid[sel_idx, 1]
-                z = xyz_valid[sel_idx, 2]
-                n_out = len(x)
-                subsample = lambda arr_v: arr_v[sel_idx]
-            else:
-                # 균등 step 다운샘플링
-                step = max(1, n // self.MAX_POINTS)
-                x, y, z = x[::step], y[::step], z[::step]
-                n_out = len(x)
-                subsample = lambda arr_v, _s=step, _n=n_out: arr_v[::_s][:_n]
+            # 균등 step 다운샘플링 (모든 PC2 토픽 동일)
+            # /cloud_registered의 np.unique 복셀은 제거함:
+            #   - 브라우저 map_accumulator_worker가 0.3m 전역 복셀(centroid)을 수행
+            #   - 서버 np.unique(axis=0)는 대용량에서 GIL을 수백 ms 점유 → analytics max time 악화
+            max_pts = (self.CLOUD_REGISTERED_MAX_POINTS
+                       if topic_name == '/cloud_registered' else self.MAX_POINTS)
+            step = max(1, n // max_pts)
+            x, y, z = x[::step], y[::step], z[::step]
+            n_out = len(x)
+            subsample = lambda arr_v, _s=step, _n=n_out: arr_v[::_s][:_n]
 
             xyz = np.column_stack([x, y, z]).astype(np.float32)
 
