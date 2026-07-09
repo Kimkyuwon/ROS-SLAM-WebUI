@@ -1030,6 +1030,7 @@ class PC2WebSocketServer:
     #   좌표만 벡터 추출, (3) pose 상한 을 적용해 부하를 상수화한다.
     PATH_THROTTLE_SEC = 0.2    # 5Hz — 경로 시각화에 충분, 역직렬화/전송 부하 1/4 감소
     PATH_MAX_POSES    = 8000   # pose 상한 (초과 시 stride 다운샘플링)
+    LASER_MAP_THROTTLE_SEC = 1.0  # 1Hz — /Laser_map latched broadcast
     PATH_BUFF_SIZE    = 8 * 1024 * 1024  # AnyMsg 수신 버퍼(누적 경로 대비 여유)
 
     def __init__(self, ros_node, port: int = 8881):
@@ -1080,6 +1081,7 @@ class PC2WebSocketServer:
         self._latched_clients: dict = {}     # topic → set[websocket]
         self._latched_cache: dict = {}       # topic → bytes  (마지막 binary payload)
         self._latched_meta_cache: dict = {}  # topic → str    (마지막 JSON meta)
+        self._laser_map_last_broadcast = 0.0  # /Laser_map 마지막 broadcast 단조시각
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -1334,6 +1336,12 @@ class PC2WebSocketServer:
             clients = self._latched_clients.get(topic_name, set()).copy()
         if not clients:
             return
+        if topic_name == '/Laser_map':
+            now = time.monotonic()
+            with self._lock:
+                if now - self._laser_map_last_broadcast < self.LASER_MAP_THROTTLE_SEC:
+                    return
+                self._laser_map_last_broadcast = now
         stamp = msg.header.stamp
         meta_json = json.dumps({
             'type':          'pc2meta',
@@ -6177,6 +6185,9 @@ class WebGUINode:
 
     def get_bag_state(self):
         """Get current bag player state"""
+        bag_type = None
+        if self.bag_path:
+            bag_type = 'ros1' if self.bag_path.endswith('.bag') else 'ros2'
         return {
             'path': self.bag_path,
             'playing': self.bag_playing,
@@ -6186,6 +6197,8 @@ class WebGUINode:
             'duration': self.bag_duration,
             'current_time': self.bag_current_time,
             'loop': self.bag_player_loop,
+            'bag_type': bag_type,
+            'playback_rate': self.bag_playback_rate,
         }
 
     def playback_worker(self):
