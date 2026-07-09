@@ -1263,6 +1263,7 @@ class PC2WebSocketServer:
     #   raw=True + 콜백 초입 throttle로 실제 역직렬화/전송만 저빈도로 수행.
     PATH_THROTTLE_SEC = 0.5    # 2Hz — 누적 경로는 최신 상태만 저빈도 전송
     PATH_MAX_POSES    = 8000   # pose 상한 (초과 시 stride 다운샘플링)
+    LASER_MAP_THROTTLE_SEC = 1.0  # 1Hz — /Laser_map latched broadcast
 
     def __init__(self, ros_node, port: int = 8081):
         self._node = ros_node
@@ -1315,6 +1316,7 @@ class PC2WebSocketServer:
         self._latched_clients: dict = {}     # topic → set[websocket]
         self._latched_cache: dict = {}       # topic → bytes  (마지막 binary payload)
         self._latched_meta_cache: dict = {}  # topic → str    (마지막 JSON meta)
+        self._laser_map_last_broadcast = 0.0  # /Laser_map 마지막 broadcast 단조시각
 
     # ── 공개 API ─────────────────────────────────────────────────────────────
 
@@ -1626,6 +1628,12 @@ class PC2WebSocketServer:
             clients = self._latched_clients.get(topic_name, set()).copy()
         if not clients:
             return
+        if topic_name == '/Laser_map':
+            now = time.monotonic()
+            with self._lock:
+                if now - self._laser_map_last_broadcast < self.LASER_MAP_THROTTLE_SEC:
+                    return
+                self._laser_map_last_broadcast = now
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
@@ -6702,6 +6710,9 @@ class WebGUINode(Node):
 
     def get_bag_state(self):
         """Get current bag player state"""
+        bag_type = None
+        if self.bag_path:
+            bag_type = 'ros1' if self.bag_path.endswith('.bag') else 'ros2'
         return {
             'path': self.bag_path,
             'playing': self.bag_playing,
@@ -6711,6 +6722,8 @@ class WebGUINode(Node):
             'duration': self.bag_duration,
             'current_time': self.bag_current_time,
             'loop': self.bag_player_loop,
+            'bag_type': bag_type,
+            'playback_rate': self.bag_playback_rate,
         }
 
     def playback_worker(self):

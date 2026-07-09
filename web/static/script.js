@@ -649,6 +649,26 @@ async function updateSlamState() {
             }
         }
 
+        // 서버 실행 상태 기준 Live Viewer·Analytics 복원 (새로고침/다른 기기, 탭 무관)
+        if (!window._slamStopping && !window._slamSaving && !window._slamMapJustSaved) {
+            if (state.is_running) {
+                if (typeof slamLiveViewer !== 'undefined' && !slamLiveViewer._visible) {
+                    slamLiveViewer.show();
+                }
+                if (typeof slamAnalyticsDashboard !== 'undefined') {
+                    const dashEl = document.getElementById('slam-analytics-dashboard');
+                    if (dashEl && dashEl.style.display === 'none') {
+                        slamAnalyticsDashboard.show();
+                        slamAnalyticsDashboard.subscribe();
+                    }
+                }
+            } else {
+                if (typeof slamLiveViewer !== 'undefined' && slamLiveViewer._visible && !window._slamLiveViewerHoldOpen) {
+                    slamLiveViewer.hide();
+                }
+            }
+        }
+
         // Update LiDAR SLAM status (only if LiDAR SLAM tab is active)
         const lidarSlamStatus = domCache.get('lidar-slam-status');
         if (lidarSlamStatus) {
@@ -656,18 +676,10 @@ async function updateSlamState() {
             if (lidarSlamTab && lidarSlamTab.classList.contains('active')) {
                 // 페이지 재진입 시 Save Map 결과가 이미 완료된 상태면 뷰어 복원
                 _maybeRestoreSaveMapViewer();
-                // 재진입 복원: SLAM Live Viewer (_slamStopping 중에는 재표시 차단)
                 // SLAM 미실행 상태면 _slamSaving 플래그 자동 해제 (stale flag 방지)
                 if (!state.is_running) {
                     window._slamSaving = false;
                     window._slamMapJustSaved = false; // SLAM 중단 시 플래그 해제
-                }
-                if (typeof slamLiveViewer !== 'undefined' && !window._slamStopping && !window._slamSaving && !window._slamMapJustSaved) {
-                    if (state.is_running && !slamLiveViewer._visible) {
-                        slamLiveViewer.show();
-                    } else if (!state.is_running && slamLiveViewer._visible && !window._slamLiveViewerHoldOpen) {
-                        slamLiveViewer.hide();
-                    }
                 }
                 // Determine status based on SLAM state
                 let statusText = 'Ready';
@@ -695,6 +707,83 @@ async function updateSlamState() {
 }
 
 // Bag Player Functions
+
+/** bag load/get_info 응답을 UI·bagPlayerState에 반영 */
+function applyBagPlayerInfo(path, result, opts = {}) {
+    const { resetSlider = false, selectedTopicsOverride = null } = opts;
+
+    if (path) {
+        const bagDir = domCache.get('bag-directory');
+        if (bagDir) bagDir.value = path;
+    }
+
+    bagPlayerState.availableTopics = result.topics || [];
+    bagPlayerState.bagDuration = result.duration || 0.0;
+    bagPlayerState.bagType = result.bag_type
+        || (path && path.endsWith('.bag') ? 'ros1' : 'ros2');
+
+    if (selectedTopicsOverride && selectedTopicsOverride.length > 0) {
+        bagPlayerState.selectedTopics = selectedTopicsOverride.slice();
+    } else if (bagPlayerState.bagType === 'ros1' && bagPlayerState.availableTopics.length > 0
+            && typeof bagPlayerState.availableTopics[0] === 'object') {
+        bagPlayerState.selectedTopics = bagPlayerState.availableTopics
+            .filter(t => t.publishable)
+            .map(t => t.name);
+    } else {
+        bagPlayerState.selectedTopics = bagPlayerState.availableTopics.map(
+            t => (typeof t === 'object' ? t.name : t)
+        );
+    }
+
+    const isRos1 = bagPlayerState.bagType === 'ros1';
+    const ros1Badge = domCache.get('bag-ros1-badge');
+    const ros2Badge = domCache.get('bag-ros2-badge');
+    const convertToRos2 = domCache.get('convert-to-ros2-btn');
+    const convertToRos1 = domCache.get('convert-to-ros1-btn');
+    if (ros1Badge) ros1Badge.style.display = isRos1 ? 'inline' : 'none';
+    if (ros2Badge) ros2Badge.style.display = !isRos1 ? 'inline' : 'none';
+    if (convertToRos2) convertToRos2.style.display = isRos1 ? 'inline-block' : 'none';
+    if (convertToRos1) convertToRos1.style.display = !isRos1 ? 'inline-block' : 'none';
+    const rateControls = domCache.get('ros1-playback-controls');
+    if (rateControls) rateControls.style.display = 'block';
+
+    if (resetSlider) {
+        updatePlaybackRate(document.getElementById('bag-playback-rate')?.value ?? 10);
+        updateBagTimeLabel(0, bagPlayerState.bagDuration);
+    }
+    updateSelectedTopicsDisplay();
+}
+
+/** 페이지 로드·다른 기기 접속 시 서버 bag player 상태 복원 */
+async function restoreBagPlayerFromServer() {
+    try {
+        const state = await apiCall('/api/bag/state');
+        if (!state || !state.path) return;
+
+        const info = await apiCall('/api/bag/get_info');
+        if (!info || !info.success) return;
+
+        applyBagPlayerInfo(state.path, info, {
+            selectedTopicsOverride: state.selected_topics,
+            resetSlider: false
+        });
+
+        if (state.playback_rate) {
+            bagPlayerState.playbackRate = state.playback_rate;
+            const rateSlider = document.getElementById('bag-playback-rate');
+            if (rateSlider) {
+                rateSlider.value = Math.round(state.playback_rate * 10);
+                updatePlaybackRate(rateSlider.value);
+            }
+        }
+
+        await updateBagState();
+        console.log('[BagPlayer] Restored from server:', state.path);
+    } catch (e) {
+        console.warn('[BagPlayer] restore from server failed:', e);
+    }
+}
+
 async function loadBagFile() {
     openFileBrowser(async (path) => {
         domCache.get('bag-directory').value = path;
@@ -708,47 +797,11 @@ async function loadBagFile() {
             if (typeof resetBagFrameAndTFState === 'function') {
                 resetBagFrameAndTFState();
             }
-            // Get topics, duration and bag_type from result
-            // topics는 string[] (ROS2) 또는 {name, type, publishable}[] (ROS1) 형태일 수 있음
-            bagPlayerState.availableTopics = result.topics || [];
-            bagPlayerState.bagDuration = result.duration || 0.0;
-            bagPlayerState.bagType = result.bag_type || 'ros2';
-
-            // ROS1 bag의 경우 선택 가능한(publishable) 토픽만 기본 선택
-            if (bagPlayerState.bagType === 'ros1' && bagPlayerState.availableTopics.length > 0
-                    && typeof bagPlayerState.availableTopics[0] === 'object') {
-                bagPlayerState.selectedTopics = bagPlayerState.availableTopics
-                    .filter(t => t.publishable)
-                    .map(t => t.name);
-            } else {
-                bagPlayerState.selectedTopics = bagPlayerState.availableTopics.map(
-                    t => (typeof t === 'object' ? t.name : t)
-                );
-            }
+            applyBagPlayerInfo(path, result, { resetSlider: true });
 
             console.log('Loaded topics:', bagPlayerState.availableTopics);
             console.log('Duration:', bagPlayerState.bagDuration, 'seconds');
             console.log('Bag type:', bagPlayerState.bagType);
-
-            // Show/hide ROS1/ROS2 badge, convert button, and playback rate controls
-            const isRos1 = bagPlayerState.bagType === 'ros1';
-            domCache.get('bag-ros1-badge').style.display = isRos1 ? 'inline' : 'none';
-            domCache.get('bag-ros2-badge').style.display = !isRos1 ? 'inline' : 'none';
-            domCache.get('convert-to-ros2-btn').style.display = isRos1 ? 'inline-block' : 'none';
-            domCache.get('convert-to-ros1-btn').style.display = !isRos1 ? 'inline-block' : 'none';
-            // Rate 슬라이더: ROS1 / ROS2 bag 모두 표시
-            const rateControls = domCache.get('ros1-playback-controls');
-            if (rateControls) {
-                rateControls.style.display = 'block';
-            }
-            // 슬라이더 레이블 업데이트 (bag 로드 시 초기화)
-            updatePlaybackRate(document.getElementById('bag-playback-rate')?.value ?? 10);
-
-            // Update time label
-            updateBagTimeLabel(0, bagPlayerState.bagDuration);
-
-            // Update selected topics display
-            updateSelectedTopicsDisplay();
 
             if (bagPlayerState.availableTopics.length === 0) {
                 alert('No topics found in the bag file. The bag might be empty or corrupted.');
@@ -978,8 +1031,16 @@ async function setBagPosition(position) {
 }
 
 async function updateBagState() {
+    const state = await apiCall('/api/bag/state');
+    if (state?.path && state.duration > 0 && bagPlayerState.bagDuration <= 0) {
+        bagPlayerState.bagDuration = state.duration;
+    }
+    const isRos1 = bagPlayerState.bagType === 'ros1'
+        || !!(state?.path && state.path.endsWith('.bag'));
+    if (isRos1) bagPlayerState.bagType = 'ros1';
+
     // ROS1 bag 재생 중이면 /api/bag/ros1_play_status 폴링
-    if (bagPlayerState.bagType === 'ros1') {
+    if (isRos1) {
         const ros1State = await apiCall('/api/bag/ros1_play_status');
         if (ros1State) {
             const { status, elapsed_sec, total_sec } = ros1State;
@@ -1040,19 +1101,17 @@ async function updateBagState() {
                 }
             }
         }
-        // Loop 체크박스 동기화 (ROS1: /api/bag/state에서 loop 조회)
-        const bagState = await apiCall('/api/bag/state');
-        if (bagState && bagState.loop !== undefined) {
+        // Loop 체크박스 동기화
+        if (state && state.loop !== undefined) {
             const loopCb = domCache.get('bag-player-loop');
             if (loopCb) {
-                loopCb.checked = bagState.loop;
+                loopCb.checked = state.loop;
             }
         }
         return;
     }
 
     // ROS2 bag: 기존 폴링 유지
-    const state = await apiCall('/api/bag/state');
     if (state) {
         // Update play button state (슬라이더 리셋 전에 먼저 처리)
         const playButton = domCache.get('bag-play-button');
@@ -3227,12 +3286,19 @@ async function updateLocalizationState() {
                 }
             }
         }
-        // 재진입 복원: locLiveViewer가 선언된 후에만 실행
+        // 재진입 복원: locLiveViewer + Analytics Dashboard
         if (typeof locLiveViewer !== 'undefined') {
-            if (state.is_running && !locLiveViewer._visible) {
-                locLiveViewer.show();
-            } else if (!state.is_running && locLiveViewer._visible) {
-                locLiveViewer.hide();
+            if (state.is_running) {
+                if (!locLiveViewer._visible) locLiveViewer.show();
+                if (typeof locAnalyticsDashboard !== 'undefined') {
+                    const dashEl = document.getElementById('loc-analytics-dashboard');
+                    if (dashEl && dashEl.style.display === 'none') {
+                        locAnalyticsDashboard.show();
+                        locAnalyticsDashboard.subscribe();
+                    }
+                }
+            } else {
+                if (locLiveViewer._visible) locLiveViewer.hide();
             }
         }
     }
@@ -3424,6 +3490,7 @@ async function updateRosDomainId() {
 
 window.addEventListener('load', async () => {
     // Initial state update
+    await restoreBagPlayerFromServer();
     updateSlamState();
     updateLocalizationState();
     updatePlayerState();
@@ -5800,8 +5867,6 @@ class LocalizationLiveViewer {
         this._tfObjects = {};
         this._robotPos = null;   // THREE.Vector3 — updated from base_link TF
         this._followMode = true; // camera follow toggle
-        this._accMapObj    = null;   // accumulated map PointCloud
-        this._mapAccWorker = null;   // map_accumulator_worker instance
         this._mapMesh = null;
         this._mapTexture = null;
         // 레이어 가시성은 메시지 수신 시 자동으로 활성화 (수동 체크박스 제거)
@@ -5903,6 +5968,8 @@ class LocalizationLiveViewer {
             // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신
             if (this._topView && this._orthoCamera) {
                 this._updateOrthoPointSizes();
+            } else {
+                this._ensurePerspectivePointSizes();
             }
             if (this._renderer && this._scene && this._camera) {
                 this._renderer.render(this._scene, this._camera);
@@ -5937,7 +6004,19 @@ class LocalizationLiveViewer {
         };
         update(this._cloudObj);
         update(this._mapObj);
-        update(this._accMapObj);
+    }
+
+    /** Orbit(Perspective) 뷰: sizeAttenuation·월드 크기 복원 (탑뷰 전환 후 잔류 방지) */
+    _ensurePerspectivePointSizes() {
+        const fix = (obj) => {
+            if (!obj || !obj.material || obj.material._baseSize === undefined) return;
+            if (obj.material.sizeAttenuation !== true) {
+                obj.material.sizeAttenuation = true;
+                obj.material.size = obj.material._baseSize;
+            }
+        };
+        fix(this._cloudObj);
+        fix(this._mapObj);
     }
 
     _resizeRenderer() {
@@ -6023,15 +6102,6 @@ class LocalizationLiveViewer {
             this._mapTexture.dispose();
             this._mapTexture = null;
         }
-        if (this._accMapObj) {
-            this._scene.remove(this._accMapObj);
-            if (this._accMapObj.geometry) this._accMapObj.geometry.dispose();
-            if (this._accMapObj.material) this._accMapObj.material.dispose();
-            this._accMapObj = null;
-        }
-        if (this._mapAccWorker) {
-            this._mapAccWorker.postMessage({ cmd: 'clear' });
-        }
     }
 
     async _connectAndSubscribe() {
@@ -6096,7 +6166,6 @@ class LocalizationLiveViewer {
         this._subscribePointCloud('/cloud_registered', 'cloud_registered');
         this._subscribePointCloudLatched('/Laser_map', 'laser_map');
         this._subscribePathBinary('/path');
-        this._initMapAccumulator();
     }
 
     _subscribeRosbridgeTopics() {
@@ -6110,66 +6179,11 @@ class LocalizationLiveViewer {
         this._subscribeRosbridgeTopics();
     }
 
-    _initMapAccumulator() {
-        if (this._mapAccWorker) return;
-        try {
-            this._mapAccWorker = new Worker('/static/map_accumulator_worker.js?v=' + Date.now());
-        } catch (e) {
-            console.warn('[LocalizationLiveViewer] map_accumulator_worker not available:', e);
-            return;
-        }
-
-        this._mapAccWorker.onmessage = (e) => {
-            if (e.data.cmd !== 'flush') return;
-            const THREE = window.THREE;
-            if (!this._scene || !THREE) return;
-            const { positions, colors, count } = e.data;
-            if (count === 0) return;
-
-            if (!this._accMapObj) {
-                const geo = new THREE.BufferGeometry();
-                const mat = new THREE.PointsMaterial({
-                    size: 0.08,
-                    vertexColors: true,
-                    transparent: true,
-                    opacity: 0.6,
-                    depthWrite: false,
-                    sizeAttenuation: true
-                });
-                mat._baseSize = 0.08;
-                this._accMapObj = new THREE.Points(geo, mat);
-                this._accMapObj.frustumCulled = false;
-                this._scene.add(this._accMapObj);
-            }
-
-            const geo = this._accMapObj.geometry;
-            const posLen = count * 3;
-            let posAttr = geo.getAttribute('position');
-            let colAttr = geo.getAttribute('color');
-            if (posAttr && posAttr.array.length >= posLen) {
-                posAttr.array.set(positions);
-                colAttr.array.set(colors);
-                posAttr.needsUpdate = true;
-                colAttr.needsUpdate = true;
-                _syncPointsGeometry(geo, count);
-            } else {
-                geo.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
-                geo.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
-                _syncPointsGeometry(geo, count);
-            }
-            if (this._topView && this._orthoCamera) this._updateOrthoPointSizes();
-        };
-    }
-
     _unsubscribeAll() {
         for (const t of this._subscriptions) {
             try { t.unsubscribe(); } catch (e) { /* ignore */ }
         }
         this._subscriptions = [];
-        if (this._mapAccWorker) {
-            this._mapAccWorker.terminate();
-            this._mapAccWorker = null;
-        }
     }
 
     _parsePC2(msg) {
@@ -6256,8 +6270,8 @@ class LocalizationLiveViewer {
 
         const newCount = parsed.positions.length / 3;
         const existing = (key === 'cloud_registered') ? this._cloudObj : this._mapObj;
-        const pointSize = (key === 'laser_map') ? 0.08 : 0.12;
-        const opacity   = (key === 'laser_map') ? 0.5  : 1.0;
+        const pointSize = (key === 'laser_map') ? 0.2 : 0.25;
+        const opacity   = (key === 'laser_map') ? 0.6  : 1.0;
         const transparent = (key === 'laser_map');
 
         if (existing && existing.geometry) {
@@ -6292,7 +6306,8 @@ class LocalizationLiveViewer {
             sizeAttenuation: !this._topView,
             vertexColors: true,
             transparent,
-            opacity
+            opacity,
+            depthWrite: !transparent
         });
         mat._baseSize = pointSize; // 탑뷰 ortho 보정용 기준 크기 저장
         // 탑뷰 활성 상태에서 새 mesh가 생성되는 경우 즉시 크기 보정
@@ -6323,19 +6338,7 @@ class LocalizationLiveViewer {
             (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe', topic })); },
             (buffer) => {
                 const parsed = viewer._parseBinaryPC2(buffer);
-                if (parsed) {
-                    viewer._updatePointCloud(key, parsed);
-                    if (viewer._mapAccWorker && parsed.positions && parsed.colors) {
-                        const posCopy = new Float32Array(parsed.positions);
-                        const colCopy = new Float32Array(parsed.colors);
-                        const rp = viewer._robotPos;
-                        viewer._mapAccWorker.postMessage(
-                            { cmd: 'addPoints', positions: posCopy, colors: colCopy,
-                              pose: rp ? [rp.x, rp.y, rp.z] : null },
-                            [posCopy.buffer, colCopy.buffer]
-                        );
-                    }
-                }
+                if (parsed) viewer._updatePointCloud(key, parsed);
             }
         );
         this._subscriptions.push(sub);
@@ -6554,11 +6557,6 @@ class LocalizationLiveViewer {
                 if (childId === 'base_link' || childId === 'body') {
                     if (!this._robotPos) this._robotPos = new window.THREE.Vector3();
                     this._robotPos.set(trans.x, trans.y, trans.z);
-                    if (this._mapAccWorker) {
-                        this._mapAccWorker.postMessage({
-                            cmd: 'setPose', pose: [trans.x, trans.y, trans.z]
-                        });
-                    }
                 }
             }
         });
@@ -6748,7 +6746,7 @@ class LocalizationLiveViewer {
             };
             restoreSize(this._cloudObj);
             restoreSize(this._mapObj);
-            restoreSize(this._accMapObj);
+            this._ensurePerspectivePointSizes();
 
             if (this._savedCameraPos) {
                 this._perspCamera.position.copy(this._savedCameraPos);
