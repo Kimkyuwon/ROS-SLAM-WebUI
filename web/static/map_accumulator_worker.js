@@ -2,29 +2,23 @@
 
 // ─────────────────────────────────────────────────────────────────────────
 //  누적 점군(map accumulator) 워커
-//  - VOXEL_SIZE 해상도로 중복 제거하며 /cloud_registered 프레임을 누적
-//  - 공간을 BLOCK_SIZE 격자 블록으로 나눠 관리
-//  - 현재 pose 기준 ACCUM_RANGE_M 반경을 벗어난 블록은 제거(sliding window)
-//    → 누적 점 수가 궤적 길이에 비례해 무한 증가하지 않고 상한이 생겨
-//      GPU 업로드/렌더 latency 가 일정하게 유지됨
+//  - PCL VoxelGrid 방식: floor(x/leaf) 인덱스별 centroid(평균) 누적
+//  - FAST_LIO publish_map crop과 동일: 원본(globalVoxels)은 유지, flush 시에만
+//    pose 기준 ACCUM_RANGE_M 범위로 crop해 표시용 점만 전송
+//  - 영구 삭제는 MAX_POINTS 초과 시 pose에서 먼 복셀부터 (메모리 상한)
 // ─────────────────────────────────────────────────────────────────────────
 
-// ── 조정 가능한 파라미터 ────────────────────────────────────────────────
-const VOXEL_SIZE = 0.15;          // 중복 제거(다운샘플) 해상도 (m)
-const BLOCK_SIZE = 10.0;          // 공간 블록 한 변 길이 (m)
-const ACCUM_RANGE_M = 80.0;       // 현재 pose 기준 누적 유지 반경 (m)
-const UPDATE_INTERVAL_MS = 1000;  // flush + 정리(prune) 주기 (ms)
-const MAX_POINTS = 1500000;       // 안전 상한 (초과 시 먼 블록부터 강제 제거)
+const VOXEL_SIZE = 0.3;           // PCL VoxelGrid leaf size (m)
+const ACCUM_RANGE_M = 60.0;       // 시각화 crop 반경 (m) — 저장소 삭제에 사용하지 않음
+const UPDATE_INTERVAL_MS = 1000;  // flush 주기 (ms)
+const MAX_POINTS = 400000;        // 메모리 상한 (초과 시 먼 복셀부터 강제 제거)
 
-// blockKey -> { cx, cy, voxels:Set<string>, pos:number[], col:number[] }
-const blocks = new Map();
-let totalPoints = 0;
+const RANGE_SQ = ACCUM_RANGE_M * ACCUM_RANGE_M;
+
+// vk -> { sx, sy, sz, count, scr, scg, scb }  (centroid 누적)
+const globalVoxels = new Map();
 let lastFlushTime = 0;
 let lastPose = null;   // [x, y] 마지막으로 알려진 수평 pose
-
-function blockKey(bx, by) {
-    return bx + '_' + by;
-}
 
 function voxelKey(x, y, z) {
     return Math.floor(x / VOXEL_SIZE) + '_' +
@@ -32,71 +26,85 @@ function voxelKey(x, y, z) {
            Math.floor(z / VOXEL_SIZE);
 }
 
-function getBlock(x, y) {
-    const bx = Math.floor(x / BLOCK_SIZE);
-    const by = Math.floor(y / BLOCK_SIZE);
-    const key = blockKey(bx, by);
-    let b = blocks.get(key);
-    if (!b) {
-        b = {
-            cx: (bx + 0.5) * BLOCK_SIZE,   // 블록 중심 (수평 거리 계산용)
-            cy: (by + 0.5) * BLOCK_SIZE,
-            voxels: new Set(),
-            pos: [],
-            col: []
-        };
-        blocks.set(key, b);
-    }
-    return b;
+function pointInRange(x, y) {
+    if (!lastPose) return true;
+    const dx = x - lastPose[0];
+    const dy = y - lastPose[1];
+    return dx * dx + dy * dy <= RANGE_SQ;
 }
 
-// 현재 pose 기준 반경 밖(블록 중심 거리 > ACCUM_RANGE_M + 여유) 블록 제거
-function pruneBlocks() {
-    if (!lastPose) return;
-    const px = lastPose[0], py = lastPose[1];
-    // 블록 중심 기준이므로 블록 크기만큼 여유를 둬서 경계 점 손실 방지
-    const limit = ACCUM_RANGE_M + BLOCK_SIZE;
-    const limitSq = limit * limit;
-    for (const [key, b] of blocks) {
-        const dx = b.cx - px, dy = b.cy - py;
-        if (dx * dx + dy * dy > limitSq) {
-            totalPoints -= b.pos.length / 3;
-            blocks.delete(key);
-        }
+// PCL VoxelGrid::filter — 동일 복셀 내 점들의 centroid·색상 평균 누적
+function accumulatePoint(x, y, z, cr, cg, cb) {
+    const vk = voxelKey(x, y, z);
+    let v = globalVoxels.get(vk);
+    if (!v) {
+        globalVoxels.set(vk, { sx: x, sy: y, sz: z, count: 1, scr: cr, scg: cg, scb: cb });
+        return;
     }
+    v.sx += x;
+    v.sy += y;
+    v.sz += z;
+    v.scr += cr;
+    v.scg += cg;
+    v.scb += cb;
+    v.count++;
 }
 
-// 안전 상한 초과 시 pose 에서 먼 블록부터 제거
+// 메모리 상한 초과 시 pose에서 먼 복셀(centroid 기준)부터 제거
 function enforceCap() {
-    if (totalPoints <= MAX_POINTS || !lastPose) return;
+    if (globalVoxels.size <= MAX_POINTS || !lastPose) return;
     const px = lastPose[0], py = lastPose[1];
     const arr = [];
-    for (const [key, b] of blocks) {
-        const dx = b.cx - px, dy = b.cy - py;
-        arr.push([dx * dx + dy * dy, key, b]);
+    for (const [vk, v] of globalVoxels) {
+        const cx = v.sx / v.count;
+        const cy = v.sy / v.count;
+        const dx = cx - px, dy = cy - py;
+        arr.push([dx * dx + dy * dy, vk]);
     }
-    arr.sort((a, b) => b[0] - a[0]); // 먼 것부터
-    for (let i = 0; i < arr.length && totalPoints > MAX_POINTS; i++) {
-        const b = arr[i][2];
-        totalPoints -= b.pos.length / 3;
-        blocks.delete(arr[i][1]);
+    arr.sort((a, b) => b[0] - a[0]);
+    for (let i = 0; i < arr.length && globalVoxels.size > MAX_POINTS; i++) {
+        globalVoxels.delete(arr[i][1]);
     }
 }
 
+// flush: 저장소는 유지한 채, pose 기준 crop + centroid 출력
 function flush() {
-    let count = 0;
-    for (const b of blocks.values()) count += b.pos.length / 3;
-    if (count === 0) return;
-    const positions = new Float32Array(count * 3);
-    const colors = new Float32Array(count * 3);
-    let o = 0;
-    for (const b of blocks.values()) {
-        positions.set(b.pos, o);
-        colors.set(b.col, o);
-        o += b.pos.length;
+    enforceCap();
+
+    const entries = [];
+    for (const v of globalVoxels.values()) {
+        const x = v.sx / v.count;
+        const y = v.sy / v.count;
+        const z = v.sz / v.count;
+        if (!pointInRange(x, y)) continue;
+        entries.push({
+            pos: [x, y, z],
+            col: [v.scr / v.count, v.scg / v.count, v.scb / v.count]
+        });
     }
-    self.postMessage({ cmd: 'flush', positions, colors, count },
-        [positions.buffer, colors.buffer]);
+
+    const outCount = entries.length;
+    if (outCount === 0) return;
+
+    const positions = new Float32Array(outCount * 3);
+    const colors = new Float32Array(outCount * 3);
+    let o = 0;
+    for (const p of entries) {
+        positions[o]     = p.pos[0];
+        positions[o + 1] = p.pos[1];
+        positions[o + 2] = p.pos[2];
+        colors[o]     = p.col[0];
+        colors[o + 1] = p.col[1];
+        colors[o + 2] = p.col[2];
+        o += 3;
+    }
+
+    self.postMessage({
+        cmd: 'flush',
+        positions: positions,
+        colors: colors,
+        count: outCount
+    });
 }
 
 self.onmessage = function (e) {
@@ -107,31 +115,31 @@ self.onmessage = function (e) {
         if (pose) lastPose = [pose[0], pose[1]];
 
         const n = positions.length / 3;
-        // pose 미확보 시 이번 프레임 중심을 임시 pose 로 사용 (tf 없이도 window 동작)
         if (!lastPose && n > 0) {
             let sx = 0, sy = 0;
-            for (let i = 0; i < n; i++) { sx += positions[i * 3]; sy += positions[i * 3 + 1]; }
+            for (let i = 0; i < n; i++) {
+                sx += positions[i * 3];
+                sy += positions[i * 3 + 1];
+            }
             lastPose = [sx / n, sy / n];
         }
 
         for (let i = 0; i < n; i++) {
-            const x = positions[i * 3];
-            const y = positions[i * 3 + 1];
-            const z = positions[i * 3 + 2];
-            const b = getBlock(x, y);
-            const vk = voxelKey(x, y, z);
-            if (b.voxels.has(vk)) continue;   // 중복 voxel 제거
-            b.voxels.add(vk);
-            b.pos.push(x, y, z);
-            b.col.push(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2]);
-            totalPoints++;
+            accumulatePoint(
+                positions[i * 3],
+                positions[i * 3 + 1],
+                positions[i * 3 + 2],
+                colors[i * 3],
+                colors[i * 3 + 1],
+                colors[i * 3 + 2]
+            );
         }
+
+        enforceCap();
 
         const now = Date.now();
         if (now - lastFlushTime >= UPDATE_INTERVAL_MS) {
             lastFlushTime = now;
-            pruneBlocks();
-            enforceCap();
             flush();
         }
         return;
@@ -139,13 +147,19 @@ self.onmessage = function (e) {
 
     if (cmd === 'setPose') {
         const { pose } = e.data;
-        if (pose) lastPose = [pose[0], pose[1]];
+        if (pose) {
+            lastPose = [pose[0], pose[1]];
+            const now = Date.now();
+            if (now - lastFlushTime >= UPDATE_INTERVAL_MS) {
+                lastFlushTime = now;
+                flush();
+            }
+        }
         return;
     }
 
     if (cmd === 'clear') {
-        blocks.clear();
-        totalPoints = 0;
+        globalVoxels.clear();
         lastPose = null;
         lastFlushTime = 0;
         return;

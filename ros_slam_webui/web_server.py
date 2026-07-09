@@ -23,6 +23,7 @@ import json
 import os
 import time
 import socketserver
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
 try:
@@ -293,6 +294,11 @@ def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
 class Ros1BagPlayerThread(threading.Thread):
     """ROS1 .bag 파일을 rosbags로 읽어 rclpy Publisher로 실시간 ROS2 publish하는 스레드.
 
+    실시간 변환 경로 (매 메시지):
+      bag raw → typestore.deserialize_ros1 → _convert_ros1_to_ros2 → pub.publish
+    변환은 prefetch 스레드에서 수행하고, publish 루프는 wall-clock 스케줄로만 sleep한다.
+    (sleep(bag_dt) 후 변환하면 변환 비용이 누적되어 SLAM 중 max-time burst가 난다.)
+
     Attributes:
         bag_path (str): ROS1 .bag 파일 경로
         topics (list[str]): publish할 토픽 이름 목록 (빈 리스트 = 전체)
@@ -422,7 +428,7 @@ class Ros1BagPlayerThread(threading.Thread):
             return None
 
     def _publisher_qos(self, topic_name: str, msg_cls):
-        """대용량 백 재생 시 구독자·브리지 적체 완화: 센서류는 최신 1개만 유지."""
+        """토픽별 publisher QoS. SLAM 입력(PC2/Imu)은 FAST_LIO KeepLast(10)에 맞춤."""
         if topic_name == '/tf_static':
             return QoSProfile(
                 depth=1,
@@ -430,12 +436,20 @@ class Ros1BagPlayerThread(threading.Thread):
                 reliability=ReliabilityPolicy.RELIABLE,
             )
         cls_name = getattr(msg_cls, '__name__', '')
-        # PointCloud2 / Image / LaserScan 등: 큐 쌓임 방지(느린 웹/시각화와 조합 시 전체 지연 완화)
-        if cls_name in ('PointCloud2', 'Image', 'LaserScan', 'CompressedImage'):
-            # depth=1 로 구독자 측 적체 완화; RELIABLE 유지(rosbridge 등 기본 구독과 QoS 호환)
+        # FAST_LIO lidar/imu 구독은 KeepLast(10)+RELIABLE.
+        # PointCloud2를 depth=1로 내면 writer history가 1이라 SLAM 처리 지연 시
+        # 샘플이 덮어써져 수신 간격이 불규칙해질 수 있음 → SLAM 입력은 depth=10.
+        # Image 등 시각화 전용만 depth=1로 적체 완화.
+        if cls_name in ('Image', 'CompressedImage'):
             return QoSProfile(
                 history=HistoryPolicy.KEEP_LAST,
                 depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+            )
+        if cls_name in ('PointCloud2', 'LaserScan', 'Imu'):
+            return QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10,
                 reliability=ReliabilityPolicy.RELIABLE,
             )
         if topic_name == '/tf':
@@ -573,14 +587,20 @@ class Ros1BagPlayerThread(threading.Thread):
 
                 # 루프 재생 지원: _loop 플래그가 True이면 완료 후 처음부터 재시작
                 # seek 지원: messages(start=...)로 특정 시점부터 재생
-                # Producer-Consumer: Reader 스레드가 디스크 I/O로 prefetch, 메인 스레드는 변환+publish (I/O 오버랩)
-                PREFETCH_QUEUE_SIZE = 5
-                SENTINEL_SEEK = ('__SEEK__', None, None)
-                SENTINEL_END = ('__END__', None, None)
+                #
+                # 타이밍 설계 (중요):
+                #   이전: sleep(bag_dt) 후 변환+publish → 변환 비용이 스케줄에 미반영
+                #         → SLAM CPU 경합 시 inter-publish gap이 불규칙해지고
+                #         rostopic hz max time ~0.3s burst 발생.
+                #   현재: prefetch 스레드가 디스크 I/O+역직렬화+ROS1→ROS2 변환을 담당하고,
+                #         publish 루프는 wall-clock 스케줄(첫 메시지 기준)로만 sleep.
+                #         변환이 느려도 sleep에서 차감되어 누적 지연을 흡수한다.
+                PREFETCH_QUEUE_SIZE = 8
+                SENTINEL_SEEK = ('__SEEK__', None, None, None)
+                SENTINEL_END = ('__END__', None, None, None)
 
                 start_param = None  # None = 처음부터, int(ns) = 해당 시점부터
                 while True:
-                    prev_ros_time = None
                     start_ns = reader.start_time
 
                     with self._lock:
@@ -591,10 +611,13 @@ class Ros1BagPlayerThread(threading.Thread):
 
                     prefetch_queue = queue.Queue(maxsize=PREFETCH_QUEUE_SIZE)
 
-                    def _reader_task():
+                    def _prefetch_task():
+                        """디스크 읽기 + ROS1→ROS2 변환을 publish 루프와 분리."""
                         try:
-                            msg_iter = (reader.messages(connections=(), start=start_param, stop=None)
-                                        if start_param is not None else reader.messages())
+                            msg_iter = (
+                                reader.messages(connections=(), start=start_param, stop=None)
+                                if start_param is not None else reader.messages()
+                            )
                             for conn, timestamp, rawdata in msg_iter:
                                 if self._stop_flag:
                                     prefetch_queue.put(SENTINEL_END)
@@ -602,7 +625,23 @@ class Ros1BagPlayerThread(threading.Thread):
                                 if self._seek_requested:
                                     prefetch_queue.put(SENTINEL_SEEK)
                                     return
-                                prefetch_queue.put((conn, timestamp, rawdata))
+
+                                topic_name = conn.topic
+                                if topic_name not in publishable_topics:
+                                    continue
+
+                                msg_cls = msg_cls_cache.get(topic_name)
+                                if msg_cls is None:
+                                    continue
+
+                                try:
+                                    ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
+                                    ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
+                                    if ros2_msg is None:
+                                        continue
+                                    prefetch_queue.put((topic_name, timestamp, ros2_msg, None))
+                                except Exception:
+                                    continue
                         except Exception:
                             pass
                         finally:
@@ -611,10 +650,14 @@ class Ros1BagPlayerThread(threading.Thread):
                             except Exception:
                                 pass
 
-                    reader_thread = threading.Thread(target=_reader_task, daemon=True)
-                    reader_thread.start()
+                    prefetch_thread = threading.Thread(
+                        target=_prefetch_task, daemon=True, name='ros1-bag-prefetch')
+                    prefetch_thread.start()
 
                     seek_break = False
+                    wall_origin = None   # perf_counter at first published msg (or after resume)
+                    bag_origin_ns = None  # bag timestamp of that anchor
+
                     while True:
                         try:
                             item = prefetch_queue.get(timeout=0.5)
@@ -635,59 +678,45 @@ class Ros1BagPlayerThread(threading.Thread):
                             seek_break = True
                             break
 
-                        conn, timestamp, rawdata = item
+                        topic_name, timestamp, ros2_msg, _ = item
                         if self._stop_flag:
                             break
 
-                        # 일시정지 대기 (blocking)
-                        self._play_event.wait()
+                        # 일시정지: 재개 시 wall-clock 앵커를 재설정해 burst 방지
+                        if not self._play_event.is_set():
+                            self._play_event.wait()
+                            wall_origin = None
+                            bag_origin_ns = None
                         if self._stop_flag:
                             break
 
-                        topic_name = conn.topic
-                        ros1_type_str = conn.msgtype
-
-                        # 선택되지 않은 토픽 스킵
-                        if topic_name not in publishable_topics:
-                            continue
-
-                        # elapsed 업데이트
                         elapsed_ns = timestamp - start_ns
                         with self._lock:
                             self._elapsed_sec = elapsed_ns / 1e9
+                            rate = self._playback_rate
 
-                        # 메시지 간 시간차 기반 sleep (속도 제어)
-                        if prev_ros_time is not None:
-                            dt_ns = timestamp - prev_ros_time
-                            if dt_ns > 0:
-                                sleep_sec = (dt_ns / 1e9) / self._playback_rate
-                                # 최대 2초 sleep 제한 (긴 공백 방지)
-                                time.sleep(min(sleep_sec, 2.0))
-                        prev_ros_time = timestamp
+                        now = time.perf_counter()
+                        if wall_origin is None:
+                            wall_origin = now
+                            bag_origin_ns = timestamp
+                        else:
+                            target = wall_origin + ((timestamp - bag_origin_ns) / 1e9) / rate
+                            delay = target - now
+                            if delay > 0.0:
+                                # 긴 bag 공백은 2초로 클램프 (기존 동작 유지)
+                                time.sleep(min(delay, 2.0))
+                            # delay <= 0: 변환/CPU로 이미 뒤처짐 → 즉시 publish (누적 지연 흡수)
 
-                        # 역직렬화 + publish (msg_cls 캐시 사용)
-                        try:
-                            msg_cls = msg_cls_cache.get(topic_name)
-                            if msg_cls is None:
-                                continue
-
-                            # rosbags 최신 API: typestore.deserialize_ros1()
-                            ros1_msg = typestore.deserialize_ros1(rawdata, conn.msgtype)
-                            # ROS2 메시지로 변환
-                            ros2_msg = self._convert_ros1_to_ros2(ros1_msg, msg_cls)
-                            if ros2_msg is None:
-                                continue
-
-                            pub = self._publishers.get(topic_name)
-                            if pub is not None:
+                        pub = self._publishers.get(topic_name)
+                        if pub is not None:
+                            try:
                                 pub.publish(ros2_msg)
+                            except Exception as e:
+                                self._ros_node.get_logger().debug(
+                                    f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
+                                )
 
-                        except Exception as e:
-                            self._ros_node.get_logger().debug(
-                                f'[Ros1BagPlayer] Publish error on {topic_name}: {e}'
-                            )
-
-                    reader_thread.join(timeout=2.0)
+                    prefetch_thread.join(timeout=2.0)
 
                     # seek로 탈출한 경우: start_param으로 for 루프 재시작
                     if seek_break:
@@ -1207,8 +1236,13 @@ class PC2WebSocketServer:
       { "cmd": "unsubscribe", "topic": "/ouster/points" }
     """
 
-    MAX_POINTS   = 50_000   # 다운샘플링 상한
-    THROTTLE_SEC = 0.05     # 최대 20Hz (50 ms) — binary 전송 ~600KB이므로 충분
+    MAX_POINTS   = 30_000   # 일반 PC2 다운샘플링 상한
+    # /cloud_registered: 누적 맵용 — 포인트·주기 모두 공격적으로 제한해 GIL/CPU 보호
+    CLOUD_REGISTERED_MAX_POINTS = 12_000
+    THROTTLE_SEC = 0.1      # 일반 PC2 최대 10Hz — 시각화 유지, ROS 처리율 보호
+    # /cloud_registered 전용: 브라우저 map_accumulator가 0.3m 복셀을 하므로
+    # 서버는 가벼운 step만 적용 (np.unique 복셀은 GIL을 수백 ms 점유해 /Odometry max time 악화)
+    CLOUD_REGISTERED_THROTTLE_SEC = 0.2  # 5Hz — Live Viewer 누적에 충분, spin/GIL 부하 최소화
 
     # PointCloud2 field datatype → numpy dtype 매핑
     _DTYPE = {
@@ -1224,18 +1258,20 @@ class PC2WebSocketServer:
     IMG_MAX_DIM      = 800     # 최대 단변 길이(픽셀): 초과 시 비율 유지 리사이즈
 
     # Path(nav_msgs/Path) 스트리밍 설정 — burst 방지
-    #   fast_lio 등이 /path를 "누적 전체 경로"로 ~20Hz 발행하면 매 메시지 역직렬화가
-    #   SingleThreadedExecutor spin 스레드의 GIL을 장시간 점유해 다른 콜백(odom relay 등)을
-    #   블로킹한다. raw=True 구독으로 spin 스레드의 역직렬화를 제거하고, throttle을 콜백
-    #   초입에서 선처리해 실제 역직렬화/전송을 5Hz로 제한한다.
-    PATH_THROTTLE_SEC = 0.2    # 5Hz — 누적 경로는 최신 상태만 저빈도로 전송하면 충분
-    PATH_MAX_POSES    = 20000  # pose 상한 (초과 시 stride 다운샘플링)
+    #   fast_lio 등이 /path를 "누적 전체 경로"로 ~20Hz 발행하면 역직렬화·numpy 변환이
+    #   GIL을 점유해 bag/FAST_LIO와 CPU 경합 → /Odometry max time·lid_freq 저하.
+    #   raw=True + 콜백 초입 throttle로 실제 역직렬화/전송만 저빈도로 수행.
+    PATH_THROTTLE_SEC = 0.5    # 2Hz — 누적 경로는 최신 상태만 저빈도 전송
+    PATH_MAX_POSES    = 8000   # pose 상한 (초과 시 stride 다운샘플링)
 
     def __init__(self, ros_node, port: int = 8081):
         self._node = ros_node
         self._port = port
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
+        # PC2/Path 빌드 전용 pool — worker=1로 GIL 경합 최소화 (동시 numpy 작업 금지)
+        self._build_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='pc2-build')
         # ── PointCloud2 전용 ───────────────────────────────────────────────────
         # topic_name → set[websocket]
         self._clients: dict = {}
@@ -1407,6 +1443,57 @@ class PC2WebSocketServer:
             pass
         return None
 
+    def _pc2_qos(self):
+        # FAST_LIO /cloud_registered는 RELIABLE KeepLast(10).
+        # 시각화는 최신 프레임만 필요 → BEST_EFFORT depth=1 로 중간 프레임 드롭.
+        return QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+
+    def _create_pc2_subscription(self, topic: str):
+        sub = self._node.create_subscription(
+            PointCloud2, topic,
+            lambda m, t=topic: self._on_pc2(m, t),
+            self._pc2_qos(),
+            raw=True)
+        self._subs[topic] = sub
+        return sub
+
+    def _pause_pc2_subscription(self, topic: str, resume_after: float):
+        """1프레임 처리 후 구독 해제 → resume_after 초 뒤 재구독 (콜백 스택 밖에서 실행)."""
+        def _do_pause():
+            with self._lock:
+                sub = self._subs.pop(topic, None)
+                has_clients = bool(self._clients.get(topic))
+            if sub:
+                try:
+                    self._node.destroy_subscription(sub)
+                except Exception:
+                    pass
+            if not has_clients:
+                return
+
+            def _resume():
+                with self._lock:
+                    if not self._clients.get(topic):
+                        return
+                    if topic in self._subs:
+                        return
+                    try:
+                        self._create_pc2_subscription(topic)
+                    except Exception as e:
+                        self._node.get_logger().warn(
+                            f'[PC2WS] resume subscribe failed ({topic}): {e}')
+
+            t = threading.Timer(resume_after, _resume)
+            t.daemon = True
+            t.start()
+
+        threading.Thread(target=_do_pause, daemon=True, name='pc2-pause').start()
+
     def _add_client(self, topic: str, ws):
         # DDS 조회를 lock 외부에서 수행:
         # get_topic_names_and_types()는 DDS 전체 토픽을 열거하므로
@@ -1432,13 +1519,9 @@ class PC2WebSocketServer:
                     self._clients[topic] = set()
                 self._clients[topic].add(ws)
                 if topic not in self._subs:
-                    sub = self._node.create_subscription(
-                        PointCloud2, topic,
-                        lambda m, t=topic: self._on_pc2(m, t),
-                        1)
-                    self._subs[topic] = sub
+                    self._create_pc2_subscription(topic)
                     self._last_sent[topic] = 0.0
-                    self._node.get_logger().info(f'[PC2WS] subscribed → {topic}')
+                    self._node.get_logger().info(f'[PC2WS] subscribed (raw) → {topic}')
 
     def _remove_client(self, topic: str, ws):
         with self._lock:
@@ -1448,8 +1531,13 @@ class PC2WebSocketServer:
                 s_livox.discard(ws)
                 if not s_livox:
                     self._livox_clients.pop(topic, None)
-                    # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
-                    self._node.get_logger().info(f'[PC2WS] all Livox clients gone, sub kept ← {topic}')
+                    sub = self._livox_subs.pop(topic, None)
+                    if sub:
+                        try:
+                            self._node.destroy_subscription(sub)
+                        except Exception:
+                            pass
+                    self._node.get_logger().info(f'[PC2WS] all Livox clients gone, unsubscribed ← {topic}')
                 return
             # PointCloud2 클라이언트
             s = self._clients.get(topic)
@@ -1458,8 +1546,17 @@ class PC2WebSocketServer:
             s.discard(ws)
             if not s:
                 self._clients.pop(topic, None)
-                # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
-                self._node.get_logger().info(f'[PC2WS] all PC2 clients gone, sub kept ← {topic}')
+                # 클라이언트 없으면 구독 해제 — 빈 콜백이 spin/GIL을 계속 점유하지 않도록
+                # (file-player pre-subscribe 토픽도 재구독 시 DDS discovery 재개)
+                sub = self._subs.pop(topic, None)
+                if sub:
+                    try:
+                        self._node.destroy_subscription(sub)
+                    except Exception:
+                        pass
+                self._last_sent.pop(topic, None)
+                self._pc2_sending.pop(topic, None)
+                self._node.get_logger().info(f'[PC2WS] all PC2 clients gone, unsubscribed ← {topic}')
 
     def _presubscribe_pc2(self, topic: str):
         """Publisher 생성과 동시에 PointCloud2 ROS2 구독을 미리 생성해 DDS 발견을 워밍업한다.
@@ -1469,13 +1566,9 @@ class PC2WebSocketServer:
         """
         with self._lock:
             if topic not in self._subs:
-                sub = self._node.create_subscription(
-                    PointCloud2, topic,
-                    lambda m, t=topic: self._on_pc2(m, t),
-                    10)
-                self._subs[topic] = sub
+                self._create_pc2_subscription(topic)
                 self._last_sent[topic] = 0.0
-                self._node.get_logger().info(f'[PC2WS] pre-subscribed (DDS warmup) → {topic}')
+                self._node.get_logger().info(f'[PC2WS] pre-subscribed (raw, DDS warmup) → {topic}')
 
     # ── TRANSIENT_LOCAL (latched) 토픽 ─────────────────────────────────────────
 
@@ -1502,7 +1595,7 @@ class PC2WebSocketServer:
                     PointCloud2, topic,
                     lambda m, t=topic: self._on_pc2_latched(m, t),
                     qos,
-                )
+                    raw=True)
                 self._latched_subs[topic] = sub
                 self._node.get_logger().info(
                     f'[PC2WS] subscribed (TRANSIENT_LOCAL) → {topic}')
@@ -1527,35 +1620,27 @@ class PC2WebSocketServer:
             if s:
                 s.discard(ws)
 
-    def _on_pc2_latched(self, msg: PointCloud2, topic_name: str):
+    def _on_pc2_latched(self, msg, topic_name: str):
         """TRANSIENT_LOCAL 토픽 콜백 — 페이로드 빌드 후 캐시 저장 + 브로드캐스트."""
         with self._lock:
             clients = self._latched_clients.get(topic_name, set()).copy()
         if not clients:
             return
-        stamp = msg.header.stamp
-        meta_json = json.dumps({
-            'type':          'pc2meta',
-            'topic':         topic_name,
-            'stamp_sec':     stamp.sec,
-            'stamp_nanosec': stamp.nanosec,
-            'frame_id':      msg.header.frame_id,
-            'point_count':   msg.width * msg.height,
-        }, separators=(',', ':'))
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._build_and_broadcast_latched(msg, topic_name, clients, meta_json), loop)
+                self._build_and_broadcast_latched(msg, topic_name, clients), loop)
 
     async def _build_and_broadcast_latched(
-            self, msg: 'PointCloud2', topic_name: str, clients: set, meta_json: str):
-        """_build_payload를 executor에서 실행, 결과를 캐시 저장 후 클라이언트에 전송."""
+            self, raw, topic_name: str, clients: set):
+        """raw bytes → executor에서 역직렬화/빌드 후 캐시 저장 + 클라이언트 전송."""
         try:
             loop = asyncio.get_running_loop()
-            payload = await loop.run_in_executor(None, self._build_payload, msg, topic_name)
-            if not payload:
+            result = await loop.run_in_executor(
+                self._build_executor, self._build_meta_and_payload_from_raw, raw, topic_name)
+            if not result:
                 return
-            # 캐시 갱신 (새 클라이언트 재전송용)
+            meta_json, payload = result
             with self._lock:
                 self._latched_cache[topic_name]      = payload
                 self._latched_meta_cache[topic_name] = meta_json
@@ -1615,6 +1700,62 @@ class PC2WebSocketServer:
 
     # ── Path 클라이언트 / 구독 관리 ───────────────────────────────────────────
 
+    def _path_qos(self):
+        # FAST_LIO /path는 RELIABLE KeepLast(10) 발행.
+        # 시각화는 최신 1개만 필요 → BEST_EFFORT depth=1 (중간 프레임 드롭, DDS 부하↓).
+        return QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE)
+
+    def _create_path_subscription(self, topic: str):
+        """Path 구독 생성. 클라이언트가 있을 때만 호출."""
+        sub = self._node.create_subscription(
+            NavPath, topic,
+            lambda m, t=topic: self._on_path(m, t),
+            self._path_qos(),
+            raw=True)
+        self._path_subs[topic] = sub
+        return sub
+
+    def _pause_path_subscription(self, topic: str):
+        """1프레임 처리 직후 구독 해제 → PATH_THROTTLE_SEC 뒤 재구독.
+
+        throttle만으로는 DDS가 누적 Path(수 MB)를 20Hz로 계속 전달한다.
+        구독을 잠시 끊어야 rmw/DDS 복사 비용과 콜백 호출을 근본적으로 줄인다.
+        destroy_subscription은 콜백 스택 밖에서 실행한다.
+        """
+        def _do_pause():
+            with self._lock:
+                sub = self._path_subs.pop(topic, None)
+                has_clients = bool(self._path_clients.get(topic))
+            if sub:
+                try:
+                    self._node.destroy_subscription(sub)
+                except Exception:
+                    pass
+            if not has_clients:
+                return
+
+            def _resume():
+                with self._lock:
+                    if not self._path_clients.get(topic):
+                        return
+                    if topic in self._path_subs:
+                        return
+                    try:
+                        self._create_path_subscription(topic)
+                    except Exception as e:
+                        self._node.get_logger().warn(
+                            f'[PathWS] resume subscribe failed ({topic}): {e}')
+
+            t = threading.Timer(self.PATH_THROTTLE_SEC, _resume)
+            t.daemon = True
+            t.start()
+
+        threading.Thread(target=_do_pause, daemon=True, name='path-pause').start()
+
     def _add_path_client(self, topic: str, ws):
         """nav_msgs/Path 토픽을 바이너리 PTH 패킷으로 스트리밍하기 위한 클라이언트 등록."""
         with self._lock:
@@ -1622,19 +1763,8 @@ class PC2WebSocketServer:
                 self._path_clients[topic] = set()
             self._path_clients[topic].add(ws)
             if topic not in self._path_subs:
-                # 누적 경로는 최신 메시지만 필요하므로 depth=1 + BEST_EFFORT.
-                # raw=True → spin 스레드에서 역직렬화하지 않고 직렬화 bytes만 전달받아
-                #             GIL 점유(→ 타 콜백 블로킹)를 근본적으로 제거한다.
-                path_qos = QoSProfile(
-                    history=HistoryPolicy.KEEP_LAST,
-                    depth=1,
-                    reliability=ReliabilityPolicy.BEST_EFFORT)
-                sub = self._node.create_subscription(
-                    NavPath, topic,
-                    lambda m, t=topic: self._on_path(m, t),
-                    path_qos,
-                    raw=True)
-                self._path_subs[topic]      = sub
+                # raw=True → spin에서 역직렬화하지 않음. 처리 후 pause로 DDS 유입도 제한.
+                self._create_path_subscription(topic)
                 self._path_last_sent[topic] = 0.0
                 self._node.get_logger().info(f'[PathWS] subscribed (raw) → {topic}')
 
@@ -1646,16 +1776,23 @@ class PC2WebSocketServer:
             s.discard(ws)
             if not s:
                 self._path_clients.pop(topic, None)
-                self._node.get_logger().info(f'[PathWS] all clients gone, sub kept ← {topic}')
+                sub = self._path_subs.pop(topic, None)
+                if sub:
+                    try:
+                        self._node.destroy_subscription(sub)
+                    except Exception:
+                        pass
+                self._path_last_sent.pop(topic, None)
+                self._path_sending.pop(topic, None)
+                self._node.get_logger().info(f'[PathWS] all clients gone, unsubscribed ← {topic}')
 
     # ── rclpy 콜백 (Path) ────────────────────────────────────────────────────
 
     def _on_path(self, msg, topic_name: str):
-        """nav_msgs/Path(raw bytes) 수신 → throttle 선처리 → binary PTH 패킷 → 브로드캐스트.
+        """nav_msgs/Path(raw bytes) 수신 → 1프레임 처리 후 구독 pause → 재구독.
 
-        raw=True 구독이므로 msg는 역직렬화된 NavPath가 아니라 직렬화된 bytes다.
-        throttle/backpressure 체크를 콜백 초입에서 먼저 수행해 실제 역직렬화(무거움)는
-        thread pool에서 5Hz로만 실행 → spin 스레드 GIL 부하를 최소화한다.
+        raw=True 구독이므로 msg는 직렬화 bytes. 역직렬화는 thread pool에서만 수행.
+        처리 직후 구독을 끊어 DDS가 누적 Path를 20Hz로 계속 밀어넣는 것을 막는다.
         """
         now = time.monotonic()
         with self._lock:
@@ -1668,6 +1805,9 @@ class PC2WebSocketServer:
                 return
             self._path_last_sent[topic_name] = now
             self._path_sending[topic_name] = True
+
+        # 즉시 구독 pause — 이후 PATH_THROTTLE_SEC 동안 DDS Path 유입 차단
+        self._pause_path_subscription(topic_name)
 
         loop = self._loop
         if loop and loop.is_running():
@@ -1682,7 +1822,7 @@ class PC2WebSocketServer:
         try:
             loop = asyncio.get_running_loop()
             payload = await loop.run_in_executor(
-                None, self._build_path_payload, msg, topic_name)
+                self._build_executor, self._build_path_payload, msg, topic_name)
             if payload:
                 for ws in list(clients):
                     try:
@@ -1725,12 +1865,11 @@ class PC2WebSocketServer:
             topic_b = topic_name.encode('utf-8')
             frame_b = (msg.header.frame_id or '').encode('utf-8')
             n = len(poses)
-            xyz = np.empty(n * 3, dtype=np.float32)
-            for i, ps in enumerate(poses):
-                p = ps.pose.position
-                xyz[i * 3]     = p.x
-                xyz[i * 3 + 1] = p.y
-                xyz[i * 3 + 2] = p.z
+            # 리스트 컴프리헨션이 순수 for+속성접근보다 GIL 점유 시간이 짧다
+            xyz = np.asarray(
+                [(ps.pose.position.x, ps.pose.position.y, ps.pose.position.z)
+                 for ps in poses],
+                dtype=np.float32).reshape(-1)
             header = struct.pack('<3sBIII',
                                  b'PTH', 1,
                                  len(topic_b), len(frame_b), n)
@@ -1850,51 +1989,35 @@ class PC2WebSocketServer:
 
     # ── rclpy 콜백 ───────────────────────────────────────────────────────────
 
-    def _on_pc2(self, msg: PointCloud2, topic_name: str):
-        """PointCloud2 수신 → throttle → binary + JSON 메타데이터 → asyncio 브로드캐스트.
+    def _on_pc2(self, msg, topic_name: str):
+        """PointCloud2(raw bytes) 수신 → throttle → executor에서 역직렬화/빌드 → 브로드캐스트.
 
-        전송 패킷 두 종류:
-          1) binary bytes   : XYZ + color 데이터 (3D Viewer용)
-          2) JSON string    : 헤더 스탬프·포인트 수 등 메타데이터 (Plot 탭용)
-             {"type":"pc2meta","topic":"...","stamp_sec":N,"stamp_nanosec":N,
-              "frame_id":"...","point_count":N}
-
-        JavaScript 쪽에서 ws.binaryType='arraybuffer' 이므로
-        ArrayBuffer → binary 핸들러, string → JSON 핸들러로 자동 분리된다.
+        raw=True 구독이므로 msg는 역직렬화된 PointCloud2가 아니라 직렬화된 bytes다.
+        spin 스레드에서 대용량 역직렬화를 피해 다른 콜백 지연을 줄인다.
+        /cloud_registered는 처리 후 구독을 잠시 끊어 DDS 대용량 유입을 차단한다.
         """
         now = time.monotonic()
+        throttle = (self.CLOUD_REGISTERED_THROTTLE_SEC
+                     if topic_name == '/cloud_registered' else self.THROTTLE_SEC)
         with self._lock:
-            if now - self._last_sent.get(topic_name, 0.0) < self.THROTTLE_SEC:
+            if now - self._last_sent.get(topic_name, 0.0) < throttle:
                 return
-            # 이전 브로드캐스트가 완료되지 않았으면 skip (asyncio 큐 누적 방지)
             if self._pc2_sending.get(topic_name, False):
+                return
+            clients = self._clients.get(topic_name, set()).copy()
+            if not clients:
                 return
             self._last_sent[topic_name] = now
             self._pc2_sending[topic_name] = True
-            clients = self._clients.get(topic_name, set()).copy()
-        if not clients:
-            with self._lock:
-                self._pc2_sending[topic_name] = False
-            return
 
-        # ── 1) JSON 메타데이터 패킷 (헤더 스탬프 등) ────────────────────────
-        stamp = msg.header.stamp
-        meta_json = json.dumps({
-            'type':          'pc2meta',
-            'topic':         topic_name,
-            'stamp_sec':     stamp.sec,
-            'stamp_nanosec': stamp.nanosec,
-            'frame_id':      msg.header.frame_id,
-            'point_count':   msg.width * msg.height,
-        }, separators=(',', ':'))
+        # /cloud_registered: 1프레임 후 구독 pause → throttle 동안 DDS 유입 차단
+        if topic_name == '/cloud_registered':
+            self._pause_pc2_subscription(topic_name, self.CLOUD_REGISTERED_THROTTLE_SEC)
 
-        # ── 2) _build_payload + broadcast를 asyncio coroutine으로 위임 ────────
-        # _build_payload(numpy heavy)를 run_in_executor로 실행해
-        # rclpy 콜백 스레드 블로킹을 제거하고, 완료 후 _pc2_sending 플래그를 해제한다.
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._build_and_broadcast_pc2(msg, topic_name, clients, meta_json), loop)
+                self._build_and_broadcast_pc2(msg, topic_name, clients), loop)
         else:
             with self._lock:
                 self._pc2_sending[topic_name] = False
@@ -1921,26 +2044,48 @@ class PC2WebSocketServer:
                 self._livox_sending[topic_name] = False
 
     async def _build_and_broadcast_pc2(
-            self, msg: 'PointCloud2', topic_name: str, clients: set, meta_json: str):
-        """_build_payload를 thread pool executor에서 실행 후 브로드캐스트.
-
-        완료 후 반드시 _pc2_sending 플래그를 해제하여 다음 콜백이 처리될 수 있도록 한다.
-        """
+            self, raw, topic_name: str, clients: set):
+        """raw bytes → executor에서 역직렬화/빌드 후 브로드캐스트."""
         try:
             loop = asyncio.get_running_loop()
-            payload = await loop.run_in_executor(None, self._build_payload, msg, topic_name)
-            if payload:
-                for ws in list(clients):
-                    try:
-                        await ws.send(meta_json)
-                        await ws.send(payload)
-                    except Exception:
-                        pass
+            result = await loop.run_in_executor(
+                self._build_executor, self._build_meta_and_payload_from_raw, raw, topic_name)
+            if not result:
+                return
+            meta_json, payload = result
+            for ws in list(clients):
+                try:
+                    await ws.send(meta_json)
+                    await ws.send(payload)
+                except Exception:
+                    pass
         except Exception as e:
             self._node.get_logger().warn(f'[PC2WS] async build/broadcast error ({topic_name}): {e}')
         finally:
             with self._lock:
                 self._pc2_sending[topic_name] = False
+
+    def _build_meta_and_payload_from_raw(self, raw, topic_name: str):
+        """PointCloud2(raw bytes) → 역직렬화 → JSON meta + binary payload."""
+        try:
+            msg = deserialize_message(raw, PointCloud2)
+            stamp = msg.header.stamp
+            meta_json = json.dumps({
+                'type':          'pc2meta',
+                'topic':         topic_name,
+                'stamp_sec':     stamp.sec,
+                'stamp_nanosec': stamp.nanosec,
+                'frame_id':      msg.header.frame_id,
+                'point_count':   msg.width * msg.height,
+            }, separators=(',', ':'))
+            payload = self._build_payload(msg, topic_name)
+            if not payload:
+                return None
+            return meta_json, payload
+        except Exception as e:
+            self._node.get_logger().error(
+                f'[PC2WS] _build_meta_and_payload_from_raw error ({topic_name}): {e}')
+            return None
 
     async def _broadcast_both(self, clients, meta_json: str, binary_payload: bytes):
         """각 클라이언트에 JSON 메타데이터(text) + binary 데이터 순서로 전송."""
@@ -2191,8 +2336,12 @@ class PC2WebSocketServer:
             if n_total == 0 or point_step == 0:
                 return None
 
-            # raw bytes → uint8 numpy array → (N, point_step) 형태
-            raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            # raw bytes → uint8 numpy (가능하면 zero-copy; list면 복사 불가피)
+            data = msg.data
+            try:
+                raw = np.frombuffer(data, dtype=np.uint8)
+            except (TypeError, ValueError, BufferError):
+                raw = np.frombuffer(bytes(data), dtype=np.uint8)
             if raw.size < n_total * point_step:
                 n_total = raw.size // point_step
             arr = raw[:n_total * point_step].reshape(n_total, point_step)
@@ -2218,25 +2367,16 @@ class PC2WebSocketServer:
             if n == 0:
                 return None
 
-            # 다운샘플링: /cloud_registered는 복셀(0.4m), 나머지는 균등 step
-            if topic_name == '/cloud_registered':
-                xyz_valid = np.column_stack([x, y, z]).astype(np.float32)
-                voxel_coords = np.floor(xyz_valid / 0.4).astype(np.int32)
-                _, unique_idx = np.unique(voxel_coords, axis=0, return_index=True)
-                sel_idx = np.sort(unique_idx)
-                extra_step = max(1, len(sel_idx) // self.MAX_POINTS)
-                sel_idx = sel_idx[::extra_step]
-                x = xyz_valid[sel_idx, 0]
-                y = xyz_valid[sel_idx, 1]
-                z = xyz_valid[sel_idx, 2]
-                n_out = len(x)
-                subsample = lambda arr_v: arr_v[sel_idx]
-            else:
-                # 균등 step 다운샘플링
-                step = max(1, n // self.MAX_POINTS)
-                x, y, z = x[::step], y[::step], z[::step]
-                n_out = len(x)
-                subsample = lambda arr_v, _s=step, _n=n_out: arr_v[::_s][:_n]
+            # 균등 step 다운샘플링 (모든 PC2 토픽 동일)
+            # /cloud_registered의 np.unique 복셀은 제거함:
+            #   - 브라우저 map_accumulator_worker가 0.3m 전역 복셀(centroid)을 수행
+            #   - 서버 np.unique(axis=0)는 대용량에서 GIL을 수백 ms 점유 → /Odometry max time 악화
+            max_pts = (self.CLOUD_REGISTERED_MAX_POINTS
+                       if topic_name == '/cloud_registered' else self.MAX_POINTS)
+            step = max(1, n // max_pts)
+            x, y, z = x[::step], y[::step], z[::step]
+            n_out = len(x)
+            subsample = lambda arr_v, _s=step, _n=n_out: arr_v[::_s][:_n]
 
             xyz = np.column_stack([x, y, z]).astype(np.float32)
 
@@ -5631,11 +5771,16 @@ class WebGUINode(Node):
                 self.stop_ros1_playback()
                 return True
             else:
+                # Bag Player에서 고른 토픽이 있으면 재사용 (전체 토픽 변환 부하 방지)
+                selected = getattr(self, 'bag_selected_topics', None) or None
+                if selected is not None and len(selected) == 0:
+                    selected = None
                 self.get_logger().info(
-                    f'ROS1 bag mode: starting playback ({self.bag_path})')
+                    f'ROS1 bag mode: starting playback ({self.bag_path}), '
+                    f'topics={selected or "ALL"}')
                 return self.start_ros1_playback(
                     self.bag_path,
-                    topics=None,
+                    topics=selected,
                     rate=getattr(self, 'ros1_player_rate', 1.0),
                 )
 
@@ -8305,14 +8450,22 @@ def main(args=None):
     _ros_node.get_logger().info(f'Web GUI is running with full ROS2 integration.')
     _ros_node.get_logger().info(f'Open http://localhost:8080 or http://{local_ip}:8080 in your browser.')
 
+    from rclpy.executors import SingleThreadedExecutor
+    # SingleThreaded: MultiThreadedExecutor는 Python GIL 경합을 키워
+    # PC2/Path 빌드 스레드와 spin이 서로 지연 → /Odometry max time·lid_freq 악화.
+    # PC2/Path는 raw=True + 전용 ThreadPool로 이미 spin 경로에서 분리됨.
+    executor = SingleThreadedExecutor()
+    executor.add_node(_ros_node)
+
     try:
-        rclpy.spin(_ros_node)
+        executor.spin()
     except KeyboardInterrupt:
         _ros_node.get_logger().info('Keyboard interrupt received')
     finally:
         _ros_node.get_logger().info('Cleaning up...')
         _ros_node.kill_slam_processes()
         _ros_node.kill_localization_processes()
+        executor.remove_node(_ros_node)
         _ros_node.destroy_node()
         rclpy.shutdown()
 
