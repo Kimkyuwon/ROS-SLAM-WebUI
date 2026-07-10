@@ -1240,9 +1240,9 @@ class PC2WebSocketServer:
     # /cloud_registered: 누적 맵용 — 포인트·주기 모두 공격적으로 제한해 GIL/CPU 보호
     CLOUD_REGISTERED_MAX_POINTS = 12_000
     THROTTLE_SEC = 0.1      # 일반 PC2 최대 10Hz — 시각화 유지, ROS 처리율 보호
-    # /cloud_registered 전용: 브라우저 map_accumulator가 0.3m 복셀을 하므로
-    # 서버는 가벼운 step만 적용 (np.unique 복셀은 GIL을 수백 ms 점유해 /Odometry max time 악화)
-    CLOUD_REGISTERED_THROTTLE_SEC = 0.2  # 5Hz — Live Viewer 누적에 충분, spin/GIL 부하 최소화
+    # /cloud_registered 전용: 브라우저는 1Hz로 처리·누적하므로 서버도 1Hz
+    # (np.unique 복셀은 GIL을 수백 ms 점유해 /Odometry max time 악화 → 서버는 step만)
+    CLOUD_REGISTERED_THROTTLE_SEC = 1.0  # 1Hz — 메인스레드·누적 워커와 맞춤, GIL/우선순위 보호
 
     # PointCloud2 field datatype → numpy dtype 매핑
     _DTYPE = {
@@ -1304,6 +1304,7 @@ class PC2WebSocketServer:
         # 이전 ws.send()가 완료되기 전에 새 태스크가 asyncio 큐에 쌓이는 것을 방지.
         # 브라우저가 느릴 때 asyncio 태스크 누적 → latency 기하급수적 증가를 막는다.
         self._pc2_sending: dict = {}    # topic_name → bool
+        self._pc2_sending_since: dict = {}  # topic_name → monotonic (stuck 복구용)
         self._img_sending: dict = {}    # topic_name → bool
         self._livox_sending: dict = {}  # topic_name → bool
         # ── Path (nav_msgs/Path) 전용 ─────────────────────────────────────────────
@@ -1478,7 +1479,7 @@ class PC2WebSocketServer:
             if not has_clients:
                 return
 
-            def _resume():
+            def _resume(attempt: int = 0):
                 with self._lock:
                     if not self._clients.get(topic):
                         return
@@ -1486,11 +1487,17 @@ class PC2WebSocketServer:
                         return
                     try:
                         self._create_pc2_subscription(topic)
+                        return
                     except Exception as e:
                         self._node.get_logger().warn(
                             f'[PC2WS] resume subscribe failed ({topic}): {e}')
+                # 점군 영구 중단 방지: 실패 시 최대 3회 재시도
+                if attempt < 3:
+                    t2 = threading.Timer(resume_after, lambda: _resume(attempt + 1))
+                    t2.daemon = True
+                    t2.start()
 
-            t = threading.Timer(resume_after, _resume)
+            t = threading.Timer(resume_after, lambda: _resume(0))
             t.daemon = True
             t.start()
 
@@ -2010,13 +2017,18 @@ class PC2WebSocketServer:
         with self._lock:
             if now - self._last_sent.get(topic_name, 0.0) < throttle:
                 return
+            # build/broadcast가 비정상적으로 길면 sending 플래그 강제 해제 (점군 영구 drop 방지)
             if self._pc2_sending.get(topic_name, False):
-                return
+                since = self._pc2_sending_since.get(topic_name, 0.0)
+                if since and (now - since) < 5.0:
+                    return
+                self._pc2_sending[topic_name] = False
             clients = self._clients.get(topic_name, set()).copy()
             if not clients:
                 return
             self._last_sent[topic_name] = now
             self._pc2_sending[topic_name] = True
+            self._pc2_sending_since[topic_name] = now
 
         # /cloud_registered: 1프레임 후 구독 pause → throttle 동안 DDS 유입 차단
         if topic_name == '/cloud_registered':
@@ -2029,6 +2041,7 @@ class PC2WebSocketServer:
         else:
             with self._lock:
                 self._pc2_sending[topic_name] = False
+                self._pc2_sending_since.pop(topic_name, None)
 
     async def _build_and_broadcast_livox(
             self, msg, topic_name: str, clients: set, meta_json: str):
@@ -2072,6 +2085,7 @@ class PC2WebSocketServer:
         finally:
             with self._lock:
                 self._pc2_sending[topic_name] = False
+                self._pc2_sending_since.pop(topic_name, None)
 
     def _build_meta_and_payload_from_raw(self, raw, topic_name: str):
         """PointCloud2(raw bytes) → 역직렬화 → JSON meta + binary payload."""
@@ -5904,16 +5918,17 @@ class WebGUINode(Node):
             self.get_logger().info(f'Bag info: {len(topics)} topics, duration: {duration}s')
             self.get_logger().info(f'Topics: {topics}')
 
-            return {'topics': topics, 'duration': duration, 'bag_type': 'ros2'}
+            bag_format = self._detect_bag_format(self.bag_path)
+            return {'topics': topics, 'duration': duration, 'bag_type': 'ros2', 'bag_format': bag_format}
 
         except subprocess.TimeoutExpired:
             self.get_logger().error('Timeout while getting bag info')
-            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
+            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2', 'bag_format': 'ros2_db3'}
         except Exception as e:
             self.get_logger().error(f'Failed to get bag info: {str(e)}')
             import traceback
             traceback.print_exc()
-            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
+            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2', 'bag_format': 'ros2_db3'}
 
     def _get_ros1_bag_info(self):
         """Get ROS1 .bag file info using the rosbags library.
@@ -5995,18 +6010,18 @@ class WebGUINode(Node):
                 flag = '✓' if t['publishable'] else '✗'
                 self.get_logger().info(f'  [{flag}] {t["name"]} ({t["type"]})')
 
-            return {'topics': topic_dicts, 'duration': duration, 'bag_type': 'ros1'}
+            return {'topics': topic_dicts, 'duration': duration, 'bag_type': 'ros1', 'bag_format': 'ros1'}
 
         except ImportError:
             self.get_logger().error(
                 'rosbags library not found. Install with: pip install rosbags'
             )
-            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1'}
+            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1', 'bag_format': 'ros1'}
         except Exception as e:
             self.get_logger().error(f'Failed to read ROS1 bag: {str(e)}')
             import traceback
             traceback.print_exc()
-            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1'}
+            return {'topics': [], 'duration': 0.0, 'bag_type': 'ros1', 'bag_format': 'ros1'}
 
     # ------------------------------------------------------------------
     # ROS1 Bag Player — 상태 메서드
@@ -6094,10 +6109,60 @@ class WebGUINode(Node):
             return {'status': 'stopped', 'elapsed_sec': 0.0, 'total_sec': 0.0}
         return thread.get_status()
 
-    def convert_ros1_bag(self):
+    def _detect_bag_format(self, bag_path=None):
+        """Detect bag format: ros1 | ros2_db3 | ros2_mcap."""
+        import glob
+        import os
+
+        path = (bag_path or self.bag_path or '').rstrip('/')
+        if not path:
+            return 'ros2_db3'
+        if path.endswith('.bag'):
+            return 'ros1'
+        if path.endswith('.mcap') and os.path.isfile(path):
+            return 'ros2_mcap'
+        if path.endswith('.db3') and os.path.isfile(path):
+            return 'ros2_db3'
+        if os.path.isdir(path):
+            if glob.glob(os.path.join(path, '*.mcap')):
+                return 'ros2_mcap'
+            if glob.glob(os.path.join(path, '*.db3')):
+                return 'ros2_db3'
+        return 'ros2_db3'
+
+    def _get_rosbags_convert_cmd(self):
+        import os
+        import shutil
+
+        convert_cmd = shutil.which('rosbags-convert') or '/home/kkw/.local/bin/rosbags-convert'
+        if not os.path.isfile(convert_cmd):
+            self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
+            return None
+        return convert_cmd
+
+    def convert_bag(self, target_format='ros2_db3'):
+        """Convert loaded bag to target format (ros1 | ros2_db3 | ros2_mcap)."""
+        if not self.bag_path:
+            return {'success': False, 'error': 'No bag file loaded'}
+
+        source_format = self._detect_bag_format(self.bag_path)
+        if source_format == target_format:
+            return {'success': False, 'error': f'Bag is already in {target_format} format'}
+
+        if source_format == 'ros1':
+            if target_format == 'ros1':
+                return {'success': False, 'error': 'Bag is already ROS1 format'}
+            return self.convert_ros1_bag(target_format=target_format)
+        if target_format == 'ros1':
+            return self.convert_ros2_to_ros1_bag()
+        return self.convert_ros2_bag_format(target_format=target_format)
+
+    def convert_ros1_bag(self, target_format='ros2_db3'):
         """Convert ROS1 .bag file to ROS2 bag format using rosbags-convert.
 
-        Output directory: {bag_filename_without_ext}/ (same parent directory, no _ros2 suffix)
+        Output directory:
+          ros2_db3  → {bag_filename_without_ext}/
+          ros2_mcap → {bag_filename_without_ext}_mcap/ (or same name if unused)
 
         Returns:
             dict: {'success': bool, 'output_path': str, 'error': str (on failure)}
@@ -6108,12 +6173,21 @@ class WebGUINode(Node):
         if not self.bag_path.endswith('.bag'):
             return {'success': False, 'error': 'Not a ROS1 .bag file'}
 
+        if target_format not in ('ros2_db3', 'ros2_mcap'):
+            return {'success': False, 'error': f'Unsupported ROS1 conversion target: {target_format}'}
+
         try:
             import os
             import shutil
             bag_dir = os.path.dirname(self.bag_path)
             bag_name = os.path.splitext(os.path.basename(self.bag_path))[0]
-            output_dir = os.path.join(bag_dir, bag_name)
+            if target_format == 'ros2_mcap':
+                default_dir = os.path.join(bag_dir, bag_name)
+                output_dir = os.path.join(bag_dir, bag_name + '_mcap') if os.path.isdir(default_dir) else default_dir
+                dst_storage = 'mcap'
+            else:
+                output_dir = os.path.join(bag_dir, bag_name)
+                dst_storage = 'sqlite3'
 
             # 이미 변환된 디렉토리가 존재하면 삭제 후 재변환
             if os.path.isdir(output_dir):
@@ -6121,13 +6195,11 @@ class WebGUINode(Node):
                 shutil.rmtree(output_dir)
 
             self.get_logger().info(
-                f'Converting ROS1 bag: {self.bag_path} -> {output_dir}'
+                f'Converting ROS1 bag: {self.bag_path} -> {output_dir} ({target_format})'
             )
 
-            # rosbags-convert 경로 탐색 (pip user install 경로 포함)
-            convert_cmd = shutil.which('rosbags-convert') or '/home/kkw/.local/bin/rosbags-convert'
-            if not os.path.isfile(convert_cmd):
-                self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
+            convert_cmd = self._get_rosbags_convert_cmd()
+            if convert_cmd is None:
                 return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
 
             cmd = [
@@ -6138,6 +6210,8 @@ class WebGUINode(Node):
                 output_dir,
                 '--src-typestore',
                 'ros1_noetic',
+                '--dst-storage',
+                dst_storage,
             ]
             result = subprocess.run(
                 cmd,
@@ -6151,10 +6225,11 @@ class WebGUINode(Node):
                 self.get_logger().error(f'rosbags-convert failed: {error_msg}')
                 return {'success': False, 'error': error_msg}
 
-            _patch_rosbag2_tf_static_qos(output_dir, self.get_logger())
+            if target_format == 'ros2_db3':
+                _patch_rosbag2_tf_static_qos(output_dir, self.get_logger())
 
             self.get_logger().info(f'ROS1 bag converted successfully: {output_dir}')
-            return {'success': True, 'output_path': output_dir}
+            return {'success': True, 'output_path': output_dir, 'format': target_format}
 
         except subprocess.TimeoutExpired:
             self.get_logger().error('Timeout during ROS1 bag conversion')
@@ -6218,7 +6293,7 @@ class WebGUINode(Node):
                 return {'success': False, 'error': error_msg}
 
             self.get_logger().info(f'ROS2 bag converted to ROS1 successfully: {output_path}')
-            return {'success': True, 'output_path': output_path}
+            return {'success': True, 'output_path': output_path, 'format': 'ros1'}
 
         except subprocess.TimeoutExpired:
             self.get_logger().error('Timeout during ROS2→ROS1 bag conversion')
@@ -6228,6 +6303,76 @@ class WebGUINode(Node):
             return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
         except Exception as e:
             self.get_logger().error(f'Failed to convert ROS2 bag to ROS1: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def convert_ros2_bag_format(self, target_format='ros2_mcap'):
+        """Convert ROS2 bag between sqlite3 (db3) and mcap storage."""
+        if not self.bag_path:
+            return {'success': False, 'error': 'No bag file loaded'}
+
+        if self.bag_path.endswith('.bag'):
+            return {'success': False, 'error': 'Source bag is ROS1 format'}
+
+        if target_format not in ('ros2_db3', 'ros2_mcap'):
+            return {'success': False, 'error': f'Unsupported ROS2 conversion target: {target_format}'}
+
+        try:
+            import os
+            import shutil
+
+            bag_dir = self.bag_path.rstrip('/')
+            base_name = os.path.basename(bag_dir)
+            parent_dir = os.path.dirname(bag_dir)
+            suffix = '_mcap' if target_format == 'ros2_mcap' else '_db3'
+            output_dir = os.path.join(parent_dir, base_name + suffix)
+            dst_storage = 'mcap' if target_format == 'ros2_mcap' else 'sqlite3'
+
+            if os.path.isdir(output_dir):
+                self.get_logger().info(f'Removing existing output dir: {output_dir}')
+                shutil.rmtree(output_dir)
+
+            self.get_logger().info(
+                f'Converting ROS2 bag storage: {self.bag_path} -> {output_dir} ({target_format})'
+            )
+
+            convert_cmd = self._get_rosbags_convert_cmd()
+            if convert_cmd is None:
+                return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
+
+            cmd = [
+                convert_cmd,
+                '--src',
+                self.bag_path,
+                '--dst',
+                output_dir,
+                '--dst-storage',
+                dst_storage,
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or result.stdout.strip()
+                self.get_logger().error(f'rosbags-convert failed: {error_msg}')
+                return {'success': False, 'error': error_msg}
+
+            if target_format == 'ros2_db3':
+                _patch_rosbag2_tf_static_qos(output_dir, self.get_logger())
+
+            self.get_logger().info(f'ROS2 bag format converted successfully: {output_dir}')
+            return {'success': True, 'output_path': output_dir, 'format': target_format}
+
+        except subprocess.TimeoutExpired:
+            self.get_logger().error('Timeout during ROS2 bag format conversion')
+            return {'success': False, 'error': 'Conversion timed out'}
+        except Exception as e:
+            self.get_logger().error(f'Failed to convert ROS2 bag format: {str(e)}')
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
@@ -7879,8 +8024,13 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             else:
                 result = self.node.set_bag_playback_rate(rate)
             response = result
+        elif parsed_path.path == '/api/bag/convert':
+            target_format = data.get('format', 'ros2_db3')
+            result = self.node.convert_bag(target_format=target_format)
+            response = result
         elif parsed_path.path == '/api/bag/convert_ros1':
-            result = self.node.convert_ros1_bag()
+            target_format = data.get('format', 'ros2_db3')
+            result = self.node.convert_ros1_bag(target_format=target_format)
             response = result
         elif parsed_path.path == '/api/bag/convert_to_ros1':
             result = self.node.convert_ros2_to_ros1_bag()

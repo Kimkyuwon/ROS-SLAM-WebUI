@@ -211,7 +211,18 @@
 
                             <div class="analytics-card" id="widget-ram">
                                 <div class="analytics-card-title">RAM Usage</div>
-                                <div id="analytics-chart-ram" style="height:130px;"></div>
+                                <div class="analytics-cpu-wrap analytics-ram-wrap">
+                                    <div class="analytics-cpu-top-row">
+                                        <span class="analytics-cpu-percent" id="analytics-ram-value">—<span class="analytics-cpu-pct-sym"> MB</span></span>
+                                        <span class="analytics-cpu-cores-equiv" id="analytics-ram-sub"></span>
+                                    </div>
+                                    <div class="analytics-cpu-bar-bg">
+                                        <div class="analytics-cpu-bar-fill" id="analytics-ram-bar-fill" style="width:0%"></div>
+                                    </div>
+                                    <div class="analytics-cpu-ticks">
+                                        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -536,7 +547,18 @@
 
                             <div class="analytics-card">
                                 <div class="analytics-card-title">RAM Usage</div>
-                                <div id="loc-analytics-chart-ram" style="height:130px;"></div>
+                                <div class="analytics-cpu-wrap analytics-ram-wrap">
+                                    <div class="analytics-cpu-top-row">
+                                        <span class="analytics-cpu-percent" id="loc-analytics-ram-value">—<span class="analytics-cpu-pct-sym"> MB</span></span>
+                                        <span class="analytics-cpu-cores-equiv" id="loc-analytics-ram-sub"></span>
+                                    </div>
+                                    <div class="analytics-cpu-bar-bg">
+                                        <div class="analytics-cpu-bar-fill" id="loc-analytics-ram-bar-fill" style="width:0%"></div>
+                                    </div>
+                                    <div class="analytics-cpu-ticks">
+                                        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -811,8 +833,17 @@
                         <button onclick="loadBagFile()">Load Bag File</button>
                         <span id="bag-ros1-badge" style="display:none;" class="ros1-badge">ROS1 Bag</span>
                         <span id="bag-ros2-badge" style="display:none;" class="ros2-badge">ROS2 Bag</span>
-                        <button id="convert-to-ros2-btn" style="display:none;" onclick="convertToRos2()">Convert to ROS2</button>
-                        <button id="convert-to-ros1-btn" style="display:none;" onclick="convertToRos1()">Convert to ROS1</button>
+                    </div>
+
+                    <div id="bag-convert-controls" class="form-group" style="display:none;">
+                        <label>Format:</label>
+                        <select id="player-format-select" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                            <option value="ros2_mcap">ROS2 (mcap)</option>
+                            <option value="ros2_db3">ROS2 (db3)</option>
+                            <option value="ros1">ROS1 (.bag)</option>
+                        </select>
+                        <button id="convert-bag-btn" onclick="convertBag()">Convert</button>
+                        <div></div>
                     </div>
 
                     <div class="form-group">
@@ -1577,7 +1608,7 @@
     <script src="static/plot_manager.js"></script>
     
     <script src="static/webui_ports.js"></script>
-    <script src="static/script.js?v=20260709j"></script>
+    <script src="static/script.js?v=20260710a"></script>
     
     <!-- Three.js and OrbitControls as ES6 modules (local vendor — offline/navifra compatible) -->
     <script type="module">

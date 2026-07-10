@@ -54,6 +54,7 @@ const bagPlayerState = {
     availableTopics: [],
     bagDuration: 0.0,
     bagType: 'ros2',   // 'ros1' or 'ros2'
+    bagFormat: 'ros2_db3', // 'ros1' | 'ros2_db3' | 'ros2_mcap'
     playbackRate: 1.0, // ROS1 재생 속도 배율
     wasPlaying: false  // 재생 종료 시 슬라이더 리셋 감지용
 };
@@ -721,6 +722,8 @@ function applyBagPlayerInfo(path, result, opts = {}) {
     bagPlayerState.bagDuration = result.duration || 0.0;
     bagPlayerState.bagType = result.bag_type
         || (path && path.endsWith('.bag') ? 'ros1' : 'ros2');
+    bagPlayerState.bagFormat = result.bag_format
+        || (bagPlayerState.bagType === 'ros1' ? 'ros1' : 'ros2_db3');
 
     if (selectedTopicsOverride && selectedTopicsOverride.length > 0) {
         bagPlayerState.selectedTopics = selectedTopicsOverride.slice();
@@ -738,12 +741,11 @@ function applyBagPlayerInfo(path, result, opts = {}) {
     const isRos1 = bagPlayerState.bagType === 'ros1';
     const ros1Badge = domCache.get('bag-ros1-badge');
     const ros2Badge = domCache.get('bag-ros2-badge');
-    const convertToRos2 = domCache.get('convert-to-ros2-btn');
-    const convertToRos1 = domCache.get('convert-to-ros1-btn');
     if (ros1Badge) ros1Badge.style.display = isRos1 ? 'inline' : 'none';
     if (ros2Badge) ros2Badge.style.display = !isRos1 ? 'inline' : 'none';
-    if (convertToRos2) convertToRos2.style.display = isRos1 ? 'inline-block' : 'none';
-    if (convertToRos1) convertToRos1.style.display = !isRos1 ? 'inline-block' : 'none';
+    const convertControls = domCache.get('bag-convert-controls');
+    if (convertControls) convertControls.style.display = path ? '' : 'none';
+    updatePlayerFormatSelectDefault();
     const rateControls = domCache.get('ros1-playback-controls');
     if (rateControls) rateControls.style.display = 'block';
 
@@ -1212,100 +1214,77 @@ async function applyPlaybackRateLive(rate) {
 }
 
 /**
- * ROS1 bag 파일을 ROS2 포맷으로 변환
- * POST /api/bag/convert_ros1 호출 후 변환된 ROS2 bag 자동 로드
+ * bag player 변환 포맷 select 기본값 설정 (현재 포맷과 다른 타깃)
  */
-async function convertToRos2() {
+function updatePlayerFormatSelectDefault() {
+    const select = domCache.get('player-format-select');
+    if (!select) return;
+
+    const currentFormat = bagPlayerState.bagFormat
+        || (bagPlayerState.bagType === 'ros1' ? 'ros1' : 'ros2_db3');
+    const defaultTargets = {
+        ros1: 'ros2_mcap',
+        ros2_db3: 'ros1',
+        ros2_mcap: 'ros1',
+    };
+    select.value = defaultTargets[currentFormat] || 'ros2_mcap';
+}
+
+/**
+ * 선택한 포맷으로 bag 변환
+ * POST /api/bag/convert 호출 후 변환된 bag 자동 로드
+ */
+async function convertBag() {
     const bagPath = domCache.get('bag-directory').value;
     if (!bagPath) {
-        alert('Please load a ROS1 bag file first');
+        alert('Please load a bag file first');
         return;
     }
 
-    const btn = domCache.get('convert-to-ros2-btn');
+    const targetFormat = domCache.get('player-format-select').value;
+    const currentFormat = bagPlayerState.bagFormat
+        || (bagPlayerState.bagType === 'ros1' ? 'ros1' : 'ros2_db3');
+    if (targetFormat === currentFormat) {
+        alert('Bag is already in the selected format');
+        return;
+    }
+
+    const btn = domCache.get('convert-bag-btn');
     const originalText = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Converting...';
 
     try {
-        const result = await apiCall('/api/bag/convert_ros1', { path: bagPath });
-        if (result.success) {
-            // 버튼 상태 항상 복원 (재사용 가능하도록)
-            btn.disabled = false;
-            btn.textContent = originalText;
+        const result = await apiCall('/api/bag/convert', { format: targetFormat });
+        btn.disabled = false;
+        btn.textContent = originalText;
 
+        if (result.success) {
             alert(`Conversion complete!\nOutput: ${result.output_path}`);
 
-            // 변환된 ROS2 bag 자동 로드
             const outputPath = result.output_path;
-            domCache.get('bag-directory').value = outputPath;
-            const loadResult = await apiCall('/api/bag/load', { path: outputPath });
-            if (loadResult.success) {
-                bagPlayerState.availableTopics = loadResult.topics || [];
-                bagPlayerState.selectedTopics = [...bagPlayerState.availableTopics];
-                bagPlayerState.bagDuration = loadResult.duration || 0.0;
-                bagPlayerState.bagType = loadResult.bag_type || 'ros2';
-
-                // ROS1/ROS2 배지, Convert 버튼 업데이트; 속도 슬라이더는 유지
-                const isRos1 = bagPlayerState.bagType === 'ros1';
-                domCache.get('bag-ros1-badge').style.display = isRos1 ? 'inline' : 'none';
-                domCache.get('bag-ros2-badge').style.display = !isRos1 ? 'inline' : 'none';
-                domCache.get('convert-to-ros2-btn').style.display = isRos1 ? 'inline-block' : 'none';
-                domCache.get('convert-to-ros1-btn').style.display = !isRos1 ? 'inline-block' : 'none';
-                // 변환 후에도 rate 슬라이더는 표시 유지
-                const ros1Controls = domCache.get('ros1-playback-controls');
-                if (ros1Controls) {
-                    ros1Controls.style.display = 'block';
+            if (outputPath) {
+                domCache.get('bag-directory').value = outputPath;
+                const loadResult = await apiCall('/api/bag/load', { path: outputPath });
+                if (loadResult.success) {
+                    applyBagPlayerInfo(outputPath, loadResult, { resetSlider: true });
+                    if (typeof resetViewerTopicSubscriptions === 'function') {
+                        resetViewerTopicSubscriptions();
+                    }
+                    if (typeof resetBagFrameAndTFState === 'function') {
+                        resetBagFrameAndTFState();
+                    }
+                    console.log('Converted bag loaded:', outputPath);
                 }
-
-                updateBagTimeLabel(0, bagPlayerState.bagDuration);
-                updateSelectedTopicsDisplay();
-                if (typeof resetViewerTopicSubscriptions === 'function') {
-                    resetViewerTopicSubscriptions();
-                }
-                if (typeof resetBagFrameAndTFState === 'function') {
-                    resetBagFrameAndTFState();
-                }
-                console.log('Converted ROS2 bag loaded:', outputPath);
             }
         } else {
             alert('Conversion failed: ' + (result.error || 'Unknown error'));
-            btn.disabled = false;
-            btn.textContent = originalText;
         }
     } catch (error) {
-        console.error('convertToRos2 error:', error);
+        console.error('convertBag error:', error);
         alert('Conversion failed: ' + error.message);
         btn.disabled = false;
         btn.textContent = originalText;
-    }
-}
-
-async function convertToRos1() {
-    const bagPath = domCache.get('bag-directory').value;
-    if (!bagPath || bagPlayerState.bagType !== 'ros2') {
-        alert('Please load a ROS2 bag first');
-        return;
-    }
-
-    const btn = domCache.get('convert-to-ros1-btn');
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Converting...';
-
-    try {
-        const result = await apiCall('/api/bag/convert_to_ros1', {});
-        btn.disabled = false;
-        btn.textContent = originalText;
-        if (result.success) {
-            alert(`Conversion complete!\nOutput: ${result.output_path}`);
-        } else {
-            alert('Conversion failed: ' + (result.error || 'Unknown error'));
-        }
-    } catch (e) {
-        btn.disabled = false;
-        btn.textContent = originalText;
-        alert('Conversion error: ' + e.message);
     }
 }
 
@@ -3430,6 +3409,210 @@ function _syncPointsGeometry(geo, count) {
     geo.computeBoundingSphere();
 }
 
+/**
+ * 복셀 그리드 centroid 다운샘플링 (PCL VoxelGrid 유사)
+ * @param {Float32Array} positions - N×3 XYZ
+ * @param {Float32Array|null} colors - N×3 RGB (optional)
+ * @param {number} voxelSize - 복셀 leaf size (m)
+ * @param {{ whiteOutput?: boolean }} options - whiteOutput 시 (1,1,1) 고정
+ */
+function _voxelDownsample(positions, colors, voxelSize, options = {}) {
+    const { whiteOutput = false } = options;
+    const n = positions.length / 3;
+    if (n === 0) return { positions: new Float32Array(0), colors: new Float32Array(0) };
+
+    // whiteOutput: first-wins (centroid 불필요) — 메인스레드 부하 대폭 감소
+    if (whiteOutput) {
+        const seen = new Map();
+        for (let i = 0; i < n; i++) {
+            const x = positions[i * 3];
+            const y = positions[i * 3 + 1];
+            const z = positions[i * 3 + 2];
+            const vk = (Math.floor(x / voxelSize) * 73856093)
+                ^ (Math.floor(y / voxelSize) * 19349663)
+                ^ (Math.floor(z / voxelSize) * 83492791);
+            if (seen.has(vk)) continue;
+            seen.set(vk, i);
+        }
+        const outCount = seen.size;
+        const outPos = new Float32Array(outCount * 3);
+        const outCol = new Float32Array(outCount * 3);
+        let o = 0;
+        for (const i of seen.values()) {
+            outPos[o]     = positions[i * 3];
+            outPos[o + 1] = positions[i * 3 + 1];
+            outPos[o + 2] = positions[i * 3 + 2];
+            outCol[o] = 1.0;
+            outCol[o + 1] = 1.0;
+            outCol[o + 2] = 1.0;
+            o += 3;
+        }
+        return { positions: outPos, colors: outCol };
+    }
+
+    const voxels = new Map();
+    for (let i = 0; i < n; i++) {
+        const x = positions[i * 3];
+        const y = positions[i * 3 + 1];
+        const z = positions[i * 3 + 2];
+        const vk = (Math.floor(x / voxelSize) * 73856093)
+            ^ (Math.floor(y / voxelSize) * 19349663)
+            ^ (Math.floor(z / voxelSize) * 83492791);
+        let v = voxels.get(vk);
+        if (!v) {
+            v = { sx: x, sy: y, sz: z, count: 1 };
+            if (colors) {
+                v.scr = colors[i * 3];
+                v.scg = colors[i * 3 + 1];
+                v.scb = colors[i * 3 + 2];
+            }
+            voxels.set(vk, v);
+        } else {
+            v.sx += x;
+            v.sy += y;
+            v.sz += z;
+            v.count++;
+            if (colors) {
+                v.scr += colors[i * 3];
+                v.scg += colors[i * 3 + 1];
+                v.scb += colors[i * 3 + 2];
+            }
+        }
+    }
+
+    const outCount = voxels.size;
+    const outPos = new Float32Array(outCount * 3);
+    const outCol = new Float32Array(outCount * 3);
+    let o = 0;
+    for (const v of voxels.values()) {
+        const c = v.count;
+        outPos[o]     = v.sx / c;
+        outPos[o + 1] = v.sy / c;
+        outPos[o + 2] = v.sz / c;
+        if (colors) {
+            outCol[o]     = v.scr / c;
+            outCol[o + 1] = v.scg / c;
+            outCol[o + 2] = v.scb / c;
+        }
+        o += 3;
+    }
+    return { positions: outPos, colors: outCol };
+}
+
+// Live path: throttle + pose sliding window
+// CatmullRom 제어점은 MAX_CTRL로 서브샘플 — 대량 Vector3 매 rebuild는 메인스레드 스톨 원인.
+const LIVE_PATH_MAX_POSES = 1000;
+/** Localization Live Viewer: /Odometry path 포인트 최소 간격 (m, 3D) */
+const LIVE_PATH_MIN_DIST_M = 1.0;
+/** Live Viewer 점군 메인스레드 처리 상한 (cloud_registered) */
+const LIVE_CLOUD_UPDATE_MS = 1000;
+/** Localization /Laser_map latched 대용량 갱신 상한 */
+const LIVE_LASER_MAP_UPDATE_MS = 2000;
+const LIVE_PATH_REBUILD_MS = 400;
+const LIVE_PATH_MAX_CTRL_POINTS = 250;
+const LIVE_PATH_MAX_TUBE_SEGMENTS = 200;
+
+/** Path 바이너리 스냅샷을 버퍼에 병합 (증분 append 또는 reset) 후 FIFO trim */
+function _mergePathSnapshot(bufferState, xyz, count, maxPoses) {
+    if (count < 1) return bufferState;
+
+    const lastMsgCount = bufferState.lastMsgCount || 0;
+    let buf = bufferState.xyz;
+
+    if (count < lastMsgCount) {
+        buf = xyz.slice(0, count * 3);
+        bufferState.lastMsgCount = count;
+    } else if (count > lastMsgCount) {
+        const newPart = xyz.subarray(lastMsgCount * 3, count * 3);
+        if (!buf || buf.length === 0) {
+            buf = xyz.slice(0, count * 3);
+        } else if (newPart.length > 0) {
+            const merged = new Float32Array(buf.length + newPart.length);
+            merged.set(buf);
+            merged.set(newPart, buf.length);
+            buf = merged;
+        }
+        bufferState.lastMsgCount = count;
+    } else if (!buf || buf.length === 0) {
+        buf = xyz.slice(0, count * 3);
+        bufferState.lastMsgCount = count;
+    }
+
+    let poseCount = buf.length / 3;
+    if (poseCount > maxPoses) {
+        const trim = poseCount - maxPoses;
+        buf = buf.slice(trim * 3);
+        poseCount = maxPoses;
+    }
+
+    bufferState.xyz = buf;
+    bufferState.count = poseCount;
+    return bufferState;
+}
+
+/**
+ * 키프레임 전체 스냅샷(예: /kf_node PointCloud2)으로 path 버퍼를 교체.
+ * 최근 maxPoses개만 유지 — 시각화 tube rebuild 시 오래된 구간 자동 제거.
+ */
+function _setPathFromKeyframeSnapshot(bufferState, positions, maxPoses) {
+    const count = (positions && positions.length) ? (positions.length / 3) : 0;
+    if (count < 1) {
+        bufferState.xyz = null;
+        bufferState.count = 0;
+        bufferState.lastMsgCount = 0;
+        return bufferState;
+    }
+    const keep = Math.min(count, maxPoses);
+    const start = (count - keep) * 3;
+    bufferState.xyz = positions.slice(start, count * 3);
+    bufferState.count = keep;
+    bufferState.lastMsgCount = count;
+    return bufferState;
+}
+
+function _clearPathBufferState(viewer, bufferKey, timerKey) {
+    viewer[bufferKey] = { xyz: null, count: 0, lastMsgCount: 0 };
+    if (viewer[timerKey]) {
+        clearTimeout(viewer[timerKey]);
+        viewer[timerKey] = null;
+    }
+}
+
+function _schedulePathTubeRebuild(viewer, timerKey, rebuildFn) {
+    if (viewer[timerKey]) return;
+    viewer[timerKey] = setTimeout(() => {
+        viewer[timerKey] = null;
+        rebuildFn();
+    }, LIVE_PATH_REBUILD_MS);
+}
+
+/** 버퍼 XYZ → TubeGeometry Mesh 생성 (제어점 서브샘플로 CPU 스톨 방지) */
+function _buildPathTubeFromBuffer(THREE, bufferState, color, tubeRadius, radialSegments = 5) {
+    const count = bufferState.count;
+    if (count < 2) return null;
+
+    const xyz = bufferState.xyz;
+    const step = Math.max(1, Math.ceil(count / LIVE_PATH_MAX_CTRL_POINTS));
+    const points3d = [];
+    for (let i = 0; i < count; i += step) {
+        points3d.push(new THREE.Vector3(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]));
+    }
+    const last = count - 1;
+    if (last % step !== 0) {
+        points3d.push(new THREE.Vector3(xyz[last * 3], xyz[last * 3 + 1], xyz[last * 3 + 2]));
+    }
+    if (points3d.length < 2) return null;
+
+    const curve = new THREE.CatmullRomCurve3(points3d);
+    const segments = Math.min(points3d.length * 2, LIVE_PATH_MAX_TUBE_SEGMENTS);
+    const geo = new THREE.TubeGeometry(curve, segments, tubeRadius, radialSegments, false);
+    const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.visible = true;
+    mesh.frustumCulled = false;
+    return mesh;
+}
+
 let _latencyPingWorker = null;
 
 function _ensureLatencyPingWorker() {
@@ -4137,6 +4320,12 @@ function initRosbridge() {
         return;
     }
 
+    // close→reconnect 타이머가 중복 쌓이지 않도록
+    if (initRosbridge._reconnectTimer) {
+        clearTimeout(initRosbridge._reconnectTimer);
+        initRosbridge._reconnectTimer = null;
+    }
+
     const doInit = async () => {
         try {
             const url = _getRosbridgeUrl();
@@ -4196,7 +4385,11 @@ function initRosbridge() {
                     container.innerHTML = '<div class="plot-tree-status-msg" style="color: var(--muted); padding: 12px; text-align: center;">rosbridge disconnected. Reconnecting...</div>';
                 }
                 plotState.ros = null;
-                setTimeout(() => {
+                if (initRosbridge._reconnectTimer) {
+                    clearTimeout(initRosbridge._reconnectTimer);
+                }
+                initRosbridge._reconnectTimer = setTimeout(() => {
+                    initRosbridge._reconnectTimer = null;
                     initRosbridge();
                 }, 3000);
             });
@@ -5865,7 +6058,9 @@ class LocalizationLiveViewer {
         this._mapObj = null;
         this._pathObj = null;
         this._tfObjects = {};
-        this._robotPos = null;   // THREE.Vector3 — updated from base_link TF
+        this._robotOdomGroup = null; // THREE.Group — robot axes from /Odometry
+        this._odomTopic = '/Odometry';
+        this._robotPos = null;   // THREE.Vector3 — updated from /Odometry
         this._followMode = true; // camera follow toggle
         this._mapMesh = null;
         this._mapTexture = null;
@@ -5879,6 +6074,16 @@ class LocalizationLiveViewer {
         this._resizeObserver = null;
         this._backendSubscribed = false;
         this._wsConnectGen = 0;
+        this._rosbridgeSubscribed = false;
+        this._cloudBusy = false;
+        this._cloudLastMs = 0;
+        this._laserMapLastMs = 0;
+        this._cloudBusyWatchdog = null;
+        this._perspPointSizesDirty = false;
+        this._lastOrthoScale = undefined;
+        this._pathPoseBuffer = { xyz: null, count: 0, lastMsgCount: 0 };
+        this._pathRebuildTimer = null;
+        this._lastPathPose = null; // {x,y,z} — /Odometry path 샘플링용
     }
 
     _waitForThree() {
@@ -5966,10 +6171,12 @@ class LocalizationLiveViewer {
 
             if (this._controls) this._controls.update();
             // OrthographicCamera 탑뷰 시: zoom 변화에 따라 포인트 픽셀 크기 갱신
+            // Perspective: dirty일 때만 복원 (매 프레임 needsUpdate 금지)
             if (this._topView && this._orthoCamera) {
                 this._updateOrthoPointSizes();
-            } else {
+            } else if (this._perspPointSizesDirty) {
                 this._ensurePerspectivePointSizes();
+                this._perspPointSizesDirty = false;
             }
             if (this._renderer && this._scene && this._camera) {
                 this._renderer.render(this._scene, this._camera);
@@ -5995,10 +6202,18 @@ class LocalizationLiveViewer {
      */
     _updateOrthoPointSizes() {
         const scale = this._getOrthoPixelsPerUnit();
+        if (this._lastOrthoScale !== undefined && Math.abs(this._lastOrthoScale - scale) < 0.05) {
+            return;
+        }
+        this._lastOrthoScale = scale;
         const update = (obj) => {
             if (!obj || !obj.material) return;
             if (!('size' in obj.material)) return;
-            obj.material.sizeAttenuation = false;
+            // sizeAttenuation 변경 시에만 needsUpdate (매 프레임 셰이더 재컴파일 방지)
+            if (obj.material.sizeAttenuation !== false) {
+                obj.material.sizeAttenuation = false;
+                obj.material.needsUpdate = true;
+            }
             const baseSize = obj.material._baseSize || 0.1;
             obj.material.size = Math.max(1, baseSize * scale);
         };
@@ -6010,9 +6225,18 @@ class LocalizationLiveViewer {
     _ensurePerspectivePointSizes() {
         const fix = (obj) => {
             if (!obj || !obj.material || obj.material._baseSize === undefined) return;
+            if (!('size' in obj.material)) return;
+            let attenuationChanged = false;
             if (obj.material.sizeAttenuation !== true) {
                 obj.material.sizeAttenuation = true;
+                attenuationChanged = true;
+            }
+            if (obj.material.size !== obj.material._baseSize) {
                 obj.material.size = obj.material._baseSize;
+            }
+            // sizeAttenuation 토글만 셰이더 define 변경 → needsUpdate
+            if (attenuationChanged) {
+                obj.material.needsUpdate = true;
             }
         };
         fix(this._cloudObj);
@@ -6047,6 +6271,7 @@ class LocalizationLiveViewer {
         await this._init();
         await new Promise(resolve => requestAnimationFrame(resolve));
         this._resizeRenderer();
+        this.toggleTopView(true);
         await this._connectAndSubscribe();
     }
 
@@ -6054,6 +6279,14 @@ class LocalizationLiveViewer {
         this._visible = false;
         this._wsConnectGen++;
         this._backendSubscribed = false;
+        this._rosbridgeSubscribed = false;
+        this._cloudBusy = false;
+        this._cloudLastMs = 0;
+        this._laserMapLastMs = 0;
+        if (this._cloudBusyWatchdog) {
+            clearTimeout(this._cloudBusyWatchdog);
+            this._cloudBusyWatchdog = null;
+        }
         this._unsubscribeAll();
         this._clearLiveObjects();
         const viewerEl = document.getElementById('localization-live-viewer');
@@ -6085,12 +6318,19 @@ class LocalizationLiveViewer {
         this._cloudObj = null;
         this._mapObj = null;
         this._pathObj = null;
+        _clearPathBufferState(this, '_pathPoseBuffer', '_pathRebuildTimer');
+        this._lastPathPose = null;
 
         for (const key of Object.keys(this._tfObjects)) {
             const entry = this._tfObjects[key];
             if (entry && entry.group) this._scene.remove(entry.group);
         }
         this._tfObjects = {};
+
+        if (this._robotOdomGroup) {
+            this._scene.remove(this._robotOdomGroup);
+            this._robotOdomGroup = null;
+        }
 
         if (this._mapMesh) {
             this._scene.remove(this._mapMesh);
@@ -6116,7 +6356,7 @@ class LocalizationLiveViewer {
             await ensureWebuiPortsReady();
         }
 
-        // PC2/Path는 Python 백엔드 WS(8881) — rosbridge 연결과 무관하게 즉시 구독
+        // PC2는 Python 백엔드 WS(8881) — path는 /Odometry(rosbridge)에서 샘플링
         console.log('[LocalizationLiveViewer] Subscribing binary topics (backend WS 8881)');
         this._subscribeBinaryTopics();
         this._backendSubscribed = true;
@@ -6165,11 +6405,13 @@ class LocalizationLiveViewer {
     _subscribeBinaryTopics() {
         this._subscribePointCloud('/cloud_registered', 'cloud_registered');
         this._subscribePointCloudLatched('/Laser_map', 'laser_map');
-        this._subscribePathBinary('/path');
+        // path는 /Odometry 위치 샘플링 (_subscribeOdometry) — /path 바이너리 구독 없음
     }
 
     _subscribeRosbridgeTopics() {
-        if (!this._ros) return;
+        if (!this._ros || this._rosbridgeSubscribed) return;
+        this._rosbridgeSubscribed = true;
+        this._subscribeOdometry(this._odomTopic);
         this._subscribeTF('/tf');
         this._subscribeMap('/map');
     }
@@ -6184,6 +6426,7 @@ class LocalizationLiveViewer {
             try { t.unsubscribe(); } catch (e) { /* ignore */ }
         }
         this._subscriptions = [];
+        this._rosbridgeSubscribed = false;
     }
 
     _parsePC2(msg) {
@@ -6337,8 +6580,37 @@ class LocalizationLiveViewer {
             'LocalizationLiveViewer',
             (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe', topic })); },
             (buffer) => {
-                const parsed = viewer._parseBinaryPC2(buffer);
-                if (parsed) viewer._updatePointCloud(key, parsed);
+                if (key === 'cloud_registered') {
+                    const now = performance.now();
+                    if (viewer._cloudBusy) return;
+                    if (now - (viewer._cloudLastMs || 0) < LIVE_CLOUD_UPDATE_MS) return;
+                    viewer._cloudBusy = true;
+                    viewer._cloudLastMs = now;
+                    if (viewer._cloudBusyWatchdog) clearTimeout(viewer._cloudBusyWatchdog);
+                    viewer._cloudBusyWatchdog = setTimeout(() => {
+                        viewer._cloudBusy = false;
+                        viewer._cloudBusyWatchdog = null;
+                    }, 3000);
+                    try {
+                        let parsed = viewer._parseBinaryPC2(buffer, {
+                            maxPts: 40000,
+                            fillWhite: true
+                        });
+                        if (!parsed) return;
+                        parsed = _voxelDownsample(parsed.positions, parsed.colors, 0.5, { whiteOutput: true });
+                        viewer._updatePointCloud(key, parsed);
+                    } finally {
+                        viewer._cloudBusy = false;
+                        if (viewer._cloudBusyWatchdog) {
+                            clearTimeout(viewer._cloudBusyWatchdog);
+                            viewer._cloudBusyWatchdog = null;
+                        }
+                    }
+                    return;
+                }
+                let parsed = viewer._parseBinaryPC2(buffer, { maxPts: 80000 });
+                if (!parsed) return;
+                viewer._updatePointCloud(key, parsed);
             }
         );
         this._subscriptions.push(sub);
@@ -6357,8 +6629,17 @@ class LocalizationLiveViewer {
                 console.log(`[LocalizationLiveViewer] subscribe_latched 전송: ${topic}`);
             },
             (buffer) => {
-                const parsed = viewer._parseBinaryPC2(buffer);
-                if (parsed) viewer._updatePointCloud(key, parsed);
+                if (key === 'laser_map') {
+                    const now = performance.now();
+                    if (now - (viewer._laserMapLastMs || 0) < LIVE_LASER_MAP_UPDATE_MS) return;
+                    viewer._laserMapLastMs = now;
+                }
+                let parsed = viewer._parseBinaryPC2(buffer);
+                if (!parsed) return;
+                if (key === 'laser_map') {
+                    parsed = _voxelDownsample(parsed.positions, parsed.colors, 1.0);
+                }
+                viewer._updatePointCloud(key, parsed);
             }
         );
         this._subscriptions.push(sub);
@@ -6367,7 +6648,8 @@ class LocalizationLiveViewer {
     // Python 백엔드 binary PC2 패킷 파싱
     // 패킷 포맷: [3B]'PC2' [1B]version [1B]flags [4B]topicLen [4B]frameLen [4B]count
     //            [topicLen]topic [frameLen]frameId [count*12]XYZ [count*4]colorF32 ([count*4]rgb)
-    _parseBinaryPC2(buffer) {
+    // options: { maxPts, fillWhite } — fillWhite면 rainbow 생략(흰색 스캔용)
+    _parseBinaryPC2(buffer, options = {}) {
         try {
             const view = new DataView(buffer);
             if (view.getUint8(0) !== 0x50 || view.getUint8(1) !== 0x43 || view.getUint8(2) !== 0x32) return null;
@@ -6380,12 +6662,13 @@ class LocalizationLiveViewer {
             off += topicLen + frameLen; // skip names
             if (count === 0) return null;
 
-            const MAX_PTS = 80000;
+            const MAX_PTS = options.maxPts || 80000;
+            const fillWhite = !!options.fillWhite;
             const step    = Math.max(1, Math.floor(count / MAX_PTS));
             const outPts  = Math.ceil(count / step);
             const positions = new Float32Array(outPts * 3);
             const colors    = new Float32Array(outPts * 3);
-            const tempZ     = new Float32Array(outPts);
+            const tempZ     = fillWhite ? null : new Float32Array(outPts);
             let minZ = Infinity, maxZ = -Infinity, idx = 0;
 
             const xyzBase = off;
@@ -6399,19 +6682,27 @@ class LocalizationLiveViewer {
                 positions[idx * 3]     = x;
                 positions[idx * 3 + 1] = y;
                 positions[idx * 3 + 2] = z;
-                tempZ[idx] = z;
-                if (z < minZ) minZ = z;
-                if (z > maxZ) maxZ = z;
+                if (fillWhite) {
+                    colors[idx * 3] = 1.0;
+                    colors[idx * 3 + 1] = 1.0;
+                    colors[idx * 3 + 2] = 1.0;
+                } else {
+                    tempZ[idx] = z;
+                    if (z < minZ) minZ = z;
+                    if (z > maxZ) maxZ = z;
+                }
                 idx++;
             }
 
-            const range = (maxZ - minZ) || 1;
-            for (let i = 0; i < idx; i++) {
-                const t = (tempZ[i] - minZ) / range;
-                const [r, g, b] = this._rainbowColor(t);
-                colors[i * 3]     = r;
-                colors[i * 3 + 1] = g;
-                colors[i * 3 + 2] = b;
+            if (!fillWhite) {
+                const range = (maxZ - minZ) || 1;
+                for (let i = 0; i < idx; i++) {
+                    const t = (tempZ[i] - minZ) / range;
+                    const [r, g, b] = this._rainbowColor(t);
+                    colors[i * 3]     = r;
+                    colors[i * 3 + 1] = g;
+                    colors[i * 3 + 2] = b;
+                }
             }
             return {
                 positions: positions.subarray(0, idx * 3),
@@ -6500,25 +6791,119 @@ class LocalizationLiveViewer {
         if (!this._scene || !THREE) return;
 
         const count = parsed.count;
-        if (count < 2) return;
+        if (count < 1) return;
+
+        _mergePathSnapshot(this._pathPoseBuffer, parsed.xyz, count, LIVE_PATH_MAX_POSES);
+        _schedulePathTubeRebuild(this, '_pathRebuildTimer', () => this._rebuildPathFromBuffer());
+    }
+
+    _rebuildPathFromBuffer() {
+        const THREE = window.THREE;
+        if (!this._scene || !THREE) return;
+
+        const count = this._pathPoseBuffer.count;
+        if (count < 2) {
+            // 포인트 부족 시 기존 tube 제거 (sliding window / clear 후 잔상 방지)
+            if (this._pathObj) {
+                _disposePathObject(this._scene, this._pathObj);
+                this._pathObj = null;
+            }
+            return;
+        }
 
         _disposePathObject(this._scene, this._pathObj);
         this._pathObj = null;
 
-        const xyz = parsed.xyz;
-        const points3d = [];
-        for (let i = 0; i < count; i++) {
-            points3d.push(new THREE.Vector3(xyz[i*3], xyz[i*3+1], xyz[i*3+2]));
-        }
-        const curve = new THREE.CatmullRomCurve3(points3d);
-        const segments = Math.min(count * 2, 400);
-        const geo = new THREE.TubeGeometry(curve, segments, 0.08, 5, false);
-        const mat = new THREE.MeshBasicMaterial({ color: 0x00ff44, side: THREE.DoubleSide });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.visible = true;
-        mesh.frustumCulled = false;
+        const mesh = _buildPathTubeFromBuffer(THREE, this._pathPoseBuffer, 0x00ff44, 0.08);
+        if (!mesh) return;
         this._pathObj = mesh;
         this._scene.add(mesh);
+    }
+
+    /**
+     * /Odometry 위치 → path 버퍼에 조건부 append (1m 이상 이동 시, 최대 LIVE_PATH_MAX_POSES).
+     * 첫 포인트는 무조건 추가. append 후 tube rebuild throttle.
+     */
+    _appendPathFromOdometry(x, y, z) {
+        const last = this._lastPathPose;
+        if (last) {
+            const dist = Math.hypot(x - last.x, y - last.y, z - last.z);
+            if (dist < LIVE_PATH_MIN_DIST_M) return;
+        }
+
+        let buf = this._pathPoseBuffer.xyz;
+        let count = this._pathPoseBuffer.count || 0;
+
+        if (!buf || count === 0) {
+            buf = new Float32Array(3);
+            buf[0] = x;
+            buf[1] = y;
+            buf[2] = z;
+            count = 1;
+        } else if (count >= LIVE_PATH_MAX_POSES) {
+            // sliding window: 가장 오래된 1개 제거 후 새 포인트 append
+            const next = new Float32Array(LIVE_PATH_MAX_POSES * 3);
+            next.set(buf.subarray(3, count * 3));
+            const i = (LIVE_PATH_MAX_POSES - 1) * 3;
+            next[i] = x;
+            next[i + 1] = y;
+            next[i + 2] = z;
+            buf = next;
+            count = LIVE_PATH_MAX_POSES;
+        } else {
+            const next = new Float32Array((count + 1) * 3);
+            next.set(buf);
+            next[count * 3] = x;
+            next[count * 3 + 1] = y;
+            next[count * 3 + 2] = z;
+            buf = next;
+            count += 1;
+        }
+
+        this._pathPoseBuffer.xyz = buf;
+        this._pathPoseBuffer.count = count;
+        this._lastPathPose = { x, y, z };
+        _schedulePathTubeRebuild(this, '_pathRebuildTimer', () => this._rebuildPathFromBuffer());
+    }
+
+    _subscribeOdometry(topic) {
+        const t = new ROSLIB.Topic({
+            ros: this._ros,
+            name: topic,
+            messageType: getMsgType('nav_msgs/Odometry', 'nav_msgs/msg/Odometry'),
+            throttle_rate: 200,
+            queue_length: 1
+        });
+        t.subscribe((msg) => {
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+
+            const pos = msg.pose.pose.position;
+            const rot = msg.pose.pose.orientation;
+            const frameId = (msg.header && msg.header.frame_id) ? msg.header.frame_id : '';
+            const childFrameId = msg.child_frame_id || 'base_link';
+
+            if (frameId) this._knownFrames.add(frameId);
+            if (childFrameId) this._knownFrames.add(childFrameId);
+
+            if (!this._robotOdomGroup) {
+                const group = new THREE.Group();
+                group.add(new THREE.AxesHelper(0.5));
+                this._robotOdomGroup = group;
+                group.visible = true;
+                this._scene.add(group);
+            }
+
+            this._robotOdomGroup.position.set(pos.x, pos.y, pos.z);
+            this._robotOdomGroup.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+
+            if (!this._robotPos) this._robotPos = new THREE.Vector3();
+            this._robotPos.set(pos.x, pos.y, pos.z);
+
+            // path: /Odometry 위치 샘플링 (Follow/axis와 동일 콜백, 기존 동작 유지)
+            this._appendPathFromOdometry(pos.x, pos.y, pos.z);
+        });
+        this._subscriptions.push(t);
     }
 
     _subscribeTF(topic) {
@@ -6541,6 +6926,9 @@ class LocalizationLiveViewer {
                 this._knownFrames.add(childId);
                 this._knownFrames.add(parentId);
 
+                // Robot pose/axis는 /Odometry — base_link·body TF axis는 중복 방지
+                if (childId === 'base_link' || childId === 'body') continue;
+
                 if (!this._tfObjects[childId]) {
                     const group = new THREE.Group();
                     group.add(new THREE.AxesHelper(0.5));
@@ -6552,12 +6940,6 @@ class LocalizationLiveViewer {
                 const entry = this._tfObjects[childId];
                 entry.group.position.set(trans.x, trans.y, trans.z);
                 entry.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
-
-                // Update robot position for camera follow (base_link or body frame)
-                if (childId === 'base_link' || childId === 'body') {
-                    if (!this._robotPos) this._robotPos = new window.THREE.Vector3();
-                    this._robotPos.set(trans.x, trans.y, trans.z);
-                }
             }
         });
         this._subscriptions.push(t);
@@ -6730,6 +7112,7 @@ class LocalizationLiveViewer {
 
             this._camera = this._orthoCamera;
             // 전환 즉시 포인트 크기 보정 (렌더 루프 첫 프레임 전에 적용)
+            this._lastOrthoScale = undefined;
             this._updateOrthoPointSizes();
         } else {
             // PerspectiveCamera 복원
@@ -6738,15 +7121,8 @@ class LocalizationLiveViewer {
             this._restoreOrbitControls();
 
             // Perspective 복원 시 포인트 크기를 원래 월드 단위 크기로 되돌림
-            const restoreSize = (obj) => {
-                if (obj && obj.material && obj.material._baseSize !== undefined) {
-                    obj.material.sizeAttenuation = true;
-                    obj.material.size = obj.material._baseSize;
-                }
-            };
-            restoreSize(this._cloudObj);
-            restoreSize(this._mapObj);
             this._ensurePerspectivePointSizes();
+            this._perspPointSizesDirty = false;
 
             if (this._savedCameraPos) {
                 this._perspCamera.position.copy(this._savedCameraPos);
@@ -6866,7 +7242,8 @@ class LocalizationLiveViewer {
 
 // ==============================================================
 // SlamLiveViewer - LiDAR SLAM 실시간 3D 뷰어
-// 구독 토픽: /cloud_registered, /path, /PGO_path, /loopLine, /kf_node, /tf
+// 구독 토픽: /cloud_registered, /kf_node (LIO path+구), /PGO_path, /loopLine, /tf
+// LIO path: /key_frame(fast_lio/Frame) → PGO가 발행하는 /kf_node 위치 시퀀스
 // ==============================================================
 class SlamLiveViewer {
     constructor() {
@@ -6884,20 +7261,26 @@ class SlamLiveViewer {
 
         // PointCloud2 객체
         this._cloudObj = null;        // /cloud_registered
-        this._kfNodeObj = null;       // /kf_node
+        this._kfNodeObj = null;       // /kf_node (키프레임 구)
 
         // Path 객체 (증분 렌더링: THREE.Group으로 세그먼트 누적)
-        this._pathObj = null;         // /path
+        this._pathObj = null;         // LIO path (/kf_node 키프레임 위치)
         this._pgoPathObj = null;      // /PGO_path
-        this._pathPoseCount = 0;      // 마지막으로 렌더링한 /path 포즈 수
+        this._pathPoseCount = 0;      // 마지막으로 렌더링한 LIO path 포즈 수
         this._pgoPathPoseCount = 0;   // 마지막으로 렌더링한 /PGO_path 포즈 수
+        this._pathPoseBuffer = { xyz: null, count: 0, lastMsgCount: 0 };
+        this._pgoPathPoseBuffer = { xyz: null, count: 0, lastMsgCount: 0 };
+        this._pathRebuildTimer = null;
+        this._pgoPathRebuildTimer = null;
 
         // Marker 객체 (/loopLine)
         this._loopLineObj = null;
 
         // TF 객체 (/tf) — LocalizationLiveViewer와 동일한 구조
         this._tfObjects = {};         // childFrameId → { group: THREE.Group }
-        this._robotPos   = null;   // THREE.Vector3 — updated from base_link TF
+        this._robotOdomGroup = null; // THREE.Group — robot axes from /Odometry
+        this._odomTopic = '/Odometry';
+        this._robotPos   = null;   // THREE.Vector3 — updated from /Odometry
         this._followMode = true;   // camera follow toggle
         this._accMapObj  = null;   // accumulated map PointCloud
         this._mapAccWorker = null; // map_accumulator_worker instance
@@ -6910,6 +7293,13 @@ class SlamLiveViewer {
         this._resizeObserver = null;
         this._backendSubscribed = false;
         this._wsConnectGen = 0;
+        this._rosbridgeSubscribed = false;
+        this._cloudBusy = false;
+        this._cloudLastMs = 0;
+        this._cloudBusyWatchdog = null;
+        this._accFlushBusy = false;
+        this._perspPointSizesDirty = false;
+        this._lastOrthoScale = undefined;
     }
 
     _waitForThree() {
@@ -6993,7 +7383,12 @@ class SlamLiveViewer {
             }
 
             if (this._controls) this._controls.update();
-            if (this._topView && this._orthoCamera) this._updateOrthoPointSizes();
+            if (this._topView && this._orthoCamera) {
+                this._updateOrthoPointSizes();
+            } else if (this._perspPointSizesDirty) {
+                this._ensurePerspectivePointSizes();
+                this._perspPointSizesDirty = false;
+            }
             if (this._renderer && this._scene && this._camera) {
                 this._renderer.render(this._scene, this._camera);
             }
@@ -7010,16 +7405,44 @@ class SlamLiveViewer {
 
     _updateOrthoPointSizes() {
         const scale = this._getOrthoPixelsPerUnit();
+        if (this._lastOrthoScale !== undefined && Math.abs(this._lastOrthoScale - scale) < 0.05) {
+            return;
+        }
+        this._lastOrthoScale = scale;
         const update = (obj) => {
             if (!obj || !obj.material) return;
             // InstancedMesh(kf_node 구체)는 sizeAttenuation 없으므로 스킵
             if (!('size' in obj.material)) return;
-            obj.material.sizeAttenuation = false;
+            if (obj.material.sizeAttenuation !== false) {
+                obj.material.sizeAttenuation = false;
+                obj.material.needsUpdate = true;
+            }
             const baseSize = obj.material._baseSize || 0.1;
             obj.material.size = Math.max(1, baseSize * scale);
         };
         update(this._cloudObj);
         update(this._accMapObj);
+    }
+
+    /** Orbit(Perspective) 뷰: sizeAttenuation·월드 크기 복원 (탑뷰 전환 후 잔류 방지) */
+    _ensurePerspectivePointSizes() {
+        const fix = (obj) => {
+            if (!obj || !obj.material || obj.material._baseSize === undefined) return;
+            if (!('size' in obj.material)) return;
+            let attenuationChanged = false;
+            if (obj.material.sizeAttenuation !== true) {
+                obj.material.sizeAttenuation = true;
+                attenuationChanged = true;
+            }
+            if (obj.material.size !== obj.material._baseSize) {
+                obj.material.size = obj.material._baseSize;
+            }
+            if (attenuationChanged) {
+                obj.material.needsUpdate = true;
+            }
+        };
+        fix(this._cloudObj);
+        fix(this._accMapObj);
     }
 
     _resizeRenderer() {
@@ -7051,6 +7474,7 @@ class SlamLiveViewer {
         // 브라우저 레이아웃 계산 완료 후 리사이즈 (display:none → block 직후 clientHeight가 0일 수 있음)
         await new Promise(resolve => requestAnimationFrame(resolve));
         this._resizeRenderer();
+        this.toggleTopView(true);
         await this._connectAndSubscribe();
     }
 
@@ -7058,6 +7482,14 @@ class SlamLiveViewer {
         this._visible = false;
         this._wsConnectGen++;
         this._backendSubscribed = false;
+        this._rosbridgeSubscribed = false;
+        this._cloudBusy = false;
+        this._cloudLastMs = 0;
+        this._accFlushBusy = false;
+        if (this._cloudBusyWatchdog) {
+            clearTimeout(this._cloudBusyWatchdog);
+            this._cloudBusyWatchdog = null;
+        }
         this._unsubscribeAll();
         this._clearLiveObjects();
         const viewerEl = document.getElementById('slam-live-viewer');
@@ -7120,6 +7552,8 @@ class SlamLiveViewer {
         }
         this._pathPoseCount = 0;
         this._pgoPathPoseCount = 0;
+        _clearPathBufferState(this, '_pathPoseBuffer', '_pathRebuildTimer');
+        _clearPathBufferState(this, '_pgoPathPoseBuffer', '_pgoPathRebuildTimer');
 
         // TF 객체 정리
         for (const key of Object.keys(this._tfObjects)) {
@@ -7127,6 +7561,12 @@ class SlamLiveViewer {
             if (entry && entry.group) this._scene.remove(entry.group);
         }
         this._tfObjects = {};
+
+        if (this._robotOdomGroup) {
+            this._scene.remove(this._robotOdomGroup);
+            this._robotOdomGroup = null;
+        }
+
         this._knownFrames.clear();
     }
 
@@ -7189,15 +7629,18 @@ class SlamLiveViewer {
     }
 
     _subscribeBinaryTopics() {
-        this._subscribePC2Binary('/cloud_registered', 'cloud_registered');
-        this._subscribePC2Binary('/kf_node', 'kf_node');
-        this._subscribePathBinary('/path', 'path', 0x00ff44);
-        this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffffff);
+        // worker를 구독보다 먼저 준비 — 첫 PC2 프레임이 addPoints를 건너뛰지 않도록
         this._initMapAccumulator();
+        this._subscribePC2Binary('/cloud_registered', 'cloud_registered');
+        // /kf_node: 키프레임 구 + LIO path (FAST_LIO /key_frame → PGO PointCloud2)
+        this._subscribePC2Binary('/kf_node', 'kf_node');
+        this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffffff);
     }
 
     _subscribeRosbridgeTopics() {
-        if (!this._ros) return;
+        if (!this._ros || this._rosbridgeSubscribed) return;
+        this._rosbridgeSubscribed = true;
+        this._subscribeOdometry(this._odomTopic);
         this._subscribeMarker('/loopLine');
         this._subscribeTF('/tf');
     }
@@ -7205,6 +7648,45 @@ class SlamLiveViewer {
     _subscribeAll() {
         this._subscribeBinaryTopics();
         this._subscribeRosbridgeTopics();
+    }
+
+    _subscribeOdometry(topic) {
+        const t = new ROSLIB.Topic({
+            ros: this._ros,
+            name: topic,
+            messageType: getMsgType('nav_msgs/Odometry', 'nav_msgs/msg/Odometry'),
+            throttle_rate: 200,
+            queue_length: 1
+        });
+        t.subscribe((msg) => {
+            const THREE = window.THREE;
+            if (!this._scene || !THREE) return;
+
+            const pos = msg.pose.pose.position;
+            const rot = msg.pose.pose.orientation;
+            const frameId = (msg.header && msg.header.frame_id) ? msg.header.frame_id : '';
+            const childFrameId = msg.child_frame_id || 'base_link';
+
+            if (frameId) this._knownFrames.add(frameId);
+            if (childFrameId) this._knownFrames.add(childFrameId);
+
+            if (!this._robotOdomGroup) {
+                const group = new THREE.Group();
+                group.add(new THREE.AxesHelper(0.5));
+                this._robotOdomGroup = group;
+                group.visible = true;
+                this._scene.add(group);
+            }
+
+            this._robotOdomGroup.position.set(pos.x, pos.y, pos.z);
+            this._robotOdomGroup.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+
+            if (!this._robotPos) this._robotPos = new THREE.Vector3();
+            this._robotPos.set(pos.x, pos.y, pos.z);
+
+            // map accumulator sliding window는 cloud centroid만 사용 — odom setPose 전송 안 함
+        });
+        this._subscriptions.push(t);
     }
 
     _initMapAccumulator() {
@@ -7217,44 +7699,98 @@ class SlamLiveViewer {
         }
 
         this._mapAccWorker.onmessage = (e) => {
-            if (e.data.cmd !== 'flush') return;
-            const THREE = window.THREE;
-            if (!this._scene || !THREE) return;
-            const { positions, colors, count } = e.data;
-            if (count === 0) return;
+            if (!e.data || e.data.cmd !== 'flush') return;
+            // 이전 flush 적용 중이면 drop — 메인스레드 큐 적체로 점군 멈춤 방지
+            if (this._accFlushBusy) return;
+            this._accFlushBusy = true;
+            try {
+                const THREE = window.THREE;
+                if (!this._scene || !THREE) return;
+                const count = e.data.count | 0;
+                let positions = e.data.positions;
+                let colors = e.data.colors;
+                if (!count || !positions || !colors) return;
 
-            if (!this._accMapObj) {
-                const geo = new THREE.BufferGeometry();
-                const mat = new THREE.PointsMaterial({
-                    size: 0.08,
-                    vertexColors: true,
-                    transparent: true,
-                    opacity: 0.6,
-                    depthWrite: false,
-                    sizeAttenuation: true
-                });
-                mat._baseSize = 0.08;
-                this._accMapObj = new THREE.Points(geo, mat);
-                this._accMapObj.frustumCulled = false;
-                this._scene.add(this._accMapObj);
-            }
+                // Worker transfer / structured clone 모두 수용
+                if (!(positions instanceof Float32Array)) {
+                    positions = new Float32Array(positions);
+                }
+                if (!(colors instanceof Float32Array)) {
+                    colors = new Float32Array(colors);
+                }
+                if (positions.length < count * 3 || colors.length < count * 3) return;
 
-            const geo = this._accMapObj.geometry;
-            const posLen = count * 3;
-            let posAttr = geo.getAttribute('position');
-            let colAttr = geo.getAttribute('color');
-            if (posAttr && posAttr.array.length >= posLen) {
-                posAttr.array.set(positions);
-                colAttr.array.set(colors);
-                posAttr.needsUpdate = true;
-                colAttr.needsUpdate = true;
-                _syncPointsGeometry(geo, count);
-            } else {
-                geo.setAttribute('position', new THREE.BufferAttribute(positions.slice(), 3));
-                geo.setAttribute('color', new THREE.BufferAttribute(colors.slice(), 3));
-                _syncPointsGeometry(geo, count);
+                // age window(~100s) 상한에 맞춤 — 과도한 GPU 버퍼 재할당 방지
+                const ACC_MAX = 120000;
+                const drawCount = Math.min(count, ACC_MAX);
+                const posLen = drawCount * 3;
+
+                if (!this._accMapObj) {
+                    const posArray = new Float32Array(ACC_MAX * 3);
+                    const colArray = new Float32Array(ACC_MAX * 3);
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+                    geo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+                    const mat = new THREE.PointsMaterial({
+                        size: 0.14,
+                        vertexColors: true,
+                        transparent: true,
+                        opacity: 0.9,
+                        depthWrite: false,
+                        sizeAttenuation: !this._topView
+                    });
+                    mat._baseSize = 0.14;
+                    if (this._topView && this._orthoCamera) {
+                        const scale = this._getOrthoPixelsPerUnit();
+                        mat.size = Math.max(1, 0.14 * scale);
+                    }
+                    this._accMapObj = new THREE.Points(geo, mat);
+                    this._accMapObj.frustumCulled = false;
+                    // 현재 스캔(white) 아래·옆에서 rainbow 누적맵이 보이도록
+                    this._accMapObj.renderOrder = 1;
+                    this._scene.add(this._accMapObj);
+                }
+
+                const geo = this._accMapObj.geometry;
+                let posAttr = geo.getAttribute('position');
+                let colAttr = geo.getAttribute('color');
+
+                // 사전할당 버퍼에 복사 — worker transfer로 detach된 뷰를 geometry에 직접 물리지 않음
+                // dispose 후 미재생성으로 점군이 멈추지 않도록: 실패 시 기존 attribute 유지
+                if (!posAttr || !colAttr || posAttr.array.length < posLen ||
+                    colAttr.array.length < posLen) {
+                    const cap = Math.max(posLen, ACC_MAX * 3);
+                    const posArray = new Float32Array(cap);
+                    const colArray = new Float32Array(cap);
+                    posArray.set(positions.subarray(0, posLen));
+                    colArray.set(colors.subarray(0, posLen));
+                    const newPos = new THREE.BufferAttribute(posArray, 3);
+                    const newCol = new THREE.BufferAttribute(colArray, 3);
+                    geo.setAttribute('position', newPos);
+                    geo.setAttribute('color', newCol);
+                    if (posAttr && posAttr.dispose) posAttr.dispose();
+                    if (colAttr && colAttr.dispose) colAttr.dispose();
+                } else {
+                    posAttr.array.set(positions.subarray(0, posLen));
+                    colAttr.array.set(colors.subarray(0, posLen));
+                    posAttr.needsUpdate = true;
+                    colAttr.needsUpdate = true;
+                }
+                // frustumCulled=false → computeBoundingSphere 생략 (메인스레드 스톨 방지)
+                geo.setDrawRange(0, drawCount);
+                // 새 material 생성 직후 ortho size 강제 1회 적용
+                if (this._topView && this._orthoCamera) {
+                    this._lastOrthoScale = undefined;
+                    this._updateOrthoPointSizes();
+                }
+            } catch (err) {
+                console.warn('[SlamLiveViewer] map accumulator flush apply failed:', err);
+            } finally {
+                this._accFlushBusy = false;
             }
-            if (this._topView && this._orthoCamera) this._updateOrthoPointSizes();
+        };
+        this._mapAccWorker.onerror = (err) => {
+            console.error('[SlamLiveViewer] map_accumulator_worker error:', err);
         };
     }
 
@@ -7263,6 +7799,7 @@ class SlamLiveViewer {
             try { t.unsubscribe(); } catch (e) { /* ignore */ }
         }
         this._subscriptions = [];
+        this._rosbridgeSubscribed = false;
         if (this._mapAccWorker) {
             this._mapAccWorker.terminate();
             this._mapAccWorker = null;
@@ -7285,7 +7822,8 @@ class SlamLiveViewer {
 
     // 바이너리 PC2 패킷 파싱
     // flags bit0=has_intensity → intensity 배열도 함께 반환 (kf_node 색상에 활용)
-    _parseBinaryPC2(buffer) {
+    // options: { maxPts, fillWhite } — fillWhite면 rainbow 생략(흰색 스캔용)
+    _parseBinaryPC2(buffer, options = {}) {
         try {
             const view = new DataView(buffer);
             if (view.getUint8(0) !== 0x50 || view.getUint8(1) !== 0x43 || view.getUint8(2) !== 0x32) return null;
@@ -7299,13 +7837,14 @@ class SlamLiveViewer {
             if (count === 0) return null;
 
             const hasIntensity = (flags & 1) !== 0;
+            const fillWhite = !!options.fillWhite;
 
-            const MAX_PTS   = 80000;
+            const MAX_PTS   = options.maxPts || 80000;
             const step      = Math.max(1, Math.floor(count / MAX_PTS));
             const outPts    = Math.ceil(count / step);
             const positions = new Float32Array(outPts * 3);
             const colors    = new Float32Array(outPts * 3);
-            const tempZ     = new Float32Array(outPts);
+            const tempZ     = fillWhite ? null : new Float32Array(outPts);
             let minZ = Infinity, maxZ = -Infinity, idx = 0;
 
             const xyzBase = off;
@@ -7319,20 +7858,27 @@ class SlamLiveViewer {
                 positions[idx * 3]     = x;
                 positions[idx * 3 + 1] = y;
                 positions[idx * 3 + 2] = z;
-                tempZ[idx] = z;
-                if (z < minZ) minZ = z;
-                if (z > maxZ) maxZ = z;
+                if (fillWhite) {
+                    colors[idx * 3] = 1.0;
+                    colors[idx * 3 + 1] = 1.0;
+                    colors[idx * 3 + 2] = 1.0;
+                } else {
+                    tempZ[idx] = z;
+                    if (z < minZ) minZ = z;
+                    if (z > maxZ) maxZ = z;
+                }
                 idx++;
             }
 
-            // z 기반 rainbow 색상 (PGO_map / cloud_registered 용)
-            const range = (maxZ - minZ) || 1;
-            for (let i = 0; i < idx; i++) {
-                const t = (tempZ[i] - minZ) / range;
-                const [r, g, b] = this._rainbowColor(t);
-                colors[i * 3]     = r;
-                colors[i * 3 + 1] = g;
-                colors[i * 3 + 2] = b;
+            if (!fillWhite) {
+                const range = (maxZ - minZ) || 1;
+                for (let i = 0; i < idx; i++) {
+                    const t = (tempZ[i] - minZ) / range;
+                    const [r, g, b] = this._rainbowColor(t);
+                    colors[i * 3]     = r;
+                    colors[i * 3 + 1] = g;
+                    colors[i * 3 + 2] = b;
+                }
             }
 
             // intensity 추출 (XYZ 블록 바로 뒤, float32 × count)
@@ -7385,9 +7931,10 @@ class SlamLiveViewer {
 
         let existing, pointSize, opacity, isTransparent;
         existing = this._cloudObj;
-        pointSize = 0.12;
-        opacity = 1.0;
-        isTransparent = false;
+        // 흰색 현재 스캔 — 반투명으로 두어 아래 rainbow 누적맵이 보이게 함
+        pointSize = 0.10;
+        opacity = 0.45;
+        isTransparent = true;
 
         if (existing && existing.geometry) {
             const posAttr = existing.geometry.getAttribute('position');
@@ -7421,7 +7968,8 @@ class SlamLiveViewer {
             sizeAttenuation: !this._topView,
             vertexColors: true,
             transparent: isTransparent,
-            opacity
+            opacity,
+            depthWrite: false
         });
         mat._baseSize = pointSize;
         if (this._topView && this._orthoCamera) {
@@ -7437,7 +7985,7 @@ class SlamLiveViewer {
         this._scene.add(points);
     }
 
-    // /kf_node: 키프레임 위치를 구(Sphere)로 표시
+    // /kf_node: 키프레임 위치를 구(Sphere)로 표시 + LIO path tube 갱신
     // path tube(0.025m)보다 구분될 정도로 큰 반지름(0.08m), intensity rainbow 색상
     _updateKfNodeSpheres(parsed) {
         const THREE = window.THREE;
@@ -7445,6 +7993,10 @@ class SlamLiveViewer {
 
         const count = parsed.positions.length / 3;
         if (count === 0) return;
+
+        // LIO path: /kf_node 전체 스냅샷 → 최근 LIVE_PATH_MAX_POSES개로 tube 버퍼 교체
+        _setPathFromKeyframeSnapshot(this._pathPoseBuffer, parsed.positions, LIVE_PATH_MAX_POSES);
+        _schedulePathTubeRebuild(this, '_pathRebuildTimer', () => this._rebuildPathFromBuffer('path', 0x00ff44));
 
         // 기존 kf_node mesh 제거
         if (this._kfNodeObj) {
@@ -7512,19 +8064,45 @@ class SlamLiveViewer {
             'SlamLiveViewer',
             (ws) => { ws.send(JSON.stringify({ cmd: 'subscribe', topic })); },
             (buffer) => {
-                const parsed = viewer._parseBinaryPC2(buffer);
-                if (parsed) viewer._updatePointCloud(key, parsed);
-                if (parsed && key === 'cloud_registered' && viewer._mapAccWorker &&
-                    parsed.positions && parsed.colors) {
-                    const posCopy = new Float32Array(parsed.positions);
-                    const colCopy = new Float32Array(parsed.colors);
-                    const rp = viewer._robotPos;
-                    viewer._mapAccWorker.postMessage(
-                        { cmd: 'addPoints', positions: posCopy, colors: colCopy,
-                          pose: rp ? [rp.x, rp.y, rp.z] : null },
-                        [posCopy.buffer, colCopy.buffer]
-                    );
+                if (key === 'cloud_registered') {
+                    const now = performance.now();
+                    if (viewer._cloudBusy) return;
+                    // 메인 스레드·accumulator addPoints를 최대 1Hz로 제한
+                    if (now - (viewer._cloudLastMs || 0) < LIVE_CLOUD_UPDATE_MS) return;
+                    viewer._cloudBusy = true;
+                    viewer._cloudLastMs = now;
+                    if (viewer._cloudBusyWatchdog) clearTimeout(viewer._cloudBusyWatchdog);
+                    viewer._cloudBusyWatchdog = setTimeout(() => {
+                        viewer._cloudBusy = false;
+                        viewer._cloudBusyWatchdog = null;
+                    }, 3000);
+                    try {
+                        let parsed = viewer._parseBinaryPC2(buffer, { maxPts: 40000, fillWhite: true });
+                        if (!parsed) return;
+                        parsed = _voxelDownsample(parsed.positions, parsed.colors, 0.5, { whiteOutput: true });
+                        viewer._updatePointCloud(key, parsed);
+                        if (viewer._mapAccWorker && parsed.positions && parsed.positions.length >= 3) {
+                            const posCopy = new Float32Array(parsed.positions);
+                            try {
+                                viewer._mapAccWorker.postMessage(
+                                    { cmd: 'addPoints', positions: posCopy }
+                                );
+                            } catch (err) {
+                                console.warn('[SlamLiveViewer] addPoints postMessage failed:', err);
+                            }
+                        }
+                    } finally {
+                        viewer._cloudBusy = false;
+                        if (viewer._cloudBusyWatchdog) {
+                            clearTimeout(viewer._cloudBusyWatchdog);
+                            viewer._cloudBusyWatchdog = null;
+                        }
+                    }
+                    return;
                 }
+                let parsed = viewer._parseBinaryPC2(buffer);
+                if (!parsed) return;
+                viewer._updatePointCloud(key, parsed);
             }
         );
         this._subscriptions.push(sub);
@@ -7618,30 +8196,35 @@ class SlamLiveViewer {
         if (!this._scene || !THREE) return;
 
         const count = parsed.count;
+        if (count < 1) return;
+
+        const isPath = (key === 'path');
+        const bufferKey = isPath ? '_pathPoseBuffer' : '_pgoPathPoseBuffer';
+        const timerKey = isPath ? '_pathRebuildTimer' : '_pgoPathRebuildTimer';
+
+        _mergePathSnapshot(this[bufferKey], parsed.xyz, count, LIVE_PATH_MAX_POSES);
+        _schedulePathTubeRebuild(this, timerKey, () => this._rebuildPathFromBuffer(key, color));
+    }
+
+    _rebuildPathFromBuffer(key, color) {
+        const THREE = window.THREE;
+        if (!this._scene || !THREE) return;
+
+        const isPath = (key === 'path');
+        const bufferKey = isPath ? '_pathPoseBuffer' : '_pgoPathPoseBuffer';
+        const objKey = isPath ? '_pathObj' : '_pgoPathObj';
+        const count = this[bufferKey].count;
         if (count < 2) return;
 
-        const objKey = (key === 'path') ? '_pathObj' : '_pgoPathObj';
         _disposePathObject(this._scene, this[objKey]);
         this[objKey] = null;
 
-        const xyz = parsed.xyz;
-        const points3d = [];
-        for (let i = 0; i < count; i++) {
-            points3d.push(new THREE.Vector3(
-                xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]
-            ));
-        }
-        const curve = new THREE.CatmullRomCurve3(points3d);
-        const segments = Math.min(count * 2, 400);
-        const geo = new THREE.TubeGeometry(curve, segments, 0.025, 4, false);
-        const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide });
-        const mesh = new THREE.Mesh(geo, mat);
-        mesh.visible = true;
-        mesh.frustumCulled = false;
+        const mesh = _buildPathTubeFromBuffer(THREE, this[bufferKey], color, 0.025, 4);
+        if (!mesh) return;
         this[objKey] = mesh;
         this._scene.add(mesh);
 
-        if (key === 'path') this._pathPoseCount = count;
+        if (isPath) this._pathPoseCount = count;
         else this._pgoPathPoseCount = count;
     }
 
@@ -7690,7 +8273,7 @@ class SlamLiveViewer {
                 // LINE_STRIP: 연속 포인트 → CatmullRomCurve3 + TubeGeometry
                 const vecs = points.map(pt => new THREE.Vector3(pt.x, pt.y, pt.z));
                 const curve = new THREE.CatmullRomCurve3(vecs);
-                const tubularSegs = Math.max(vecs.length * 2, 10);
+                const tubularSegs = Math.min(Math.max(vecs.length * 2, 10), LIVE_PATH_MAX_TUBE_SEGMENTS);
                 const geo = new THREE.TubeGeometry(curve, tubularSegs, TUBE_RADIUS, TUBE_RADIAL_SEGS, false);
                 group.add(new THREE.Mesh(geo, mat));
             }
@@ -7703,8 +8286,7 @@ class SlamLiveViewer {
         this._subscriptions.push(t);
     }
 
-    // /tf 구독 — LocalizationLiveViewer와 완전히 동일한 구현
-    // 각 child frame마다 AxesHelper(0.5m)를 생성해 현재 위치와 자세를 표시
+    // /tf 구독 — LocalizationLiveViewer와 동일 (로봇 pose/axis는 /Odometry)
     _subscribeTF(topic) {
         const t = new ROSLIB.Topic({
             ros: this._ros,
@@ -7725,6 +8307,9 @@ class SlamLiveViewer {
                 this._knownFrames.add(childId);
                 this._knownFrames.add(parentId);
 
+                // Robot pose/axis는 /Odometry — base_link·body TF axis는 중복 방지
+                if (childId === 'base_link' || childId === 'body') continue;
+
                 if (!this._tfObjects[childId]) {
                     const group = new THREE.Group();
                     group.add(new THREE.AxesHelper(0.5));
@@ -7736,16 +8321,6 @@ class SlamLiveViewer {
                 const entry = this._tfObjects[childId];
                 entry.group.position.set(trans.x, trans.y, trans.z);
                 entry.group.quaternion.set(rot.x, rot.y, rot.z, rot.w);
-                // Update robot position for camera follow (base_link or body frame)
-                if (childId === 'base_link' || childId === 'body') {
-                    if (!this._robotPos) this._robotPos = new window.THREE.Vector3();
-                    this._robotPos.set(trans.x, trans.y, trans.z);
-                    if (this._mapAccWorker) {
-                        this._mapAccWorker.postMessage({
-                            cmd: 'setPose', pose: [trans.x, trans.y, trans.z]
-                        });
-                    }
-                }
             }
         });
         this._subscriptions.push(t);
@@ -7844,21 +8419,17 @@ class SlamLiveViewer {
             this._controls.update();
 
             this._camera = this._orthoCamera;
+            this._lastOrthoScale = undefined;
             this._updateOrthoPointSizes();
         } else {
             this._camera = this._perspCamera;
             this._controls.object = this._perspCamera;
             this._restoreOrbitControls();
 
-            const restoreSize = (obj) => {
-                if (obj && obj.material && obj.material._baseSize !== undefined) {
-                    obj.material.sizeAttenuation = true;
-                    obj.material.size = obj.material._baseSize;
-                }
-            };
-            restoreSize(this._cloudObj);
-            restoreSize(this._accMapObj);
+            // Perspective 복원: 월드 단위 size + sizeAttenuation (needsUpdate 포함)
             // kf_node는 InstancedMesh(MeshBasicMaterial)이므로 size 복원 불필요
+            this._ensurePerspectivePointSizes();
+            this._perspPointSizesDirty = false;
 
             if (this._savedCameraPos) {
                 this._perspCamera.position.copy(this._savedCameraPos);
@@ -9378,6 +9949,17 @@ document.addEventListener('DOMContentLoaded', () => {
 // Phase 4.10 — SlamAnalyticsDashboard
 // ═══════════════════════════════════════════════════════════
 
+function _formatAnalyticsRamPrimary(usedMb) {
+    if (usedMb < 1024) {
+        return { value: usedMb.toFixed(1), unit: ' MB' };
+    }
+    return { value: (usedMb / 1024).toFixed(2), unit: ' GB' };
+}
+
+function _formatAnalyticsSysRamLabel(sysTotalMb) {
+    return sysTotalMb < 1024 ? `${sysTotalMb} MB` : `${(sysTotalMb / 1024).toFixed(0)} GB`;
+}
+
 class SlamAnalyticsDashboard {
     constructor() {
         this._ros = null;
@@ -9525,7 +10107,6 @@ class SlamAnalyticsDashboard {
         this._plotsInitialized = true;
         this._initProcTimePlot();
         this._initDopPlot();
-        this._initRamPlot(0, this._sysInfo.total_ram_mb || 32768);
         this._resetCumulTable();
     }
 
@@ -9658,33 +10239,6 @@ class SlamAnalyticsDashboard {
         ], layout, { responsive: true, displayModeBar: false });
     }
 
-    _initRamPlot(used, total) {
-        const free = Math.max(0, total - used);
-        const usedLabel = used < 1024 ? `${used} MB` : `${(used / 1024).toFixed(1)} GB`;
-        const totalLabel = total < 1024 ? `${total} MB` : `${(total / 1024).toFixed(0)} GB`;
-        Plotly.newPlot('analytics-chart-ram', [{
-            type: 'pie',
-            hole: 0.65,
-            values: [used || 0.001, free || total],
-            labels: ['Used', 'Free'],
-            marker: { colors: ['#e94560', '#1a1a35'] },
-            textinfo: 'none',
-            hoverinfo: 'label+value+percent',
-            showlegend: false
-        }], {
-            paper_bgcolor: 'transparent',
-            plot_bgcolor: 'transparent',
-            margin: { t: 0, b: 0, l: 0, r: 0 },
-            annotations: [{
-                text: `<b>${usedLabel}</b><br><span style="font-size:10px">${totalLabel}</span>`,
-                x: 0.5,
-                y: 0.5,
-                showarrow: false,
-                font: { color: '#c8d6e5', size: 13 }
-            }]
-        }, { responsive: true, displayModeBar: false });
-    }
-
     _resetCumulTable() {
         const tbody = document.getElementById('analytics-cumul-tbody');
         if (!tbody) {
@@ -9721,7 +10275,7 @@ class SlamAnalyticsDashboard {
         this._updateHzCard(msg);
         this._updateTrajCard(msg);
         this._updateCpuCard(msg);
-        this._updateRamChart(msg);
+        this._updateRamCard(msg);
         this._updateProcTimePlot(msg);
         this._updateDopPlot(msg);
         this._updateCumulTable(msg);
@@ -9778,47 +10332,38 @@ class SlamAnalyticsDashboard {
             return;
         }
 
-        // cpu_usage = 사용 중인 코어 수 (float, e.g. 1.5 cores)
-        const usedCores = msg.cpu_usage || 0;
+        // cpu_usage = 시스템 대비 CPU % (0-100, 코어 수로 정규화됨)
+        const cpuPercent = msg.cpu_usage || 0;
         const totalCores = this._sysInfo.cpu_cores || 1;
-        const barPct = Math.min(usedCores / totalCores * 100, 100);
+        const usedCores = (cpuPercent / 100) * totalCores;
+        const barPct = Math.min(cpuPercent, 100);
 
-        pctEl.innerHTML = `${usedCores.toFixed(1)}<span class="analytics-cpu-pct-sym"> cores</span>`;
+        pctEl.innerHTML = `${cpuPercent.toFixed(1)}<span class="analytics-cpu-pct-sym">%</span>`;
         if (coreEl) {
-            const pct = (barPct).toFixed(1);
-            coreEl.innerHTML = `<span style="color:#ffd32a;font-weight:700">${pct}%</span> of ${totalCores} cores`;
+            coreEl.textContent = `${usedCores.toFixed(1)} of ${totalCores} cores`;
         }
         barEl.style.width = `${barPct}%`;
     }
 
-    _updateRamChart(msg) {
-        const used = msg.ram_usage || 0;
-        const total = this._sysInfo.total_ram_mb || 32768;
-        const free = Math.max(0, total - used);
-        const usedLabel = used < 1024 ? `${used} MB` : `${(used / 1024).toFixed(1)} GB`;
-        const totalLabel = total < 1024 ? `${total} MB` : `${(total / 1024).toFixed(0)} GB`;
+    _updateRamCard(msg) {
+        const valEl = document.getElementById('analytics-ram-value');
+        const subEl = document.getElementById('analytics-ram-sub');
+        const barEl = document.getElementById('analytics-ram-bar-fill');
+        if (!valEl || !barEl) {
+            return;
+        }
 
-        Plotly.react('analytics-chart-ram', [{
-            type: 'pie',
-            hole: 0.65,
-            values: [used || 0.001, free || total],
-            labels: ['Used', 'Free'],
-            marker: { colors: ['#e94560', '#1a1a35'] },
-            textinfo: 'none',
-            hoverinfo: 'label+value+percent',
-            showlegend: false
-        }], {
-            paper_bgcolor: 'transparent',
-            plot_bgcolor: 'transparent',
-            margin: { t: 0, b: 0, l: 0, r: 0 },
-            annotations: [{
-                text: `<b>${usedLabel}</b><br><span style="font-size:10px">${totalLabel}</span>`,
-                x: 0.5,
-                y: 0.5,
-                showarrow: false,
-                font: { color: '#c8d6e5', size: 13 }
-            }]
-        });
+        const usedMb = Number(msg.ram_usage) || 0;
+        const sysTotal = Number(this._sysInfo.total_ram_mb) || 32768;
+        const sysPct = sysTotal > 0 ? (usedMb / sysTotal * 100) : 0;
+        const barPct = Math.min(sysPct, 100);
+
+        const { value, unit } = _formatAnalyticsRamPrimary(usedMb);
+        valEl.innerHTML = `${sysPct.toFixed(1)}<span class="analytics-cpu-pct-sym">%</span>`;
+        if (subEl) {
+            subEl.textContent = `${value}${unit} of ${_formatAnalyticsSysRamLabel(sysTotal)}`;
+        }
+        barEl.style.width = `${barPct}%`;
     }
 
     _updateProcTimePlot(msg) {
@@ -9960,6 +10505,18 @@ class SlamAnalyticsDashboard {
         if (barFill) {
             barFill.style.width = '0%';
         }
+        const ramVal = document.getElementById('analytics-ram-value');
+        if (ramVal) {
+            ramVal.innerHTML = '—<span class="analytics-cpu-pct-sym"> MB</span>';
+        }
+        const ramSub = document.getElementById('analytics-ram-sub');
+        if (ramSub) {
+            ramSub.textContent = '';
+        }
+        const ramBar = document.getElementById('analytics-ram-bar-fill');
+        if (ramBar) {
+            ramBar.style.width = '0%';
+        }
 
         // 상세 섹션 닫기 및 버튼 텍스트 초기화
         const detailSection = document.getElementById('slam-analytics-detail');
@@ -10081,7 +10638,6 @@ class LocAnalyticsDashboard {
         this._plotsInit = true;
         this._initProcTimePlot();
         this._initDopPlot();
-        this._initRamPlot(0, this._sysInfo.total_ram_mb || 32768);
         this._resetCumulTable();
     }
 
@@ -10118,23 +10674,6 @@ class LocAnalyticsDashboard {
             { x:[], y:[], name:'Scan PDOP',     type:'scatter', mode:'lines', line:{color:'#00d26a',width:2} },
             { x:[], y:[], name:'Matching PDOP', type:'scatter', mode:'lines', line:{color:'#a29bfe',width:2} }
         ], layout, { responsive:true, displayModeBar:false });
-    }
-
-    _initRamPlot(used, total) {
-        const free  = Math.max(0, total - used);
-        const uLbl  = used  < 1024 ? `${used} MB`  : `${(used/1024).toFixed(1)} GB`;
-        const tLbl  = total < 1024 ? `${total} MB` : `${(total/1024).toFixed(0)} GB`;
-        Plotly.newPlot('loc-analytics-chart-ram', [{
-            type:'pie', hole:0.65,
-            values:[used||0.001, free||total], labels:['Used','Free'],
-            marker:{colors:['#e94560','#1a1a35']},
-            textinfo:'none', hoverinfo:'label+value+percent', showlegend:false
-        }], {
-            paper_bgcolor:'transparent', plot_bgcolor:'transparent',
-            margin:{t:0,b:0,l:0,r:0},
-            annotations:[{ text:`<b>${uLbl}</b><br><span style="font-size:10px">${tLbl}</span>`,
-                x:.5, y:.5, showarrow:false, font:{color:'#c8d6e5',size:13} }]
-        }, { responsive:true, displayModeBar:false });
     }
 
     _resetCumulTable() {
@@ -10195,7 +10734,7 @@ class LocAnalyticsDashboard {
         this._updateHzCard(msg);
         this._updateTrajCard(msg);
         this._updateCpuCard(msg);
-        this._updateRamChart(msg);
+        this._updateRamCard(msg);
         this._updateProcTimePlot(msg);
         this._updateDopPlot(msg);
         this._updateCumulTable(msg);
@@ -10237,31 +10776,34 @@ class LocAnalyticsDashboard {
         const coreEl = document.getElementById('loc-analytics-cpu-cores-equiv');
         const barEl  = document.getElementById('loc-analytics-cpu-bar-fill');
         if (!pctEl || !barEl) return;
-        const usedCores = msg.cpu_usage  || 0;
-        const total     = this._sysInfo.cpu_cores || 1;
-        const barPct    = Math.min(usedCores / total * 100, 100);
-        pctEl.innerHTML = `${usedCores.toFixed(1)}<span class="analytics-cpu-pct-sym"> cores</span>`;
-        if (coreEl) coreEl.innerHTML = `<span style="color:#ffd32a;font-weight:700">${barPct.toFixed(1)}%</span> of ${total} cores`;
+        const cpuPercent = msg.cpu_usage || 0;
+        const total      = this._sysInfo.cpu_cores || 1;
+        const usedCores  = (cpuPercent / 100) * total;
+        const barPct     = Math.min(cpuPercent, 100);
+        pctEl.innerHTML = `${cpuPercent.toFixed(1)}<span class="analytics-cpu-pct-sym">%</span>`;
+        if (coreEl) coreEl.textContent = `${usedCores.toFixed(1)} of ${total} cores`;
         barEl.style.width = `${barPct}%`;
     }
 
-    _updateRamChart(msg) {
-        const used  = msg.ram_usage || 0;
-        const total = this._sysInfo.total_ram_mb || 32768;
-        const free  = Math.max(0, total - used);
-        const uLbl  = used  < 1024 ? `${used} MB`  : `${(used/1024).toFixed(1)} GB`;
-        const tLbl  = total < 1024 ? `${total} MB` : `${(total/1024).toFixed(0)} GB`;
-        Plotly.react('loc-analytics-chart-ram', [{
-            type:'pie', hole:0.65,
-            values:[used||0.001, free||total], labels:['Used','Free'],
-            marker:{colors:['#e94560','#1a1a35']},
-            textinfo:'none', hoverinfo:'label+value+percent', showlegend:false
-        }], {
-            paper_bgcolor:'transparent', plot_bgcolor:'transparent',
-            margin:{t:0,b:0,l:0,r:0},
-            annotations:[{ text:`<b>${uLbl}</b><br><span style="font-size:10px">${tLbl}</span>`,
-                x:.5, y:.5, showarrow:false, font:{color:'#c8d6e5',size:13} }]
-        });
+    _updateRamCard(msg) {
+        const valEl = document.getElementById('loc-analytics-ram-value');
+        const subEl = document.getElementById('loc-analytics-ram-sub');
+        const barEl = document.getElementById('loc-analytics-ram-bar-fill');
+        if (!valEl || !barEl) {
+            return;
+        }
+
+        const usedMb = Number(msg.ram_usage) || 0;
+        const sysTotal = Number(this._sysInfo.total_ram_mb) || 32768;
+        const sysPct = sysTotal > 0 ? (usedMb / sysTotal * 100) : 0;
+        const barPct = Math.min(sysPct, 100);
+
+        const { value, unit } = _formatAnalyticsRamPrimary(usedMb);
+        valEl.innerHTML = `${sysPct.toFixed(1)}<span class="analytics-cpu-pct-sym">%</span>`;
+        if (subEl) {
+            subEl.textContent = `${value}${unit} of ${_formatAnalyticsSysRamLabel(sysTotal)}`;
+        }
+        barEl.style.width = `${barPct}%`;
     }
 
     _updateProcTimePlot(msg) {
@@ -10408,6 +10950,12 @@ class LocAnalyticsDashboard {
             .forEach((id) => { const el = document.getElementById(id); if (el) el.textContent = '—'; });
         const bar = document.getElementById('loc-analytics-cpu-bar-fill');
         if (bar) bar.style.width = '0%';
+        const ramVal = document.getElementById('loc-analytics-ram-value');
+        if (ramVal) ramVal.innerHTML = '—<span class="analytics-cpu-pct-sym"> MB</span>';
+        const ramSub = document.getElementById('loc-analytics-ram-sub');
+        if (ramSub) ramSub.textContent = '';
+        const ramBar = document.getElementById('loc-analytics-ram-bar-fill');
+        if (ramBar) ramBar.style.width = '0%';
         this._rugHistory.fill(false);
         this._drawRug();
         this._updateCount  = 0;
