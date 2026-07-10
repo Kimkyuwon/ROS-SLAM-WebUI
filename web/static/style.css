@@ -2480,15 +2480,13 @@ h3 {
     background: #1a7abf;
 }
 
-/* Convert 버튼 — ROS2/ROS1 공통 스타일 */
-#convert-to-ros2-btn,
-#convert-to-ros1-btn {
+/* Convert 버튼 — bag player 변환 */
+#convert-bag-btn {
     background: linear-gradient(135deg, #1a5276, #154360);
     border-color: rgba(74, 180, 255, 0.4);
     color: #7ec8e3;
 }
-#convert-to-ros2-btn:hover,
-#convert-to-ros1-btn:hover {
+#convert-bag-btn:hover {
     border-color: rgba(74, 180, 255, 0.7);
     box-shadow: 0 6px 20px rgba(74, 180, 255, 0.25);
     color: #aedff7;
@@ -2981,6 +2979,7 @@ h3 {
 /* ─── 그리드 레이아웃 ─── */
 .analytics-grid { display: grid; gap: 10px; margin-bottom: 10px; }
 .analytics-row-top    { grid-template-columns: repeat(4, 1fr); }
+.analytics-row-top .analytics-card { min-width: 0; }
 .analytics-row-middle { grid-template-columns: 1fr 1fr; }
 .analytics-row-bottom { grid-template-columns: 1fr; margin-bottom: 0; }
 
@@ -3052,6 +3051,7 @@ h3 {
 
 /* ─── 플롯 컨테이너 ─── */
 .analytics-plot-container { height: 180px; position: relative; }
+.analytics-ram-wrap { margin-top: 4px; }
 
 /* ─── Cumulative 테이블 ─── */
 .analytics-cumul-table { width: 100%; border-collapse: collapse; margin-top: 4px; }

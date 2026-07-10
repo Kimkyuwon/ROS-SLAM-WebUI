@@ -1007,7 +1007,7 @@ class PC2WebSocketServer:
     THROTTLE_SEC = 0.05     # 최대 20Hz (50 ms) — binary 전송 ~600KB이므로 충분
     # /cloud_registered 전용: 브라우저 map_accumulator가 0.3m 복셀을 하므로
     # 서버는 가벼운 step만 적용 (np.unique 복셀은 CPU를 수백 ms 점유해 analytics max time 악화)
-    CLOUD_REGISTERED_THROTTLE_SEC = 0.1  # 10Hz — 누적 맵용이라 20Hz 불필요
+    CLOUD_REGISTERED_THROTTLE_SEC = 1.0  # 1Hz — 메인스레드·누적 워커와 맞춤, GIL/우선순위 보호
 
     # PointCloud2 field datatype → numpy dtype 매핑
     _DTYPE = {
@@ -1069,6 +1069,7 @@ class PC2WebSocketServer:
         # 이전 ws.send()가 완료되기 전에 새 태스크가 asyncio 큐에 쌓이는 것을 방지.
         # 브라우저가 느릴 때 asyncio 태스크 누적 → latency 기하급수적 증가를 막는다.
         self._pc2_sending: dict = {}    # topic_name → bool
+        self._pc2_sending_since: dict = {}  # topic_name → monotonic (stuck 복구용)
         self._img_sending: dict = {}    # topic_name → bool
         self._livox_sending: dict = {}  # topic_name → bool
         # ── Path (nav_msgs/Path) 전용 ─────────────────────────────────────────────
@@ -1216,10 +1217,56 @@ class PC2WebSocketServer:
             pass
         return None
 
+    def _create_pc2_subscription(self, topic: str):
+        """PointCloud2 rospy.Subscriber 생성 (queue_size=1로 최신 프레임만 유지)."""
+        sub = rospy.Subscriber(
+            topic, PointCloud2,
+            lambda m, t=topic: self._on_pc2(m, t),
+            queue_size=1)
+        self._subs[topic] = sub
+        return sub
+
+    def _pause_pc2_subscription(self, topic: str, resume_after: float):
+        """1프레임 처리 후 구독 해제 → resume_after 초 뒤 재구독 (콜백 스택 밖에서 실행)."""
+        def _do_pause():
+            with self._lock:
+                sub = self._subs.pop(topic, None)
+                has_clients = bool(self._clients.get(topic))
+            if sub:
+                try:
+                    sub.unregister()
+                except Exception:
+                    pass
+            if not has_clients:
+                return
+
+            def _resume(attempt: int = 0):
+                with self._lock:
+                    if not self._clients.get(topic):
+                        return
+                    if topic in self._subs:
+                        return
+                    try:
+                        self._create_pc2_subscription(topic)
+                        return
+                    except Exception as e:
+                        rospy.logwarn(
+                            f'[PC2WS] resume subscribe failed ({topic}): {e}')
+                # 점군 영구 중단 방지: 실패 시 최대 3회 재시도
+                if attempt < 3:
+                    t2 = threading.Timer(resume_after, lambda: _resume(attempt + 1))
+                    t2.daemon = True
+                    t2.start()
+
+            t = threading.Timer(resume_after, lambda: _resume(0))
+            t.daemon = True
+            t.start()
+
+        threading.Thread(target=_do_pause, daemon=True, name='pc2-pause').start()
+
     def _add_client(self, topic: str, ws):
-        # DDS 조회를 lock 외부에서 수행:
-        # get_topic_names_and_types()는 DDS 전체 토픽을 열거하므로
-        # publisher가 누적될수록 느려짐 — lock 내부 호출 시 _on_pc2/_on_image 콜백이 블로킹됨
+        # 토픽 타입 조회를 lock 외부에서 수행:
+        # master API 조회가 느릴 수 있어 lock 내부 호출 시 _on_pc2/_on_image 콜백이 블로킹됨
         topic_type = self._get_topic_type(topic)
         is_livox = (topic_type == 'livox_ros_driver2/msg/CustomMsg' and LIVOX_AVAILABLE)
 
@@ -1241,11 +1288,7 @@ class PC2WebSocketServer:
                     self._clients[topic] = set()
                 self._clients[topic].add(ws)
                 if topic not in self._subs:
-                    sub = rospy.Subscriber(
-                        topic, PointCloud2,
-                        lambda m, t=topic: self._on_pc2(m, t),
-                        queue_size=1)
-                    self._subs[topic] = sub
+                    self._create_pc2_subscription(topic)
                     self._last_sent[topic] = 0.0
                     rospy.loginfo(f'[PC2WS] subscribed → {topic}')
 
@@ -1257,7 +1300,7 @@ class PC2WebSocketServer:
                 s_livox.discard(ws)
                 if not s_livox:
                     self._livox_clients.pop(topic, None)
-                    # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
+                    # ROS1 구독은 유지 — 재연결 시 즉시 데이터 수신
                     rospy.loginfo(f'[PC2WS] all Livox clients gone, sub kept ← {topic}')
                 return
             # PointCloud2 클라이언트
@@ -1267,22 +1310,20 @@ class PC2WebSocketServer:
             s.discard(ws)
             if not s:
                 self._clients.pop(topic, None)
-                # ROS2 구독은 유지 — DDS peer discovery를 살려 재연결 시 즉시 데이터 수신
+                self._pc2_sending.pop(topic, None)
+                self._pc2_sending_since.pop(topic, None)
+                # ROS1 구독은 유지 — 재연결 시 즉시 데이터 수신
                 rospy.loginfo(f'[PC2WS] all PC2 clients gone, sub kept ← {topic}')
 
     def _presubscribe_pc2(self, topic: str):
-        """Publisher 생성과 동시에 PointCloud2 ROS2 구독을 미리 생성해 DDS 발견을 워밍업한다.
+        """Publisher 생성과 동시에 PointCloud2 구독을 미리 생성해 발견을 워밍업한다.
 
         브라우저가 subscribe 명령을 보내기 전에 구독을 생성해 두면, 이후 브라우저 구독 시
-        이미 DDS peer discovery가 완료되어 있어 첫 프레임 수신 즉시 visualization에 표시된다.
+        이미 peer discovery가 완료되어 있어 첫 프레임 수신 즉시 visualization에 표시된다.
         """
         with self._lock:
             if topic not in self._subs:
-                sub = rospy.Subscriber(
-                    topic, PointCloud2,
-                    lambda m, t=topic: self._on_pc2(m, t),
-                    queue_size=10)
-                self._subs[topic] = sub
+                self._create_pc2_subscription(topic)
                 self._last_sent[topic] = 0.0
                 rospy.loginfo(f'[PC2WS] pre-subscribed (warmup) → {topic}')
 
@@ -1723,14 +1764,22 @@ class PC2WebSocketServer:
         with self._lock:
             if now - self._last_sent.get(topic_name, 0.0) < throttle:
                 return
-            # 이전 브로드캐스트가 완료되지 않았으면 skip (asyncio 큐 누적 방지)
+            # build/broadcast가 비정상적으로 길면 sending 플래그 강제 해제 (점군 영구 drop 방지)
             if self._pc2_sending.get(topic_name, False):
-                return
+                since = self._pc2_sending_since.get(topic_name, 0.0)
+                if since and (now - since) < 5.0:
+                    return
+                self._pc2_sending[topic_name] = False
             clients = self._clients.get(topic_name, set()).copy()
             if not clients:
                 return
             self._last_sent[topic_name] = now
             self._pc2_sending[topic_name] = True
+            self._pc2_sending_since[topic_name] = now
+
+        # /cloud_registered: 1프레임 후 구독 pause → throttle 동안 유입 차단
+        if topic_name == '/cloud_registered':
+            self._pause_pc2_subscription(topic_name, self.CLOUD_REGISTERED_THROTTLE_SEC)
 
         # ── 1) JSON 메타데이터 패킷 (헤더 스탬프 등) ────────────────────────
         stamp = msg.header.stamp
@@ -1753,6 +1802,7 @@ class PC2WebSocketServer:
         else:
             with self._lock:
                 self._pc2_sending[topic_name] = False
+                self._pc2_sending_since.pop(topic_name, None)
 
     async def _build_and_broadcast_livox(
             self, msg, topic_name: str, clients: set, meta_json: str):
@@ -1796,6 +1846,7 @@ class PC2WebSocketServer:
         finally:
             with self._lock:
                 self._pc2_sending[topic_name] = False
+                self._pc2_sending_since.pop(topic_name, None)
 
     async def _broadcast_both(self, clients, meta_json: str, binary_payload: bytes):
         """각 클라이언트에 JSON 메타데이터(text) + binary 데이터 순서로 전송."""
