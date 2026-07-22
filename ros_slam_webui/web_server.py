@@ -3914,8 +3914,15 @@ class WebGUINode(Node):
         }
 
     def get_localization_state(self):
-        # Check if Localization process is running
+        # Check if Localization process is running (웹 UI Start 버튼으로 기동한 경우)
         is_running = self.localization_process is not None and self.localization_process.poll() is None
+        if not is_running:
+            # laserLocalization 노드가 웹 UI가 아닌 별도 launch(터미널 등)로 실행된 경우도
+            # 감지 — /loc_analytics에 실제 publisher가 있으면 실행 중으로 간주.
+            try:
+                is_running = self.count_publishers('/loc_analytics') > 0
+            except Exception:
+                pass
         return {
             'is_running': is_running
         }
