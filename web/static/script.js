@@ -3403,10 +3403,15 @@ function _disposePathObject(scene, obj) {
     });
 }
 
-/** 동적 점군 갱신 후 bounding sphere 동기화 (frustum culling 오판 방지) */
-function _syncPointsGeometry(geo, count) {
+/**
+ * 동적 점군 갱신 후 drawRange 동기화.
+ * frustumCulled=false 이면 bounding sphere 생략 — 매 프레임 할당/GC 누적 방지.
+ */
+function _syncPointsGeometry(geo, count, options = {}) {
     geo.setDrawRange(0, count);
-    geo.computeBoundingSphere();
+    if (!options.skipBoundingSphere) {
+        geo.computeBoundingSphere();
+    }
 }
 
 /**
@@ -3504,10 +3509,14 @@ function _voxelDownsample(positions, colors, voxelSize, options = {}) {
 const LIVE_PATH_MAX_POSES = 1000;
 /** Localization Live Viewer: /Odometry path 포인트 최소 간격 (m, 3D) */
 const LIVE_PATH_MIN_DIST_M = 1.0;
-/** Live Viewer 점군 메인스레드 처리 상한 (cloud_registered) */
-const LIVE_CLOUD_UPDATE_MS = 1000;
+/** Live Viewer 점군 메인스레드 처리 상한 (cloud_registered 현재 스캔) */
+const LIVE_CLOUD_UPDATE_MS = 500;
+/** SLAM Live Viewer /PGO_map 갱신 상한 */
+const LIVE_PGO_MAP_UPDATE_MS = 500;
 /** Localization /Laser_map latched 대용량 갱신 상한 */
 const LIVE_LASER_MAP_UPDATE_MS = 2000;
+/** SLAM Live Viewer /kf_node InstancedMesh 갱신 상한 */
+const LIVE_KF_NODE_UPDATE_MS = 500;
 const LIVE_PATH_REBUILD_MS = 400;
 const LIVE_PATH_MAX_CTRL_POINTS = 250;
 const LIVE_PATH_MAX_TUBE_SEGMENTS = 200;
@@ -3611,6 +3620,245 @@ function _buildPathTubeFromBuffer(THREE, bufferState, color, tubeRadius, radialS
     mesh.visible = true;
     mesh.frustumCulled = false;
     return mesh;
+}
+
+/** SLAM Live path 선 두께 (px). LineBasicMaterial linewidth는 WebGL에서 무시되므로 Line2 사용 */
+const LIVE_PATH_LINEWIDTH = 5;
+
+/** 로봇 pose AXIS (/Odometry) — 기존 AxesHelper(0.5) 대비 길이·두께 2배 */
+const LIVE_ROBOT_AXIS_LENGTH = 1.0;
+const LIVE_ROBOT_AXIS_LINEWIDTH = 6;
+
+/**
+ * RGB 축 Group (Line2 굵은 선, fallback AxesHelper).
+ * resolution: LineMaterial용 Vector2 (없으면 600x380).
+ */
+function _createRobotAxesGroup(THREE, length, linewidth, resolution) {
+    const len = length || LIVE_ROBOT_AXIS_LENGTH;
+    const lw = linewidth || LIVE_ROBOT_AXIS_LINEWIDTH;
+    const group = new THREE.Group();
+    const res = (resolution && resolution.isVector2)
+        ? resolution.clone()
+        : new THREE.Vector2(600, 380);
+
+    if (window.Line2 && window.LineGeometry && window.LineMaterial) {
+        const axes = [
+            { positions: [0, 0, 0, len, 0, 0], color: 0xff0000 },
+            { positions: [0, 0, 0, 0, len, 0], color: 0x00ff00 },
+            { positions: [0, 0, 0, 0, 0, len], color: 0x0000ff },
+        ];
+        for (const a of axes) {
+            const geo = new window.LineGeometry();
+            geo.setPositions(a.positions);
+            delete geo._maxInstanceCount;
+            geo.instanceCount = 1;
+            const mat = new window.LineMaterial({
+                color: a.color,
+                linewidth: lw,
+                resolution: res.clone(),
+            });
+            const line = new window.Line2(geo, mat);
+            line.frustumCulled = false;
+            group.add(line);
+        }
+    } else {
+        group.add(new THREE.AxesHelper(len));
+    }
+    return group;
+}
+
+function _disposeRobotAxesGroup(scene, group) {
+    if (!group) return;
+    if (scene) scene.remove(group);
+    group.traverse((child) => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+            if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+            else child.material.dispose();
+        }
+    });
+}
+
+function _setGroupLineResolutions(group, w, h) {
+    if (!group) return;
+    group.traverse((child) => {
+        if (child.material && child.material.resolution) {
+            child.material.resolution.set(w, h);
+        }
+    });
+}
+
+/** SLAM Live path Line 상태 (TubeGeometry dispose/new 회피) */
+function _createPathLineState() {
+    return { line: null, drawnCount: 0, syncedMsgCount: 0, capacity: 0, fat: false };
+}
+
+function _disposePathLineState(scene, lineState) {
+    if (!lineState || !lineState.line) return;
+    if (scene) scene.remove(lineState.line);
+    if (lineState.line.geometry) lineState.line.geometry.dispose();
+    if (lineState.line.material) lineState.line.material.dispose();
+    lineState.line = null;
+    lineState.drawnCount = 0;
+    lineState.syncedMsgCount = 0;
+    lineState.capacity = 0;
+    lineState.fat = false;
+}
+
+function _pathLineResolution(THREE, resolution) {
+    if (resolution && resolution.isVector2) return resolution;
+    return new THREE.Vector2(600, 380);
+}
+
+/** Line2(굵은 선) 확보. 미로드 시 THREE.Line fallback */
+function _ensurePathLineObject(THREE, scene, lineState, needCount, color, resolution) {
+    const useFat = !!(window.Line2 && window.LineGeometry && window.LineMaterial);
+    if (lineState.line && lineState.fat === useFat) {
+        if (useFat) {
+            if (resolution && lineState.line.material && lineState.line.material.resolution) {
+                lineState.line.material.resolution.copy(resolution);
+            }
+            return;
+        }
+        if (lineState.capacity >= needCount) return;
+    }
+
+    // fat ↔ thin 전환 또는 최초 생성 시 기존 라인 제거
+    if (lineState.line) {
+        scene.remove(lineState.line);
+        if (lineState.line.geometry) lineState.line.geometry.dispose();
+        if (lineState.line.material) lineState.line.material.dispose();
+        lineState.line = null;
+        lineState.capacity = 0;
+        lineState.drawnCount = 0;
+    }
+
+    if (useFat) {
+        const geo = new window.LineGeometry();
+        const mat = new window.LineMaterial({
+            color,
+            linewidth: LIVE_PATH_LINEWIDTH,
+            resolution: _pathLineResolution(THREE, resolution).clone(),
+        });
+        const line = new window.Line2(geo, mat);
+        line.frustumCulled = false;
+        line.visible = true;
+        scene.add(line);
+        lineState.line = line;
+        lineState.fat = true;
+        lineState.capacity = 0;
+        return;
+    }
+
+    const cap = Math.max(needCount | 0, Math.ceil((needCount | 0) * 1.5), 256);
+    const pos = new Float32Array(cap * 3);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setDrawRange(0, 0);
+    const mat = new THREE.LineBasicMaterial({ color });
+    const line = new THREE.Line(geo, mat);
+    line.frustumCulled = false;
+    line.visible = true;
+    scene.add(line);
+    lineState.line = line;
+    lineState.fat = false;
+    lineState.capacity = cap;
+    lineState.drawnCount = 0;
+    lineState.syncedMsgCount = 0;
+}
+
+/** thin Line 버퍼 grow (Line2는 setPositions로 처리) */
+function _ensureThinPathLineCapacity(THREE, scene, lineState, needCount, color) {
+    const need = Math.max(2, needCount | 0);
+    if (!lineState.line || lineState.fat || lineState.capacity >= need) return;
+
+    const cap = Math.max(need, Math.ceil(need * 1.5), 256);
+    const oldLine = lineState.line;
+    const pos = new Float32Array(cap * 3);
+    const oldAttr = oldLine.geometry.getAttribute('position');
+    const keep = Math.min(lineState.drawnCount | 0, lineState.capacity | 0, cap);
+    if (oldAttr && keep > 0) {
+        pos.set(oldAttr.array.subarray(0, keep * 3));
+    }
+    scene.remove(oldLine);
+    oldLine.geometry.dispose();
+    const mat = oldLine.material;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setDrawRange(0, keep);
+    const line = new THREE.Line(geo, mat);
+    line.frustumCulled = false;
+    line.visible = true;
+    scene.add(line);
+    lineState.line = line;
+    lineState.capacity = cap;
+}
+
+/**
+ * kf_node 구 중심 좌표와 동일한 XYZ로 Line 동기화.
+ * - Line2: 굵은 선 (setPositions). 키프레임 수·0.5s 주기면 부담 무시 가능
+ * - fallback THREE.Line: 끝점 검증 append / 전체 복사
+ */
+function _syncPathLineFromNodeCenters(THREE, scene, lineState, xyz, count, color, resolution) {
+    const n = count | 0;
+    if (!scene || !THREE || !xyz || n < 2) return null;
+
+    const res = _pathLineResolution(THREE, resolution);
+    _ensurePathLineObject(THREE, scene, lineState, n, color, res);
+
+    if (lineState.fat) {
+        const slice = xyz.subarray ? xyz.subarray(0, n * 3) : xyz;
+        const geo = lineState.line.geometry;
+        // Line2: setPositions 재호출 시 _maxInstanceCount가 첫 개수로 고정되어
+        // 이후 점이 늘어나도 선이 안 늘어남 → 캐시 삭제 필수
+        geo.setPositions(slice);
+        delete geo._maxInstanceCount;
+        geo.instanceCount = Math.max(0, n - 1);
+        if (lineState.line.material && lineState.line.material.resolution) {
+            lineState.line.material.resolution.copy(res);
+        }
+        lineState.drawnCount = n;
+        lineState.syncedMsgCount = n;
+        return lineState.line;
+    }
+
+    _ensureThinPathLineCapacity(THREE, scene, lineState, n, color);
+    const posAttr = lineState.line.geometry.getAttribute('position');
+    const prevDrawn = lineState.drawnCount | 0;
+    const arr = posAttr.array;
+
+    let canAppend = false;
+    if (prevDrawn >= 2 && n === prevDrawn + 1 && xyz.length >= n * 3) {
+        const i = (prevDrawn - 1) * 3;
+        canAppend = (
+            arr[i] === xyz[i] &&
+            arr[i + 1] === xyz[i + 1] &&
+            arr[i + 2] === xyz[i + 2]
+        );
+    }
+
+    if (canAppend) {
+        arr[prevDrawn * 3]     = xyz[prevDrawn * 3];
+        arr[prevDrawn * 3 + 1] = xyz[prevDrawn * 3 + 1];
+        arr[prevDrawn * 3 + 2] = xyz[prevDrawn * 3 + 2];
+    } else {
+        arr.set(xyz.subarray(0, n * 3));
+    }
+    posAttr.needsUpdate = true;
+    lineState.line.geometry.setDrawRange(0, n);
+    lineState.drawnCount = n;
+    lineState.syncedMsgCount = n;
+    return lineState.line;
+}
+
+/**
+ * Path 버퍼 → Line 동기화 (/PGO_path용).
+ */
+function _syncPathLineFromBuffer(THREE, scene, lineState, bufferState, color, resolution) {
+    const count = bufferState.count | 0;
+    if (!scene || !THREE || count < 2 || !bufferState.xyz) return null;
+    return _syncPathLineFromNodeCenters(
+        THREE, scene, lineState, bufferState.xyz, count, color, resolution);
 }
 
 let _latencyPingWorker = null;
@@ -4414,9 +4662,32 @@ function _createLiveViewerBackendWs(viewer, label, onOpen, onBinaryMessage, conn
     let ws = null;
     let reconnectTimer = null;
     let stopped = false;
+    // TCP/브라우저에 쌓인 바이너리를 하나씩 처리하지 않고 최신 프레임만 유지 (catch-up 방지)
+    let pendingBinary = null;
+    let rafId = null;
     const gen = (typeof connectGen === 'number') ? connectGen : (viewer._wsConnectGen || 0);
 
     const isStale = () => stopped || (viewer._wsConnectGen !== gen);
+
+    const flushPending = () => {
+        rafId = null;
+        if (isStale()) {
+            pendingBinary = null;
+            return;
+        }
+        const buf = pendingBinary;
+        pendingBinary = null;
+        if (!buf) return;
+        try {
+            onBinaryMessage(buf);
+        } catch (e) {
+            console.error(`[${label}] Backend WS binary handler failed:`, e);
+        }
+        // 처리 중 새 프레임이 왔으면 다음 프레임에서 최신만 다시 처리
+        if (pendingBinary != null && rafId == null) {
+            rafId = requestAnimationFrame(flushPending);
+        }
+    };
 
     const connect = () => {
         if (isStale()) {
@@ -4447,8 +4718,11 @@ function _createLiveViewerBackendWs(viewer, label, onOpen, onBinaryMessage, conn
             };
 
             ws.onmessage = (ev) => {
-                if (ev.data instanceof ArrayBuffer) {
-                    onBinaryMessage(ev.data);
+                if (!(ev.data instanceof ArrayBuffer)) return;
+                // 중간 프레임 drop — 큐를 순서대로 비우지 않음
+                pendingBinary = ev.data;
+                if (rafId == null) {
+                    rafId = requestAnimationFrame(flushPending);
                 }
             };
 
@@ -4478,6 +4752,11 @@ function _createLiveViewerBackendWs(viewer, label, onOpen, onBinaryMessage, conn
         isConnected: () => ws && ws.readyState === WebSocket.OPEN,
         unsubscribe: () => {
             stopped = true;
+            pendingBinary = null;
+            if (rafId != null) {
+                cancelAnimationFrame(rafId);
+                rafId = null;
+            }
             if (reconnectTimer) {
                 clearTimeout(reconnectTimer);
                 reconnectTimer = null;
@@ -6056,12 +6335,16 @@ class LocalizationLiveViewer {
         this._subscriptions = [];
         this._cloudObj = null;
         this._mapObj = null;
+        // Path: Slam Live와 동일 — Line2 + grow 버퍼 (/Odometry 샘플링)
+        this._pathLineState = _createPathLineState();
         this._pathObj = null;
+        this._pathLineRes = null;
         this._tfObjects = {};
         this._robotOdomGroup = null; // THREE.Group — robot axes from /Odometry
         this._odomTopic = '/Odometry';
         this._robotPos = null;   // THREE.Vector3 — updated from /Odometry
         this._followMode = true; // camera follow toggle
+        this._lastRobotAxisScale = undefined;
         this._mapMesh = null;
         this._mapTexture = null;
         // 레이어 가시성은 메시지 수신 시 자동으로 활성화 (수동 체크박스 제거)
@@ -6178,11 +6461,53 @@ class LocalizationLiveViewer {
                 this._ensurePerspectivePointSizes();
                 this._perspPointSizesDirty = false;
             }
+            // 로봇 AXIS: Slam Live와 동일 줌 스케일
+            this._updateRobotAxisZoomScale();
             if (this._renderer && this._scene && this._camera) {
                 this._renderer.render(this._scene, this._camera);
             }
         };
         animate();
+    }
+
+    _pathLineResolutionVec() {
+        const THREE = window.THREE;
+        if (!THREE) return null;
+        const container = document.getElementById('loc-viewer-canvas-container');
+        const w = container ? (container.clientWidth || 600) : 600;
+        const h = container ? (container.clientHeight || 380) : 380;
+        if (!this._pathLineRes) this._pathLineRes = new THREE.Vector2(w, h);
+        else this._pathLineRes.set(w, h);
+        return this._pathLineRes;
+    }
+
+    _updatePathLineResolutions(w, h) {
+        const mat = this._pathLineState && this._pathLineState.line && this._pathLineState.line.material;
+        if (mat && mat.resolution) mat.resolution.set(w, h);
+        _setGroupLineResolutions(this._robotOdomGroup, w, h);
+    }
+
+    /** 로봇 AXIS: Slam Live와 동일 — 줌아웃 약한 확대, 상한 4 */
+    _computeRobotAxisScale() {
+        if (this._topView && this._orthoCamera) {
+            const ppu = this._getOrthoPixelsPerUnit();
+            const desiredLen = 28 / Math.max(ppu, 0.01);
+            return Math.max(0.5, Math.min(desiredLen / LIVE_ROBOT_AXIS_LENGTH, 4));
+        }
+        const cam = this._perspCamera || this._camera;
+        if (!cam || !this._controls) return 1;
+        const dist = cam.position.distanceTo(this._controls.target);
+        return Math.max(0.5, Math.min(dist / 40, 4));
+    }
+
+    _updateRobotAxisZoomScale() {
+        if (!this._robotOdomGroup) return;
+        const s = this._computeRobotAxisScale();
+        if (this._lastRobotAxisScale !== undefined && Math.abs(this._lastRobotAxisScale - s) < 0.03) {
+            return;
+        }
+        this._lastRobotAxisScale = s;
+        this._robotOdomGroup.scale.setScalar(s);
     }
 
     /**
@@ -6251,6 +6576,7 @@ class LocalizationLiveViewer {
         const h = container.clientHeight;
         if (w > 0 && h > 0) {
             this._renderer.setSize(w, h);
+            this._updatePathLineResolutions(w, h);
             const aspect = w / h;
             if (this._topView && this._orthoCamera) {
                 const halfH = this._orthoCamera.top;
@@ -6314,7 +6640,7 @@ class LocalizationLiveViewer {
 
         removeObj(this._cloudObj);
         removeObj(this._mapObj);
-        _disposePathObject(this._scene, this._pathObj);
+        _disposePathLineState(this._scene, this._pathLineState);
         this._cloudObj = null;
         this._mapObj = null;
         this._pathObj = null;
@@ -6328,8 +6654,9 @@ class LocalizationLiveViewer {
         this._tfObjects = {};
 
         if (this._robotOdomGroup) {
-            this._scene.remove(this._robotOdomGroup);
+            _disposeRobotAxesGroup(this._scene, this._robotOdomGroup);
             this._robotOdomGroup = null;
+            this._lastRobotAxisScale = undefined;
         }
 
         if (this._mapMesh) {
@@ -6513,8 +6840,9 @@ class LocalizationLiveViewer {
 
         const newCount = parsed.positions.length / 3;
         const existing = (key === 'cloud_registered') ? this._cloudObj : this._mapObj;
-        const pointSize = (key === 'laser_map') ? 0.2 : 0.25;
-        const opacity   = (key === 'laser_map') ? 0.6  : 1.0;
+        // Slam Live와 동일 계열: 현재 스캔 흰색·불투명·크게, 맵은 약간 투명
+        const pointSize = (key === 'laser_map') ? 0.14 : 0.22;
+        const opacity   = (key === 'laser_map') ? 0.55 : 1.0;
         const transparent = (key === 'laser_map');
 
         if (existing && existing.geometry) {
@@ -6525,7 +6853,19 @@ class LocalizationLiveViewer {
                 posAttr.needsUpdate = true;
                 colAttr.array.set(parsed.colors);
                 colAttr.needsUpdate = true;
-                _syncPointsGeometry(existing.geometry, newCount);
+                _syncPointsGeometry(existing.geometry, newCount, { skipBoundingSphere: true });
+                if (existing.material) {
+                    existing.material._baseSize = pointSize;
+                    existing.material.opacity = opacity;
+                    existing.material.transparent = transparent;
+                    existing.material.depthWrite = !transparent;
+                    if (this._topView && this._orthoCamera) {
+                        const scale = this._getOrthoPixelsPerUnit();
+                        existing.material.size = Math.max(1, pointSize * scale);
+                    } else {
+                        existing.material.size = pointSize;
+                    }
+                }
                 return;
             }
             this._scene.remove(existing);
@@ -6542,7 +6882,7 @@ class LocalizationLiveViewer {
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
         geo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
-        _syncPointsGeometry(geo, newCount);
+        _syncPointsGeometry(geo, newCount, { skipBoundingSphere: true });
 
         const mat = new THREE.PointsMaterial({
             size: pointSize,
@@ -6564,10 +6904,11 @@ class LocalizationLiveViewer {
 
         if (key === 'cloud_registered') {
             // 스캔 클라우드는 맵 클라우드와 공간적으로 겹침 → z-파이팅 방지
-            // renderOrder=1로 맵(renderOrder=0)보다 나중에 그려 depth 우선권 부여
-            points.renderOrder = 1;
+            // renderOrder=2로 맵보다 나중에 그려 depth 우선권 부여 (Slam Live와 동일)
+            points.renderOrder = 2;
             this._cloudObj = points;
         } else {
+            points.renderOrder = 1;
             this._mapObj = points;
         }
         this._scene.add(points);
@@ -6729,22 +7070,15 @@ class LocalizationLiveViewer {
             const poses = msg.poses || [];
             if (poses.length < 2) return;
 
-            _disposePathObject(this._scene, this._pathObj);
-            this._pathObj = null;
-
-            // TubeGeometry로 굵은 선 렌더링 (WebGL linewidth 제한 우회)
-            const points3d = poses.map(p => new THREE.Vector3(
-                p.pose.position.x, p.pose.position.y, p.pose.position.z
-            ));
-            const curve = new THREE.CatmullRomCurve3(points3d);
-            const segments = Math.min(poses.length * 2, 400);
-            const geo = new THREE.TubeGeometry(curve, segments, 0.08, 5, false);
-            const mat = new THREE.MeshBasicMaterial({ color: 0x00ff44, side: THREE.DoubleSide });
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.visible = true;
-            mesh.frustumCulled = false;
-            this._pathObj = mesh;
-            this._scene.add(mesh);
+            const xyz = new Float32Array(poses.length * 3);
+            for (let i = 0; i < poses.length; i++) {
+                const p = poses[i].pose.position;
+                xyz[i * 3] = p.x;
+                xyz[i * 3 + 1] = p.y;
+                xyz[i * 3 + 2] = p.z;
+            }
+            _mergePathSnapshot(this._pathPoseBuffer, xyz, poses.length, LIVE_PATH_MAX_POSES);
+            this._syncPathLineFromBuffer();
         });
         this._subscriptions.push(t);
     }
@@ -6794,35 +7128,36 @@ class LocalizationLiveViewer {
         if (count < 1) return;
 
         _mergePathSnapshot(this._pathPoseBuffer, parsed.xyz, count, LIVE_PATH_MAX_POSES);
-        _schedulePathTubeRebuild(this, '_pathRebuildTimer', () => this._rebuildPathFromBuffer());
+        this._syncPathLineFromBuffer();
     }
 
-    _rebuildPathFromBuffer() {
+    /** Slam Live와 동일: Path 버퍼 → Line2 (TubeGeometry dispose/new 제거) */
+    _syncPathLineFromBuffer() {
         const THREE = window.THREE;
         if (!this._scene || !THREE) return;
 
-        const count = this._pathPoseBuffer.count;
+        const count = this._pathPoseBuffer.count | 0;
         if (count < 2) {
-            // 포인트 부족 시 기존 tube 제거 (sliding window / clear 후 잔상 방지)
-            if (this._pathObj) {
-                _disposePathObject(this._scene, this._pathObj);
-                this._pathObj = null;
+            if (this._pathLineState && this._pathLineState.line) {
+                this._pathLineState.line.visible = false;
             }
+            this._pathObj = null;
             return;
         }
 
-        _disposePathObject(this._scene, this._pathObj);
-        this._pathObj = null;
+        this._pathObj = _syncPathLineFromBuffer(
+            THREE, this._scene, this._pathLineState, this._pathPoseBuffer, 0x00ff44,
+            this._pathLineResolutionVec());
+        if (this._pathObj) this._pathObj.visible = true;
+    }
 
-        const mesh = _buildPathTubeFromBuffer(THREE, this._pathPoseBuffer, 0x00ff44, 0.08);
-        if (!mesh) return;
-        this._pathObj = mesh;
-        this._scene.add(mesh);
+    _rebuildPathFromBuffer() {
+        this._syncPathLineFromBuffer();
     }
 
     /**
      * /Odometry 위치 → path 버퍼에 조건부 append (1m 이상 이동 시, 최대 LIVE_PATH_MAX_POSES).
-     * 첫 포인트는 무조건 추가. append 후 tube rebuild throttle.
+     * append 후 Line2 동기화 (Slam Live path와 동일).
      */
     _appendPathFromOdometry(x, y, z) {
         const last = this._lastPathPose;
@@ -6862,8 +7197,9 @@ class LocalizationLiveViewer {
 
         this._pathPoseBuffer.xyz = buf;
         this._pathPoseBuffer.count = count;
+        this._pathPoseBuffer.lastMsgCount = count;
         this._lastPathPose = { x, y, z };
-        _schedulePathTubeRebuild(this, '_pathRebuildTimer', () => this._rebuildPathFromBuffer());
+        this._syncPathLineFromBuffer();
     }
 
     _subscribeOdometry(topic) {
@@ -6887,11 +7223,14 @@ class LocalizationLiveViewer {
             if (childFrameId) this._knownFrames.add(childFrameId);
 
             if (!this._robotOdomGroup) {
-                const group = new THREE.Group();
-                group.add(new THREE.AxesHelper(0.5));
+                const group = _createRobotAxesGroup(
+                    THREE, LIVE_ROBOT_AXIS_LENGTH, LIVE_ROBOT_AXIS_LINEWIDTH,
+                    this._pathLineResolutionVec());
                 this._robotOdomGroup = group;
                 group.visible = true;
                 this._scene.add(group);
+                this._lastRobotAxisScale = undefined;
+                this._updateRobotAxisZoomScale();
             }
 
             this._robotOdomGroup.position.set(pos.x, pos.y, pos.z);
@@ -7242,7 +7581,7 @@ class LocalizationLiveViewer {
 
 // ==============================================================
 // SlamLiveViewer - LiDAR SLAM 실시간 3D 뷰어
-// 구독 토픽: /cloud_registered, /kf_node (LIO path+구), /PGO_path, /loopLine, /tf
+// 구독 토픽: /cloud_registered(현재 스캔 흰색), /PGO_map, /kf_node, /PGO_path, /loopLine, /tf, /Odometry
 // LIO path: /key_frame(fast_lio/Frame) → PGO가 발행하는 /kf_node 위치 시퀀스
 // ==============================================================
 class SlamLiveViewer {
@@ -7260,14 +7599,22 @@ class SlamLiveViewer {
         this._subscriptions = [];
 
         // PointCloud2 객체
-        this._cloudObj = null;        // /cloud_registered
+        this._cloudObj = null;        // /cloud_registered (현재 스캔, 흰색 — 누적 없음)
+        this._pgoMapObj = null;       // /PGO_map (z-rainbow)
         this._kfNodeObj = null;       // /kf_node (키프레임 구)
+        this._kfNodeCapacity = 0;     // InstancedMesh 재사용 용량
+        this._kfNodePosXyz = null;    // 줌 스케일 재적용용 위치 버퍼
+        this._kfNodeBaseRadius = 0.7; // 기본 반지름
+        this._lastKfNodeScale = undefined;
+        this._lastRobotAxisScale = undefined;
 
-        // Path 객체 (증분 렌더링: THREE.Group으로 세그먼트 누적)
-        this._pathObj = null;         // LIO path (/kf_node 키프레임 위치)
-        this._pgoPathObj = null;      // /PGO_path
-        this._pathPoseCount = 0;      // 마지막으로 렌더링한 LIO path 포즈 수
-        this._pgoPathPoseCount = 0;   // 마지막으로 렌더링한 /PGO_path 포즈 수
+        // Path: THREE.Line + 사전할당 버퍼 (TubeGeometry 매 프레임 dispose/new 제거)
+        this._pathLineState = _createPathLineState();      // LIO (kf_node)
+        this._pgoPathLineState = _createPathLineState();   // PGO (/PGO_path)
+        this._pathObj = null;         // line alias (호환)
+        this._pgoPathObj = null;
+        this._pathPoseCount = 0;
+        this._pgoPathPoseCount = 0;
         this._pathPoseBuffer = { xyz: null, count: 0, lastMsgCount: 0 };
         this._pgoPathPoseBuffer = { xyz: null, count: 0, lastMsgCount: 0 };
         this._pathRebuildTimer = null;
@@ -7282,8 +7629,6 @@ class SlamLiveViewer {
         this._odomTopic = '/Odometry';
         this._robotPos   = null;   // THREE.Vector3 — updated from /Odometry
         this._followMode = true;   // camera follow toggle
-        this._accMapObj  = null;   // accumulated map PointCloud
-        this._mapAccWorker = null; // map_accumulator_worker instance
         this._knownFrames = new Set();
 
         this._topView = false;
@@ -7297,7 +7642,10 @@ class SlamLiveViewer {
         this._cloudBusy = false;
         this._cloudLastMs = 0;
         this._cloudBusyWatchdog = null;
-        this._accFlushBusy = false;
+        this._pgoMapBusy = false;
+        this._pgoMapLastMs = 0;
+        this._pgoMapBusyWatchdog = null;
+        this._kfNodeLastMs = 0;
         this._perspPointSizesDirty = false;
         this._lastOrthoScale = undefined;
     }
@@ -7389,6 +7737,9 @@ class SlamLiveViewer {
                 this._ensurePerspectivePointSizes();
                 this._perspPointSizesDirty = false;
             }
+            // kf_node·로봇 AXIS: 줌 아웃 시 화면 크기 유지 (다른 점군은 sizeAttenuation 유지)
+            this._updateKfNodeZoomScale();
+            this._updateRobotAxisZoomScale();
             if (this._renderer && this._scene && this._camera) {
                 this._renderer.render(this._scene, this._camera);
             }
@@ -7401,6 +7752,67 @@ class SlamLiveViewer {
         const frustumH = (this._orthoCamera.top - this._orthoCamera.bottom) / (this._orthoCamera.zoom || 1);
         const pixelH   = this._renderer.domElement.height || 480;
         return pixelH / frustumH;
+    }
+
+    /** kf_node 구체: 줌아웃은 완만 확대, 줌인(확대) 시에는 더 작게 */
+    _computeKfNodeInstanceScale() {
+        const baseR = this._kfNodeBaseRadius || 0.7;
+        if (this._topView && this._orthoCamera) {
+            const ppu = this._getOrthoPixelsPerUnit();
+            // 화면상 반지름 ~5px 목표. 확대 시 min을 낮춰 구가 과대 표시되지 않게
+            const desiredR = 5 / Math.max(ppu, 0.01);
+            return Math.max(0.12, Math.min(desiredR / baseR, 4));
+        }
+        const cam = this._perspCamera || this._camera;
+        if (!cam || !this._controls) return 1;
+        const dist = cam.position.distanceTo(this._controls.target);
+        const refDist = 40;
+        return Math.max(0.12, Math.min(dist / refDist, 4));
+    }
+
+    /** 로봇 AXIS: 줌 아웃 시 약한 스케일 */
+    _computeRobotAxisScale() {
+        if (this._topView && this._orthoCamera) {
+            const ppu = this._getOrthoPixelsPerUnit();
+            // 축 길이 ~28px on screen, 스케일 상한 4
+            const desiredLen = 28 / Math.max(ppu, 0.01);
+            return Math.max(0.5, Math.min(desiredLen / LIVE_ROBOT_AXIS_LENGTH, 4));
+        }
+        const cam = this._perspCamera || this._camera;
+        if (!cam || !this._controls) return 1;
+        const dist = cam.position.distanceTo(this._controls.target);
+        return Math.max(0.5, Math.min(dist / 40, 4));
+    }
+
+    _updateKfNodeZoomScale() {
+        if (!this._kfNodeObj || !this._kfNodePosXyz) return;
+        const s = this._computeKfNodeInstanceScale();
+        if (this._lastKfNodeScale !== undefined && Math.abs(this._lastKfNodeScale - s) < 0.03) {
+            return;
+        }
+        this._lastKfNodeScale = s;
+        const THREE = window.THREE;
+        if (!THREE) return;
+        const dummy = new THREE.Object3D();
+        const count = this._kfNodeObj.count | 0;
+        const xyz = this._kfNodePosXyz;
+        for (let i = 0; i < count; i++) {
+            dummy.position.set(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]);
+            dummy.scale.setScalar(s);
+            dummy.updateMatrix();
+            this._kfNodeObj.setMatrixAt(i, dummy.matrix);
+        }
+        this._kfNodeObj.instanceMatrix.needsUpdate = true;
+    }
+
+    _updateRobotAxisZoomScale() {
+        if (!this._robotOdomGroup) return;
+        const s = this._computeRobotAxisScale();
+        if (this._lastRobotAxisScale !== undefined && Math.abs(this._lastRobotAxisScale - s) < 0.03) {
+            return;
+        }
+        this._lastRobotAxisScale = s;
+        this._robotOdomGroup.scale.setScalar(s);
     }
 
     _updateOrthoPointSizes() {
@@ -7421,7 +7833,7 @@ class SlamLiveViewer {
             obj.material.size = Math.max(1, baseSize * scale);
         };
         update(this._cloudObj);
-        update(this._accMapObj);
+        update(this._pgoMapObj);
     }
 
     /** Orbit(Perspective) 뷰: sizeAttenuation·월드 크기 복원 (탑뷰 전환 후 잔류 방지) */
@@ -7442,7 +7854,28 @@ class SlamLiveViewer {
             }
         };
         fix(this._cloudObj);
-        fix(this._accMapObj);
+        fix(this._pgoMapObj);
+    }
+
+    _pathLineResolutionVec() {
+        const THREE = window.THREE;
+        if (!THREE) return null;
+        const container = document.getElementById('slam-live-canvas-container');
+        const w = container ? (container.clientWidth || 600) : 600;
+        const h = container ? (container.clientHeight || 380) : 380;
+        if (!this._pathLineRes) this._pathLineRes = new THREE.Vector2(w, h);
+        else this._pathLineRes.set(w, h);
+        return this._pathLineRes;
+    }
+
+    _updatePathLineResolutions(w, h) {
+        const apply = (lineState) => {
+            const mat = lineState && lineState.line && lineState.line.material;
+            if (mat && mat.resolution) mat.resolution.set(w, h);
+        };
+        apply(this._pathLineState);
+        apply(this._pgoPathLineState);
+        _setGroupLineResolutions(this._robotOdomGroup, w, h);
     }
 
     _resizeRenderer() {
@@ -7453,6 +7886,7 @@ class SlamLiveViewer {
         const h = container.clientHeight;
         if (w > 0 && h > 0) {
             this._renderer.setSize(w, h);
+            this._updatePathLineResolutions(w, h);
             const aspect = w / h;
             if (this._topView && this._orthoCamera) {
                 const halfH = this._orthoCamera.top;
@@ -7485,10 +7919,16 @@ class SlamLiveViewer {
         this._rosbridgeSubscribed = false;
         this._cloudBusy = false;
         this._cloudLastMs = 0;
-        this._accFlushBusy = false;
+        this._pgoMapBusy = false;
+        this._pgoMapLastMs = 0;
+        this._kfNodeLastMs = 0;
         if (this._cloudBusyWatchdog) {
             clearTimeout(this._cloudBusyWatchdog);
             this._cloudBusyWatchdog = null;
+        }
+        if (this._pgoMapBusyWatchdog) {
+            clearTimeout(this._pgoMapBusyWatchdog);
+            this._pgoMapBusyWatchdog = null;
         }
         this._unsubscribeAll();
         this._clearLiveObjects();
@@ -7530,26 +7970,21 @@ class SlamLiveViewer {
         };
 
         removeObj(this._cloudObj);
+        removeObj(this._pgoMapObj);
         removeObj(this._kfNodeObj);
-        removeObj(this._pathObj);
-        removeObj(this._pgoPathObj);
         removeObj(this._loopLineObj);
+        _disposePathLineState(this._scene, this._pathLineState);
+        _disposePathLineState(this._scene, this._pgoPathLineState);
 
         this._cloudObj = null;
+        this._pgoMapObj = null;
         this._kfNodeObj = null;
+        this._kfNodeCapacity = 0;
+        this._kfNodePosXyz = null;
+        this._lastKfNodeScale = undefined;
         this._pathObj = null;
         this._pgoPathObj = null;
         this._loopLineObj = null;
-        // Clear accumulated map
-        if (this._accMapObj) {
-            this._scene.remove(this._accMapObj);
-            if (this._accMapObj.geometry) this._accMapObj.geometry.dispose();
-            if (this._accMapObj.material) this._accMapObj.material.dispose();
-            this._accMapObj = null;
-        }
-        if (this._mapAccWorker) {
-            this._mapAccWorker.postMessage({ cmd: 'clear' });
-        }
         this._pathPoseCount = 0;
         this._pgoPathPoseCount = 0;
         _clearPathBufferState(this, '_pathPoseBuffer', '_pathRebuildTimer');
@@ -7563,8 +7998,9 @@ class SlamLiveViewer {
         this._tfObjects = {};
 
         if (this._robotOdomGroup) {
-            this._scene.remove(this._robotOdomGroup);
+            _disposeRobotAxesGroup(this._scene, this._robotOdomGroup);
             this._robotOdomGroup = null;
+            this._lastRobotAxisScale = undefined;
         }
 
         this._knownFrames.clear();
@@ -7629,9 +8065,9 @@ class SlamLiveViewer {
     }
 
     _subscribeBinaryTopics() {
-        // worker를 구독보다 먼저 준비 — 첫 PC2 프레임이 addPoints를 건너뛰지 않도록
-        this._initMapAccumulator();
+        // 현재 스캔(흰색) — 누적 없음, 프레임마다 교체
         this._subscribePC2Binary('/cloud_registered', 'cloud_registered');
+        this._subscribePC2Binary('/PGO_map', 'pgo_map');
         // /kf_node: 키프레임 구 + LIO path (FAST_LIO /key_frame → PGO PointCloud2)
         this._subscribePC2Binary('/kf_node', 'kf_node');
         this._subscribePathBinary('/PGO_path', 'pgo_path', 0xffffff);
@@ -7671,11 +8107,14 @@ class SlamLiveViewer {
             if (childFrameId) this._knownFrames.add(childFrameId);
 
             if (!this._robotOdomGroup) {
-                const group = new THREE.Group();
-                group.add(new THREE.AxesHelper(0.5));
+                const group = _createRobotAxesGroup(
+                    THREE, LIVE_ROBOT_AXIS_LENGTH, LIVE_ROBOT_AXIS_LINEWIDTH,
+                    this._pathLineResolutionVec());
                 this._robotOdomGroup = group;
                 group.visible = true;
                 this._scene.add(group);
+                this._lastRobotAxisScale = undefined;
+                this._updateRobotAxisZoomScale();
             }
 
             this._robotOdomGroup.position.set(pos.x, pos.y, pos.z);
@@ -7683,115 +8122,8 @@ class SlamLiveViewer {
 
             if (!this._robotPos) this._robotPos = new THREE.Vector3();
             this._robotPos.set(pos.x, pos.y, pos.z);
-
-            // map accumulator sliding window는 cloud centroid만 사용 — odom setPose 전송 안 함
         });
         this._subscriptions.push(t);
-    }
-
-    _initMapAccumulator() {
-        if (this._mapAccWorker) return;
-        try {
-            this._mapAccWorker = new Worker('/static/map_accumulator_worker.js?v=' + Date.now());
-        } catch (e) {
-            console.warn('[SlamLiveViewer] map_accumulator_worker not available:', e);
-            return;
-        }
-
-        this._mapAccWorker.onmessage = (e) => {
-            if (!e.data || e.data.cmd !== 'flush') return;
-            // 이전 flush 적용 중이면 drop — 메인스레드 큐 적체로 점군 멈춤 방지
-            if (this._accFlushBusy) return;
-            this._accFlushBusy = true;
-            try {
-                const THREE = window.THREE;
-                if (!this._scene || !THREE) return;
-                const count = e.data.count | 0;
-                let positions = e.data.positions;
-                let colors = e.data.colors;
-                if (!count || !positions || !colors) return;
-
-                // Worker transfer / structured clone 모두 수용
-                if (!(positions instanceof Float32Array)) {
-                    positions = new Float32Array(positions);
-                }
-                if (!(colors instanceof Float32Array)) {
-                    colors = new Float32Array(colors);
-                }
-                if (positions.length < count * 3 || colors.length < count * 3) return;
-
-                // age window(~100s) 상한에 맞춤 — 과도한 GPU 버퍼 재할당 방지
-                const ACC_MAX = 120000;
-                const drawCount = Math.min(count, ACC_MAX);
-                const posLen = drawCount * 3;
-
-                if (!this._accMapObj) {
-                    const posArray = new Float32Array(ACC_MAX * 3);
-                    const colArray = new Float32Array(ACC_MAX * 3);
-                    const geo = new THREE.BufferGeometry();
-                    geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
-                    geo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
-                    const mat = new THREE.PointsMaterial({
-                        size: 0.14,
-                        vertexColors: true,
-                        transparent: true,
-                        opacity: 0.9,
-                        depthWrite: false,
-                        sizeAttenuation: !this._topView
-                    });
-                    mat._baseSize = 0.14;
-                    if (this._topView && this._orthoCamera) {
-                        const scale = this._getOrthoPixelsPerUnit();
-                        mat.size = Math.max(1, 0.14 * scale);
-                    }
-                    this._accMapObj = new THREE.Points(geo, mat);
-                    this._accMapObj.frustumCulled = false;
-                    // 현재 스캔(white) 아래·옆에서 rainbow 누적맵이 보이도록
-                    this._accMapObj.renderOrder = 1;
-                    this._scene.add(this._accMapObj);
-                }
-
-                const geo = this._accMapObj.geometry;
-                let posAttr = geo.getAttribute('position');
-                let colAttr = geo.getAttribute('color');
-
-                // 사전할당 버퍼에 복사 — worker transfer로 detach된 뷰를 geometry에 직접 물리지 않음
-                // dispose 후 미재생성으로 점군이 멈추지 않도록: 실패 시 기존 attribute 유지
-                if (!posAttr || !colAttr || posAttr.array.length < posLen ||
-                    colAttr.array.length < posLen) {
-                    const cap = Math.max(posLen, ACC_MAX * 3);
-                    const posArray = new Float32Array(cap);
-                    const colArray = new Float32Array(cap);
-                    posArray.set(positions.subarray(0, posLen));
-                    colArray.set(colors.subarray(0, posLen));
-                    const newPos = new THREE.BufferAttribute(posArray, 3);
-                    const newCol = new THREE.BufferAttribute(colArray, 3);
-                    geo.setAttribute('position', newPos);
-                    geo.setAttribute('color', newCol);
-                    if (posAttr && posAttr.dispose) posAttr.dispose();
-                    if (colAttr && colAttr.dispose) colAttr.dispose();
-                } else {
-                    posAttr.array.set(positions.subarray(0, posLen));
-                    colAttr.array.set(colors.subarray(0, posLen));
-                    posAttr.needsUpdate = true;
-                    colAttr.needsUpdate = true;
-                }
-                // frustumCulled=false → computeBoundingSphere 생략 (메인스레드 스톨 방지)
-                geo.setDrawRange(0, drawCount);
-                // 새 material 생성 직후 ortho size 강제 1회 적용
-                if (this._topView && this._orthoCamera) {
-                    this._lastOrthoScale = undefined;
-                    this._updateOrthoPointSizes();
-                }
-            } catch (err) {
-                console.warn('[SlamLiveViewer] map accumulator flush apply failed:', err);
-            } finally {
-                this._accFlushBusy = false;
-            }
-        };
-        this._mapAccWorker.onerror = (err) => {
-            console.error('[SlamLiveViewer] map_accumulator_worker error:', err);
-        };
     }
 
     _unsubscribeAll() {
@@ -7800,10 +8132,6 @@ class SlamLiveViewer {
         }
         this._subscriptions = [];
         this._rosbridgeSubscribed = false;
-        if (this._mapAccWorker) {
-            this._mapAccWorker.terminate();
-            this._mapAccWorker = null;
-        }
     }
 
     _rainbowColor(t) {
@@ -7928,13 +8256,17 @@ class SlamLiveViewer {
         }
 
         const newCount = parsed.positions.length / 3;
+        const isCloud = (key === 'cloud_registered');
+        const existing = isCloud ? this._cloudObj : this._pgoMapObj;
+        // cloud: 불투명 흰색·크기 확대 / PGO_map: z-rainbow + 반투명
+        const pointSize = isCloud ? 0.22 : 0.14;
+        const opacity = isCloud ? 1.0 : 0.55;
+        const isTransparent = !isCloud;
 
-        let existing, pointSize, opacity, isTransparent;
-        existing = this._cloudObj;
-        // 흰색 현재 스캔 — 반투명으로 두어 아래 rainbow 누적맵이 보이게 함
-        pointSize = 0.10;
-        opacity = 0.45;
-        isTransparent = true;
+        // 현재 스캔은 항상 순백 (회색/intensity 잔상 방지)
+        if (isCloud) {
+            parsed.colors.fill(1.0);
+        }
 
         if (existing && existing.geometry) {
             const posAttr = existing.geometry.getAttribute('position');
@@ -7944,15 +8276,30 @@ class SlamLiveViewer {
                 posAttr.needsUpdate = true;
                 colAttr.array.set(parsed.colors);
                 colAttr.needsUpdate = true;
-                _syncPointsGeometry(existing.geometry, newCount);
+                // frustumCulled=false → bounding sphere 생략 (할당/GC 누적 방지)
+                _syncPointsGeometry(existing.geometry, newCount, { skipBoundingSphere: true });
+                if (existing.material) {
+                    existing.material.transparent = isTransparent;
+                    existing.material.opacity = opacity;
+                    existing.material.depthWrite = !isTransparent;
+                    existing.material._baseSize = pointSize;
+                    if (this._topView && this._orthoCamera) {
+                        const scale = this._getOrthoPixelsPerUnit();
+                        existing.material.size = Math.max(1, pointSize * scale);
+                    } else {
+                        existing.material.size = pointSize;
+                    }
+                }
                 return;
             }
             this._scene.remove(existing);
             existing.geometry.dispose();
             existing.material.dispose();
+            if (isCloud) this._cloudObj = null;
+            else this._pgoMapObj = null;
         }
 
-        const MAX_PTS = 80000;
+        const MAX_PTS = isCloud ? 40000 : 80000;
         const posArray = new Float32Array(MAX_PTS * 3);
         const colArray = new Float32Array(MAX_PTS * 3);
         posArray.set(parsed.positions);
@@ -7961,7 +8308,7 @@ class SlamLiveViewer {
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
         geo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
-        _syncPointsGeometry(geo, newCount);
+        _syncPointsGeometry(geo, newCount, { skipBoundingSphere: true });
 
         const mat = new THREE.PointsMaterial({
             size: pointSize,
@@ -7969,7 +8316,7 @@ class SlamLiveViewer {
             vertexColors: true,
             transparent: isTransparent,
             opacity,
-            depthWrite: false
+            depthWrite: !isTransparent
         });
         mat._baseSize = pointSize;
         if (this._topView && this._orthoCamera) {
@@ -7979,14 +8326,16 @@ class SlamLiveViewer {
 
         const points = new THREE.Points(geo, mat);
         points.visible = true;
-        points.renderOrder = 2;
+        // 현재 스캔을 맵 위에 그리도록 renderOrder 높게
+        points.renderOrder = isCloud ? 2 : 1;
         points.frustumCulled = false;
-        this._cloudObj = points;
+        if (isCloud) this._cloudObj = points;
+        else this._pgoMapObj = points;
         this._scene.add(points);
     }
 
-    // /kf_node: 키프레임 위치를 구(Sphere)로 표시 + LIO path tube 갱신
-    // path tube(0.025m)보다 구분될 정도로 큰 반지름(0.08m), intensity rainbow 색상
+    // /kf_node: 키프레임 구 + LIO path Line (Path 토픽보다 가볍고, append-only 가능)
+    // InstancedMesh·Line 버퍼 재사용 — TubeGeometry dispose/new 제거
     _updateKfNodeSpheres(parsed) {
         const THREE = window.THREE;
         if (!this._scene || !THREE || !parsed) return;
@@ -7994,66 +8343,79 @@ class SlamLiveViewer {
         const count = parsed.positions.length / 3;
         if (count === 0) return;
 
-        // LIO path: /kf_node 전체 스냅샷 → 최근 LIVE_PATH_MAX_POSES개로 tube 버퍼 교체
-        _setPathFromKeyframeSnapshot(this._pathPoseBuffer, parsed.positions, LIVE_PATH_MAX_POSES);
-        _schedulePathTubeRebuild(this, '_pathRebuildTimer', () => this._rebuildPathFromBuffer('path', 0x00ff44));
+        // 구·라인 동일 중심 좌표 (LIVE_PATH_MAX trim 제거 → 노드 누락/어긋남 방지)
+        this._kfNodePosXyz = parsed.positions.slice(0, count * 3);
+        this._pathObj = _syncPathLineFromNodeCenters(
+            THREE, this._scene, this._pathLineState, this._kfNodePosXyz, count, 0x00ff44,
+            this._pathLineResolutionVec());
+        this._pathPoseCount = count;
+        // pathPoseBuffer도 동일 좌표로 맞춤 (다른 경로 호환)
+        this._pathPoseBuffer.xyz = this._kfNodePosXyz;
+        this._pathPoseBuffer.count = count;
+        this._pathPoseBuffer.lastMsgCount = count;
 
-        // 기존 kf_node mesh 제거
+        const hasIntensity = parsed.intensities && parsed.intensities.length >= count;
+        const dummy = new THREE.Object3D();
+        const color = new THREE.Color();
+        const instScale = this._computeKfNodeInstanceScale();
+        this._lastKfNodeScale = instScale;
+
+        const fillInstances = (mesh) => {
+            for (let i = 0; i < count; i++) {
+                dummy.position.set(
+                    parsed.positions[i * 3],
+                    parsed.positions[i * 3 + 1],
+                    parsed.positions[i * 3 + 2]
+                );
+                dummy.scale.setScalar(instScale);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(i, dummy.matrix);
+
+                if (hasIntensity) {
+                    const [r, g, b] = this._rainbowColor(parsed.intensities[i]);
+                    color.setRGB(r, g, b);
+                } else {
+                    color.setRGB(
+                        parsed.colors[i * 3],
+                        parsed.colors[i * 3 + 1],
+                        parsed.colors[i * 3 + 2]
+                    );
+                }
+                mesh.setColorAt(i, color);
+            }
+            mesh.count = count;
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        };
+
+        // 기존 mesh 용량이 충분하면 재사용 (dispose/new 회피)
+        if (this._kfNodeObj && this._kfNodeCapacity >= count) {
+            fillInstances(this._kfNodeObj);
+            return;
+        }
+
         if (this._kfNodeObj) {
             this._scene.remove(this._kfNodeObj);
             if (this._kfNodeObj.geometry) this._kfNodeObj.geometry.dispose();
             if (this._kfNodeObj.material) this._kfNodeObj.material.dispose();
             this._kfNodeObj = null;
+            this._kfNodeCapacity = 0;
         }
 
-        // path tube 반지름(0.025m)의 약 3배 — 명확히 구분되지만 압도적이지 않은 크기
-        const SPHERE_RADIUS = 0.08;
+        const SPHERE_RADIUS = this._kfNodeBaseRadius || 0.7;
+        // 여유 용량으로 재할당 빈도 감소 (키프레임 증가 시)
+        const capacity = Math.max(count, Math.ceil(count * 1.5));
         const sphereGeo = new THREE.SphereGeometry(SPHERE_RADIUS, 8, 6);
-        // vertexColors: true → setColorAt()으로 인스턴스별 색상 지정
         const sphereMat = new THREE.MeshBasicMaterial({ vertexColors: false });
-
-        const mesh = new THREE.InstancedMesh(sphereGeo, sphereMat, count);
-        mesh.instanceColor = null;  // Three.js가 자동으로 생성하게 함
-
-        const dummy  = new THREE.Object3D();
-        const color  = new THREE.Color();
-        const hasIntensity = parsed.intensities && parsed.intensities.length >= count;
-
-        for (let i = 0; i < count; i++) {
-            // 위치
-            dummy.position.set(
-                parsed.positions[i * 3],
-                parsed.positions[i * 3 + 1],
-                parsed.positions[i * 3 + 2]
-            );
-            dummy.updateMatrix();
-            mesh.setMatrixAt(i, dummy.matrix);
-
-            // intensity 기반 rainbow 색상 (없으면 z 기반 colors 사용)
-            let t;
-            if (hasIntensity) {
-                t = parsed.intensities[i];
-            } else {
-                // colors 배열은 [r,g,b] 형태지만 rainbow t 역산 대신 직접 사용
-                color.setRGB(
-                    parsed.colors[i * 3],
-                    parsed.colors[i * 3 + 1],
-                    parsed.colors[i * 3 + 2]
-                );
-                mesh.setColorAt(i, color);
-                continue;
-            }
-            const [r, g, b] = this._rainbowColor(t);
-            color.setRGB(r, g, b);
-            mesh.setColorAt(i, color);
-        }
-
-        mesh.instanceMatrix.needsUpdate = true;
-        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        const mesh = new THREE.InstancedMesh(sphereGeo, sphereMat, capacity);
+        mesh.instanceColor = null;
+        fillInstances(mesh);
         mesh.renderOrder = 3;
         mesh.visible = true;
+        mesh.frustumCulled = false;
 
         this._kfNodeObj = mesh;
+        this._kfNodeCapacity = capacity;
         this._scene.add(mesh);
     }
 
@@ -8067,7 +8429,6 @@ class SlamLiveViewer {
                 if (key === 'cloud_registered') {
                     const now = performance.now();
                     if (viewer._cloudBusy) return;
-                    // 메인 스레드·accumulator addPoints를 최대 1Hz로 제한
                     if (now - (viewer._cloudLastMs || 0) < LIVE_CLOUD_UPDATE_MS) return;
                     viewer._cloudBusy = true;
                     viewer._cloudLastMs = now;
@@ -8077,20 +8438,14 @@ class SlamLiveViewer {
                         viewer._cloudBusyWatchdog = null;
                     }, 3000);
                     try {
-                        let parsed = viewer._parseBinaryPC2(buffer, { maxPts: 40000, fillWhite: true });
+                        let parsed = viewer._parseBinaryPC2(buffer, {
+                            maxPts: 40000,
+                            fillWhite: true
+                        });
                         if (!parsed) return;
-                        parsed = _voxelDownsample(parsed.positions, parsed.colors, 0.5, { whiteOutput: true });
+                        parsed = _voxelDownsample(
+                            parsed.positions, parsed.colors, 0.5, { whiteOutput: true });
                         viewer._updatePointCloud(key, parsed);
-                        if (viewer._mapAccWorker && parsed.positions && parsed.positions.length >= 3) {
-                            const posCopy = new Float32Array(parsed.positions);
-                            try {
-                                viewer._mapAccWorker.postMessage(
-                                    { cmd: 'addPoints', positions: posCopy }
-                                );
-                            } catch (err) {
-                                console.warn('[SlamLiveViewer] addPoints postMessage failed:', err);
-                            }
-                        }
                     } finally {
                         viewer._cloudBusy = false;
                         if (viewer._cloudBusyWatchdog) {
@@ -8099,6 +8454,37 @@ class SlamLiveViewer {
                         }
                     }
                     return;
+                }
+                if (key === 'pgo_map') {
+                    const now = performance.now();
+                    if (viewer._pgoMapBusy) return;
+                    if (now - (viewer._pgoMapLastMs || 0) < LIVE_PGO_MAP_UPDATE_MS) return;
+                    viewer._pgoMapBusy = true;
+                    viewer._pgoMapLastMs = now;
+                    if (viewer._pgoMapBusyWatchdog) clearTimeout(viewer._pgoMapBusyWatchdog);
+                    viewer._pgoMapBusyWatchdog = setTimeout(() => {
+                        viewer._pgoMapBusy = false;
+                        viewer._pgoMapBusyWatchdog = null;
+                    }, 5000);
+                    try {
+                        let parsed = viewer._parseBinaryPC2(buffer, { maxPts: 80000 });
+                        if (!parsed) return;
+                        // PGO 쪽 0.4m 복셀과 맞춤 — 메인스레드 부하 완화
+                        parsed = _voxelDownsample(parsed.positions, parsed.colors, 0.4);
+                        viewer._updatePointCloud(key, parsed);
+                    } finally {
+                        viewer._pgoMapBusy = false;
+                        if (viewer._pgoMapBusyWatchdog) {
+                            clearTimeout(viewer._pgoMapBusyWatchdog);
+                            viewer._pgoMapBusyWatchdog = null;
+                        }
+                    }
+                    return;
+                }
+                if (key === 'kf_node') {
+                    const now = performance.now();
+                    if (now - (viewer._kfNodeLastMs || 0) < LIVE_KF_NODE_UPDATE_MS) return;
+                    viewer._kfNodeLastMs = now;
                 }
                 let parsed = viewer._parseBinaryPC2(buffer);
                 if (!parsed) return;
@@ -8189,7 +8575,7 @@ class SlamLiveViewer {
         this._subscriptions.push(sub);
     }
 
-    // ── 증분 Path 렌더링 ─────────────────────────────────────────────────────
+    // ── Path Line 동기화 (/PGO_path: 최적화된 Pose Graph용, LIO는 kf_node에서 처리) ─
 
     _updatePathIncremental(key, color, parsed) {
         const THREE = window.THREE;
@@ -8198,34 +8584,29 @@ class SlamLiveViewer {
         const count = parsed.count;
         if (count < 1) return;
 
-        const isPath = (key === 'path');
-        const bufferKey = isPath ? '_pathPoseBuffer' : '_pgoPathPoseBuffer';
-        const timerKey = isPath ? '_pathRebuildTimer' : '_pgoPathRebuildTimer';
+        // LIO path는 /kf_node에서 그림 — /PGO_path만 여기서 처리
+        if (key === 'path') return;
 
-        _mergePathSnapshot(this[bufferKey], parsed.xyz, count, LIVE_PATH_MAX_POSES);
-        _schedulePathTubeRebuild(this, timerKey, () => this._rebuildPathFromBuffer(key, color));
+        _mergePathSnapshot(this._pgoPathPoseBuffer, parsed.xyz, count, LIVE_PATH_MAX_POSES);
+        this._pgoPathObj = _syncPathLineFromBuffer(
+            THREE, this._scene, this._pgoPathLineState, this._pgoPathPoseBuffer, color,
+            this._pathLineResolutionVec());
+        this._pgoPathPoseCount = this._pgoPathPoseBuffer.count;
     }
 
     _rebuildPathFromBuffer(key, color) {
         const THREE = window.THREE;
         if (!this._scene || !THREE) return;
-
-        const isPath = (key === 'path');
-        const bufferKey = isPath ? '_pathPoseBuffer' : '_pgoPathPoseBuffer';
-        const objKey = isPath ? '_pathObj' : '_pgoPathObj';
-        const count = this[bufferKey].count;
-        if (count < 2) return;
-
-        _disposePathObject(this._scene, this[objKey]);
-        this[objKey] = null;
-
-        const mesh = _buildPathTubeFromBuffer(THREE, this[bufferKey], color, 0.025, 4);
-        if (!mesh) return;
-        this[objKey] = mesh;
-        this._scene.add(mesh);
-
-        if (isPath) this._pathPoseCount = count;
-        else this._pgoPathPoseCount = count;
+        const res = this._pathLineResolutionVec();
+        if (key === 'path') {
+            this._pathObj = _syncPathLineFromBuffer(
+                THREE, this._scene, this._pathLineState, this._pathPoseBuffer, color, res);
+            this._pathPoseCount = this._pathPoseBuffer.count;
+            return;
+        }
+        this._pgoPathObj = _syncPathLineFromBuffer(
+            THREE, this._scene, this._pgoPathLineState, this._pgoPathPoseBuffer, color, res);
+        this._pgoPathPoseCount = this._pgoPathPoseBuffer.count;
     }
 
     _subscribeMarker(topic) {
@@ -9976,6 +10357,9 @@ class SlamAnalyticsDashboard {
         };
         this._WINDOW_SEC = 10;
         this._sysInfo = { total_ram_mb: 0, cpu_cores: 1 };
+        // latest-only coalesce: rosbridge/TCP 적체 시 큐를 순서대로 비우지 않음
+        this._pendingMsg = null;
+        this._rafId = null;
         this._fetchSysInfo();
     }
 
@@ -10043,19 +10427,40 @@ class SlamAnalyticsDashboard {
             ros: this._ros,
             name: '/lio_analytics',
             messageType: getMsgType('fast_lio/LioAnalytics', 'fast_lio/msg/LioAnalytics'),
+            // 소형 메시지 + latest-only coalesce → 10Hz 안전 (큐 적체 없음)
+            throttle_rate: 100,
             queue_length: 1
         });
         this._subscription.subscribe((msg) => {
-            console.log('[SlamAnalyticsDashboard] received /lio_analytics');
-            this._onMessage(msg);
+            this._pendingMsg = msg;
+            if (this._rafId == null) {
+                this._rafId = requestAnimationFrame(() => this._flushPending());
+            }
         });
         console.log('[SlamAnalyticsDashboard] subscribed to /lio_analytics');
+    }
+
+    _flushPending() {
+        this._rafId = null;
+        const msg = this._pendingMsg;
+        this._pendingMsg = null;
+        if (!msg) return;
+        this._onMessage(msg);
+        // 처리 중 도착한 최신 프레임만 이어서 반영
+        if (this._pendingMsg != null && this._rafId == null) {
+            this._rafId = requestAnimationFrame(() => this._flushPending());
+        }
     }
 
     unsubscribe() {
         if (this._subscription) {
             this._subscription.unsubscribe();
             this._subscription = null;
+        }
+        this._pendingMsg = null;
+        if (this._rafId != null) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = null;
         }
         // 자체 생성한 ros 연결이면 닫기 (plotState.ros는 닫지 않음)
         if (this._ros && this._ros !== (window.plotState && plotState.ros)) {
@@ -10565,6 +10970,8 @@ class LocAnalyticsDashboard {
         this._rugCanvas    = null;
         this._updateCount  = 0;
         this._lastUpdateMs = null;
+        this._pendingMsg   = null;
+        this._rafId        = null;
         this._fetchSysInfo();
     }
 
@@ -10610,16 +11017,38 @@ class LocAnalyticsDashboard {
             ros: this._ros,
             name: '/loc_analytics',
             messageType: getMsgType('fast_lio/LocAnalytics', 'fast_lio/msg/LocAnalytics'),
+            throttle_rate: 100,
             queue_length: 1
         });
-        this._subscription.subscribe((msg) => this._onMessage(msg));
+        this._subscription.subscribe((msg) => {
+            this._pendingMsg = msg;
+            if (this._rafId == null) {
+                this._rafId = requestAnimationFrame(() => this._flushPending());
+            }
+        });
         console.log('[LocAnalytics] subscribed to /loc_analytics');
+    }
+
+    _flushPending() {
+        this._rafId = null;
+        const msg = this._pendingMsg;
+        this._pendingMsg = null;
+        if (!msg) return;
+        this._onMessage(msg);
+        if (this._pendingMsg != null && this._rafId == null) {
+            this._rafId = requestAnimationFrame(() => this._flushPending());
+        }
     }
 
     unsubscribe() {
         if (this._subscription) {
             this._subscription.unsubscribe();
             this._subscription = null;
+        }
+        this._pendingMsg = null;
+        if (this._rafId != null) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = null;
         }
         if (this._ros && this._ros !== (window.plotState && plotState.ros)) {
             try { this._ros.close(); } catch (e) { /* ignore */ }

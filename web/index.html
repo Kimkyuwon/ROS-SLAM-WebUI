@@ -339,17 +339,11 @@
 
                     <!-- Save Map Result Viewer -->
                     <div id="savemap-result-viewer" style="display:none;">
-                        <div class="slam-viewer-header">
-                            <button onclick="resetSaveMapResultView()" class="small-button">Reset View</button>
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="savemap-viewer-topview-toggle" onchange="toggleSaveMapTopView(this.checked)" />
-                                <span>Top View</span>
-                            </label>
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="savemap-viewer-edl-toggle" onchange="toggleSaveMapEDL(this.checked)" />
-                                <span>Depth Filter</span>
-                            </label>
-                        </div>
+                        <!-- 상태 동기화용 hidden 체크박스 (라이브 뷰어와 동일) -->
+                        <input type="checkbox" id="savemap-viewer-topview-toggle"
+                               onchange="toggleSaveMapTopView(this.checked)" style="display:none;" />
+                        <input type="checkbox" id="savemap-viewer-edl-toggle"
+                               onchange="toggleSaveMapEDL(this.checked)" style="display:none;" />
                         <div id="savemap-result-canvas-container">
                             <canvas id="savemap-result-canvas"></canvas>
                             <div id="savemap-result-loading">Loading...</div>
@@ -371,10 +365,13 @@
                                 <span id="savemap-point-size-label">0.05 m</span>
                             </div>
                             <div id="savemap-viewer-actions">
-                                <button class="slam-action-btn slam-fs-toggle-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View">
+                                <button class="slam-action-btn" id="savemap-reset-btn" onclick="resetSaveMapResultView()" title="Reset View">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                                </button>
+                                <button class="slam-action-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
                                 </button>
-                                <button class="slam-action-btn slam-fs-toggle-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter">
+                                <button class="slam-action-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                                 </button>
                                 <button class="slam-action-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장">
@@ -1608,7 +1605,7 @@
     <script src="static/plot_manager.js"></script>
     
     <script src="static/webui_ports.js"></script>
-    <script src="static/script.js?v=20260710a"></script>
+    <script src="static/script.js?v=20260722a"></script>
     
     <!-- Three.js and OrbitControls as ES6 modules (local vendor — offline/navifra compatible) -->
     <script type="module">
