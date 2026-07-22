@@ -16,7 +16,7 @@ def _collect_vendor_data_files():
         if not files:
             continue
         rel = os.path.relpath(root, 'web')
-        dest = os.path.join('share', package_name, rel)
+        dest = os.path.join('share', package_name, 'web', rel)
         src_files = [os.path.join(root, f) for f in files]
         data_files.append((dest, src_files))
     return data_files

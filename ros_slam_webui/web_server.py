@@ -1237,12 +1237,16 @@ class PC2WebSocketServer:
     """
 
     MAX_POINTS   = 30_000   # 일반 PC2 다운샘플링 상한
-    # /cloud_registered: 누적 맵용 — 포인트·주기 모두 공격적으로 제한해 GIL/CPU 보호
+    # /cloud_registered: 현재 스캔(흰색) — pause+sending 플래그로 drop-old, 0.5s
     CLOUD_REGISTERED_MAX_POINTS = 12_000
     THROTTLE_SEC = 0.1      # 일반 PC2 최대 10Hz — 시각화 유지, ROS 처리율 보호
-    # /cloud_registered 전용: 브라우저는 1Hz로 처리·누적하므로 서버도 1Hz
-    # (np.unique 복셀은 GIL을 수백 ms 점유해 /Odometry max time 악화 → 서버는 step만)
-    CLOUD_REGISTERED_THROTTLE_SEC = 1.0  # 1Hz — 메인스레드·누적 워커와 맞춤, GIL/우선순위 보호
+    CLOUD_REGISTERED_THROTTLE_SEC = 0.5
+    # /PGO_map: SLAM Live Viewer 맵 스냅샷 — pause+sending으로 큐 적체 없이 0.5s
+    PGO_MAP_MAX_POINTS = 30_000
+    PGO_MAP_THROTTLE_SEC = 0.5
+    # /kf_node: 키프레임 증가해도 pause로 DDS 유입 차단 — 0.5s
+    KF_NODE_MAX_POINTS = 8_000
+    KF_NODE_THROTTLE_SEC = 0.5
 
     # PointCloud2 field datatype → numpy dtype 매핑
     _DTYPE = {
@@ -1307,6 +1311,7 @@ class PC2WebSocketServer:
         self._pc2_sending_since: dict = {}  # topic_name → monotonic (stuck 복구용)
         self._img_sending: dict = {}    # topic_name → bool
         self._livox_sending: dict = {}  # topic_name → bool
+        self._plot_sending: dict = {}   # topic_name → bool (asyncio 브로드캐스트 backpressure)
         # ── Path (nav_msgs/Path) 전용 ─────────────────────────────────────────────
         self._path_clients: dict = {}    # topic → set[websocket]
         self._path_subs: dict = {}       # topic → rclpy Subscription
@@ -2009,11 +2014,17 @@ class PC2WebSocketServer:
 
         raw=True 구독이므로 msg는 역직렬화된 PointCloud2가 아니라 직렬화된 bytes다.
         spin 스레드에서 대용량 역직렬화를 피해 다른 콜백 지연을 줄인다.
-        /cloud_registered는 처리 후 구독을 잠시 끊어 DDS 대용량 유입을 차단한다.
+        /cloud_registered·/PGO_map·/kf_node는 처리 후 구독을 잠시 끊어 DDS 대용량 유입을 차단한다.
         """
         now = time.monotonic()
-        throttle = (self.CLOUD_REGISTERED_THROTTLE_SEC
-                     if topic_name == '/cloud_registered' else self.THROTTLE_SEC)
+        if topic_name == '/PGO_map':
+            throttle = self.PGO_MAP_THROTTLE_SEC
+        elif topic_name == '/kf_node':
+            throttle = self.KF_NODE_THROTTLE_SEC
+        elif topic_name == '/cloud_registered':
+            throttle = self.CLOUD_REGISTERED_THROTTLE_SEC
+        else:
+            throttle = self.THROTTLE_SEC
         with self._lock:
             if now - self._last_sent.get(topic_name, 0.0) < throttle:
                 return
@@ -2030,9 +2041,10 @@ class PC2WebSocketServer:
             self._pc2_sending[topic_name] = True
             self._pc2_sending_since[topic_name] = now
 
-        # /cloud_registered: 1프레임 후 구독 pause → throttle 동안 DDS 유입 차단
-        if topic_name == '/cloud_registered':
-            self._pause_pc2_subscription(topic_name, self.CLOUD_REGISTERED_THROTTLE_SEC)
+        # 대용량 맵/키프레임: 1프레임 후 구독 pause → throttle 동안 DDS 유입 차단
+        # (전송보다 빠른 발행이 TCP·브라우저 WS 큐에 쌓여 bag 종료 후에도 catch-up 발생)
+        if topic_name in ('/cloud_registered', '/PGO_map', '/kf_node'):
+            self._pause_pc2_subscription(topic_name, throttle)
 
         loop = self._loop
         if loop and loop.is_running():
@@ -2197,6 +2209,7 @@ class PC2WebSocketServer:
                         self._node.destroy_subscription(sub)
                     except Exception:
                         pass
+                self._plot_sending.pop(topic, None)
                 self._node.get_logger().info(f'[PC2WS/plot] unsubscribed ← {topic}')
 
     def _create_plot_subscription(self, topic: str, msg_type: str = ''):
@@ -2230,11 +2243,18 @@ class PC2WebSocketServer:
                 f'[PC2WS/plot] 메시지 타입 로드 실패: {type_str}')
             return
 
+        # depth=1: DDS에서 중간 프레임 drop — 시각화용, 실시간성 우선
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
         sub = self._node.create_subscription(
             MsgClass,
             topic,
             lambda msg, t=topic: self._on_plot_msg(msg, t),
-            10
+            qos
         )
         with self._lock:
             self._plot_subs[topic] = sub
@@ -2244,19 +2264,21 @@ class PC2WebSocketServer:
     def _on_plot_msg(self, msg, topic_name: str):
         """범용 토픽 메시지 수신 → 요청된 필드 추출 → JSON broadcast.
 
-        throttle 없이 원래 주기 그대로 전송한다.
-        헤더가 있으면 header.stamp를 timestamp로 사용하고,
-        없으면 현재 단조 시간을 사용한다.
+        이전 브로드캐스트가 끝나지 않았으면 DROP (latest-only backpressure).
+        asyncio 큐에 코루틴이 무한 적체되어 bag 종료 후에도 catch-up되는 것을 막는다.
         """
         with self._lock:
             client_map = self._plot_clients.get(topic_name, {})
             if not client_map:
                 return
+            if self._plot_sending.get(topic_name, False):
+                return  # drop-old: 브라우저/WS가 느리면 중간 프레임 폐기
             # 모든 클라이언트의 필드 합집합
             all_fields: set = set()
             for fields in client_map.values():
                 all_fields.update(fields)
             clients = set(client_map.keys())
+            self._plot_sending[topic_name] = True
 
         # 타임스탬프 추출
         stamp_sec, stamp_nanosec = 0, 0
@@ -2282,6 +2304,8 @@ class PC2WebSocketServer:
                 values[field] = val
 
         if not values:
+            with self._lock:
+                self._plot_sending[topic_name] = False
             return
 
         data = json.dumps({
@@ -2295,7 +2319,18 @@ class PC2WebSocketServer:
         loop = self._loop
         if loop and loop.is_running():
             asyncio.run_coroutine_threadsafe(
-                self._broadcast_text(clients, data), loop)
+                self._broadcast_plot_text(topic_name, clients, data), loop)
+        else:
+            with self._lock:
+                self._plot_sending[topic_name] = False
+
+    async def _broadcast_plot_text(self, topic_name: str, clients: set, data: str):
+        """plot JSON 브로드캐스트 후 sending 플래그 해제."""
+        try:
+            await self._broadcast_text(clients, data)
+        finally:
+            with self._lock:
+                self._plot_sending[topic_name] = False
 
     @staticmethod
     def _extract_nested(obj, field_path: str):
@@ -2390,11 +2425,15 @@ class PC2WebSocketServer:
                 return None
 
             # 균등 step 다운샘플링 (모든 PC2 토픽 동일)
-            # /cloud_registered의 np.unique 복셀은 제거함:
-            #   - 브라우저 map_accumulator_worker가 0.3m 전역 복셀(centroid)을 수행
-            #   - 서버 np.unique(axis=0)는 대용량에서 GIL을 수백 ms 점유 → /Odometry max time 악화
-            max_pts = (self.CLOUD_REGISTERED_MAX_POINTS
-                       if topic_name == '/cloud_registered' else self.MAX_POINTS)
+            # 서버 np.unique(axis=0)는 대용량에서 GIL을 수백 ms 점유 → /Odometry max time 악화
+            if topic_name == '/PGO_map':
+                max_pts = self.PGO_MAP_MAX_POINTS
+            elif topic_name == '/kf_node':
+                max_pts = self.KF_NODE_MAX_POINTS
+            elif topic_name == '/cloud_registered':
+                max_pts = self.CLOUD_REGISTERED_MAX_POINTS
+            else:
+                max_pts = self.MAX_POINTS
             step = max(1, n // max_pts)
             x, y, z = x[::step], y[::step], z[::step]
             n_out = len(x)
@@ -3405,6 +3444,11 @@ class WebGUINode(Node):
 
     def stop_slam_mapping(self):
         """Stop SLAM mapping process (like Ctrl+C)"""
+        if not self.slam_process or self.slam_process.poll() is not None:
+            self.slam_process = None
+            self.get_logger().info('SLAM process already stopped')
+            return True
+
         result = self._stop_process(
             self.slam_process,
             'SLAM'
@@ -7612,6 +7656,9 @@ class WebGUINode(Node):
                 except subprocess.TimeoutExpired:
                     self.get_logger().info('Process did not terminate, killing...')
                     self.slam_process.kill()
+                self.slam_process = None
+            elif self.slam_process is not None:
+                # Clear stale handle when the child already exited
                 self.slam_process = None
 
             # Then kill any remaining related processes

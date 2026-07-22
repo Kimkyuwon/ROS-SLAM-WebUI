@@ -2779,13 +2779,19 @@ h3 {
     background: rgba(74, 214, 255, 0.35);
 }
 
-.slam-fs-toggle-btn.active {
+.slam-fs-toggle-btn.active,
+#savemap-fs-topview-btn.active,
+#savemap-fs-edl-btn.active,
+#slam-live-fs-topview-btn.active {
     background: rgba(74, 214, 255, 0.22);
     border-color: rgba(74, 214, 255, 0.65);
     color: #4ad6ff;
 }
 
-.slam-fs-toggle-btn.active:hover {
+.slam-fs-toggle-btn.active:hover,
+#savemap-fs-topview-btn.active:hover,
+#savemap-fs-edl-btn.active:hover,
+#slam-live-fs-topview-btn.active:hover {
     background: rgba(74, 214, 255, 0.35);
 }
 
