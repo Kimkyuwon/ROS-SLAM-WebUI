@@ -310,11 +310,6 @@
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">acc_bias_norm</span><span class="analytics-detail-val" id="ad-acc_bias_norm">—</span></div>
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">gyr_bias_norm</span><span class="analytics-detail-val" id="ad-gyr_bias_norm">—</span></div>
                                 </div>
-                                <div class="analytics-detail-cat-title">Time Sync Offsets</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lid_offset</span><span class="analytics-detail-val" id="ad-lid_offset">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_offset</span><span class="analytics-detail-val" id="ad-imu_offset">—</span></div>
-                                </div>
                                 <div class="analytics-detail-cat-title">Timing Breakdown</div>
                                 <div class="analytics-detail-grid">
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">search_time</span><span class="analytics-detail-val" id="ad-search_time">—</span></div>
@@ -347,6 +342,17 @@
                         <div id="savemap-result-canvas-container">
                             <canvas id="savemap-result-canvas"></canvas>
                             <div id="savemap-result-loading">Loading...</div>
+                            <!-- Height Clip: 왼쪽 세로 바(핸들 2개)로 Z 높이 기준 단면(cross-section) 표시 -->
+                            <div id="savemap-height-clip-overlay" style="display:none;" title="드래그하여 높이 단면 조절 (더블클릭: 전체 표시)">
+                                <span class="height-clip-value" id="savemap-height-clip-max-label">-</span>
+                                <div class="height-clip-track" id="savemap-height-clip-track">
+                                    <div class="height-clip-fill" id="savemap-height-clip-fill"></div>
+                                    <div class="height-clip-handle height-clip-handle-max" id="savemap-height-clip-handle-max"></div>
+                                    <div class="height-clip-handle height-clip-handle-min" id="savemap-height-clip-handle-min"></div>
+                                </div>
+                                <span class="height-clip-value" id="savemap-height-clip-min-label">-</span>
+                                <span class="height-clip-current" id="savemap-height-clip-current-label">Z: -</span>
+                            </div>
                             <div id="savemap-pcd-legend">
                                 <div class="slam-legend-row" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
                                 <div class="slam-legend-row" data-layer="static" data-active="true" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
@@ -667,11 +673,6 @@
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">acc_bias_norm</span><span class="analytics-detail-val" id="lad-acc_bias_norm">—</span></div>
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">gyr_bias_norm</span><span class="analytics-detail-val" id="lad-gyr_bias_norm">—</span></div>
                                 </div>
-                                <div class="analytics-detail-cat-title">Time Sync Offsets</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lid_offset</span><span class="analytics-detail-val" id="lad-lid_offset">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_offset</span><span class="analytics-detail-val" id="lad-imu_offset">—</span></div>
-                                </div>
                                 <div class="analytics-detail-cat-title">Keyframe Info</div>
                                 <div class="analytics-detail-grid">
                                     <div class="analytics-detail-item"><span class="analytics-detail-field">kf_count</span><span class="analytics-detail-val" id="lad-kf_count">—</span></div>
@@ -744,24 +745,27 @@
                     </div>
 
                     <div id="slam-result-viewer" style="display:none;">
-                        <div class="slam-viewer-header">
-                            <button onclick="resetSlamResultView()" class="small-button">Reset View</button>
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="slam-viewer-topview-toggle" onchange="toggleSlamTopView(this.checked)" />
-                                <span>Top View</span>
-                            </label>
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="slam-viewer-diff-toggle" onchange="toggleSlamDiff(this.checked)" />
-                                <span>Check Difference</span>
-                            </label>
-                            <label class="slam-viewer-toggle">
-                                <input type="checkbox" id="slam-viewer-edl-toggle" onchange="toggleSlamEDL(this.checked)" />
-                                <span>Depth Filter</span>
-                            </label>
-                        </div>
+                        <!-- 상태 동기화용 hidden 체크박스 (라이브/Save Map 뷰어와 동일) -->
+                        <input type="checkbox" id="slam-viewer-topview-toggle"
+                               onchange="toggleSlamTopView(this.checked)" style="display:none;" />
+                        <input type="checkbox" id="slam-viewer-diff-toggle"
+                               onchange="toggleSlamDiff(this.checked)" style="display:none;" />
+                        <input type="checkbox" id="slam-viewer-edl-toggle"
+                               onchange="toggleSlamEDL(this.checked)" style="display:none;" />
                         <div id="slam-result-canvas-container">
                             <canvas id="slam-result-canvas"></canvas>
                             <div id="slam-result-loading">Loading...</div>
+                            <!-- Height Clip: 왼쪽 세로 바(핸들 2개)로 Z 높이 기준 단면(cross-section) 표시 -->
+                            <div id="slam-height-clip-overlay" style="display:none;" title="드래그하여 높이 단면 조절 (더블클릭: 전체 표시)">
+                                <span class="height-clip-value" id="slam-height-clip-max-label">-</span>
+                                <div class="height-clip-track" id="slam-height-clip-track">
+                                    <div class="height-clip-fill" id="slam-height-clip-fill"></div>
+                                    <div class="height-clip-handle height-clip-handle-max" id="slam-height-clip-handle-max"></div>
+                                    <div class="height-clip-handle height-clip-handle-min" id="slam-height-clip-handle-min"></div>
+                                </div>
+                                <span class="height-clip-value" id="slam-height-clip-min-label">-</span>
+                                <span class="height-clip-current" id="slam-height-clip-current-label">Z: -</span>
+                            </div>
                             <div id="slam-pcd-legend">
                                 <div class="slam-legend-row" data-layer="map1" data-active="true" onclick="toggleSlamLayer('map1')"><span class="slam-legend-dot" style="background:#4488ff;"></span><span>Map1</span></div>
                                 <div class="slam-legend-row" data-layer="map2" data-active="true" onclick="toggleSlamLayer('map2')"><span class="slam-legend-dot" style="background:#44dd88;"></span><span>Map2</span></div>
@@ -788,13 +792,16 @@
                                 <span id="slam-point-size-label">0.05 m</span>
                             </div>
                             <div id="slam-viewer-actions">
-                                <button class="slam-action-btn slam-fs-toggle-btn" id="slam-fs-topview-btn" onclick="toggleSlamTopView(!slamResultViewer._topView)" title="Top View">
+                                <button class="slam-action-btn" id="slam-reset-btn" onclick="resetSlamResultView()" title="Reset View">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                                </button>
+                                <button class="slam-action-btn" id="slam-fs-topview-btn" onclick="toggleSlamTopView(!slamResultViewer._topView)" title="Top View">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
                                 </button>
-                                <button class="slam-action-btn slam-fs-toggle-btn" id="slam-fs-edl-btn" onclick="toggleSlamEDL(!slamResultViewer._edlEnabled)" title="Depth Filter">
+                                <button class="slam-action-btn" id="slam-fs-edl-btn" onclick="toggleSlamEDL(!slamResultViewer._edlEnabled)" title="Depth Filter">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                                 </button>
-                                <button class="slam-action-btn slam-fs-toggle-btn" id="slam-fs-diff-btn" onclick="toggleSlamDiff(!slamResultViewer._diffEnabled)" title="Check Difference">
+                                <button class="slam-action-btn" id="slam-fs-diff-btn" onclick="toggleSlamDiff(!slamResultViewer._diffEnabled)" title="Check Difference">
                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></svg>
                                 </button>
                                 <button class="slam-action-btn" id="slam-snapshot-btn" onclick="takeSlamSnapshot()" title="스냅샷 저장">

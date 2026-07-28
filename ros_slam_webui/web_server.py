@@ -1587,10 +1587,16 @@ class PC2WebSocketServer:
     # ── TRANSIENT_LOCAL (latched) 토픽 ─────────────────────────────────────────
 
     def _add_latched_client(self, topic: str, ws):
-        """TRANSIENT_LOCAL + RELIABLE QoS로 구독 생성 후 캐시된 마지막 메시지를 즉시 재전송.
+        """RELIABLE(+VOLATILE) QoS로 구독 생성 후 캐시된 마지막 메시지를 즉시 재전송.
 
         /Laser_map 같은 latched 토픽은 publisher가 한 번 발행 후 업데이트가 드물 수 있다.
-        TRANSIENT_LOCAL QoS로 구독해야 늦게 연결한 subscriber도 마지막 메시지를 수신한다.
+        "늦게 연결한 subscriber에게도 마지막 메시지를 전달"하는 목적 자체는
+        여기서 DDS 레벨 TRANSIENT_LOCAL이 아니라, 아래 `_latched_cache`를 이용한
+        애플리케이션 레벨 재전송(즉시 replay)으로 구현되어 있다.
+        실제 publisher(laserLocalization.cpp qos_viz)는 VOLATILE durability로 발행하므로,
+        구독을 TRANSIENT_LOCAL로 요청하면 QoS durability가 호환되지 않아
+        DDS 매칭 자체가 실패하고 메시지를 영원히 수신하지 못한다 (2026-07-27 발견).
+        따라서 반드시 publisher와 동일한 VOLATILE로 구독해야 한다.
         """
         cached_bin  = None
         cached_meta = None
@@ -1601,7 +1607,7 @@ class PC2WebSocketServer:
             if topic not in self._latched_subs:
                 qos = QoSProfile(
                     reliability=ReliabilityPolicy.RELIABLE,
-                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    durability=DurabilityPolicy.VOLATILE,
                     history=HistoryPolicy.KEEP_LAST,
                     depth=1,
                 )
@@ -1612,7 +1618,7 @@ class PC2WebSocketServer:
                     raw=True)
                 self._latched_subs[topic] = sub
                 self._node.get_logger().info(
-                    f'[PC2WS] subscribed (TRANSIENT_LOCAL) → {topic}')
+                    f'[PC2WS] subscribed (VOLATILE, app-level replay) → {topic}')
             cached_bin  = self._latched_cache.get(topic)
             cached_meta = self._latched_meta_cache.get(topic)
 

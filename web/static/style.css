@@ -2710,6 +2710,94 @@ h3 {
     min-width: 40px;
 }
 
+/* Height Clip (Z 높이 단면) 바 — 뷰어 왼쪽 중앙에 세로로 배치
+   width를 고정해야 min/max 텍스트 자릿수가 바뀌어도(예: "5.00"→"12.34")
+   트랙(바)이 좌우로 흔들리지 않는다 (컨테이너가 콘텐츠에 맞춰 shrink-wrap되는 것을 방지). */
+#savemap-height-clip-overlay,
+#slam-height-clip-overlay {
+    align-items: center;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    left: 14px;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    user-select: none;
+    width: 52px;
+    /* Multi-Session 뷰어에서 Check Difference 활성화 시 PCD 범례(#slam-pcd-legend)가
+       세로로 길어져 화면 중앙의 이 바와 겹칠 수 있으므로 범례보다 위(z-index)에 둔다. */
+    z-index: 11;
+}
+
+.height-clip-value {
+    color: #aaa;
+    font-family: var(--mono-font, 'JetBrains Mono', monospace);
+    font-size: 10px;
+    line-height: 1;
+    text-align: center;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.height-clip-track {
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+    height: 150px;
+    position: relative;
+    touch-action: none;
+    width: 8px;
+}
+
+.height-clip-fill {
+    background: rgba(74, 214, 255, 0.4);
+    left: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+}
+
+/* 핸들(조정 동그라미): 최대값(High)과 최소값(Low) 2개.
+   pointer-events는 auto(기본)로 두어 e.target 판별로 개별 드래그를 구분한다. */
+.height-clip-handle {
+    border: 2px solid #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+    cursor: ns-resize;
+    height: 14px;
+    left: 50%;
+    position: absolute;
+    top: 0;
+    touch-action: none;
+    transform: translate(-50%, -50%);
+    width: 14px;
+    z-index: 2;
+}
+
+.height-clip-handle-max {
+    background: var(--accent, #4ad6ff);
+}
+
+.height-clip-handle-min {
+    background: #ffb400;
+}
+
+/* 드래그 중인 핸들을 항상 위로 올려 두 핸들이 근접/교차 직전에도 놓치지 않게 함 */
+.height-clip-handle-active {
+    z-index: 3;
+}
+
+.height-clip-current {
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 4px;
+    color: var(--accent, #4ad6ff);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    white-space: nowrap;
+}
+
 #slam-viewer-actions,
 #savemap-viewer-actions {
     bottom: 10px;
@@ -2782,7 +2870,10 @@ h3 {
 .slam-fs-toggle-btn.active,
 #savemap-fs-topview-btn.active,
 #savemap-fs-edl-btn.active,
-#slam-live-fs-topview-btn.active {
+#slam-live-fs-topview-btn.active,
+#slam-fs-topview-btn.active,
+#slam-fs-edl-btn.active,
+#slam-fs-diff-btn.active {
     background: rgba(74, 214, 255, 0.22);
     border-color: rgba(74, 214, 255, 0.65);
     color: #4ad6ff;
@@ -2791,7 +2882,10 @@ h3 {
 .slam-fs-toggle-btn.active:hover,
 #savemap-fs-topview-btn.active:hover,
 #savemap-fs-edl-btn.active:hover,
-#slam-live-fs-topview-btn.active:hover {
+#slam-live-fs-topview-btn.active:hover,
+#slam-fs-topview-btn.active:hover,
+#slam-fs-edl-btn.active:hover,
+#slam-fs-diff-btn.active:hover {
     background: rgba(74, 214, 255, 0.35);
 }
 
@@ -3815,8 +3909,8 @@ body {
     font-size: 12px !important;
 }
 
-.log-box, .output-log, #slam-opt-msg,
-[id$="-log"], [id$="-output"] {
+.log-box, .output-log,
+[id$="-log"], [id$="-output"]:not(#slam-output) {
     background: #06080e !important;
     border-color: var(--border) !important;
     color: var(--teal) !important;

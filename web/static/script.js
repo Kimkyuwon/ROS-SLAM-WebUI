@@ -442,6 +442,7 @@ async function setOutput() {
 let _optPollTimer = null;
 let _optComplete = false;
 let _optRunning = false;
+let _optViewerDismissed = false;  // Exit로 결과 뷰어를 닫은 경우 폴링 자동 복원 방지
 
 function handleOptBtnClick() {
     if (_optComplete) {
@@ -453,6 +454,7 @@ function handleOptBtnClick() {
 
 async function runOptimization() {
     _optRunning = true;
+    _optViewerDismissed = false;
     slamResultViewer.hideAndReset();
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = true;
@@ -617,6 +619,7 @@ async function exitOptimization() {
     _optPollTimer = null;
 
     _optRunning = false;
+    _optViewerDismissed = true;
     updateSlamStatus('Optimization exited');
     slamResultViewer.hideAndReset();
     _resetOptBtn();
@@ -642,8 +645,9 @@ async function updateSlamState() {
         updateSlamStatus(state.status || 'Ready');
 
         // Show result viewer if optimization is already complete (e.g. on subtab re-entry)
-        // _optRunning이 true이면 최적화 진행 중 → 뷰어를 강제 복원하지 않음
-        if (!_optRunning && state.status === 'Optimization complete!') {
+        // _optRunning이 true이면 최적화 진행 중, _optViewerDismissed면 사용자가 Exit로 닫은 상태
+        // → 두 경우 모두 뷰어를 강제 복원하지 않음
+        if (!_optRunning && !_optViewerDismissed && state.status === 'Optimization complete!') {
             const viewerEl = document.getElementById('slam-result-viewer');
             if (viewerEl && viewerEl.style.display === 'none') {
                 slamResultViewer.show();
@@ -8931,6 +8935,15 @@ class SlamResultViewer {
         this._edlScene = null;
         this._edlQuad = null;
         this._edlCamera = null;
+
+        // Height Clip(Z 높이 기준 단면) 상태 — 왼쪽 세로 바(핸들 2개)로 Z 범위 조절
+        this._heightClipPlaneHigh = null;   // z <= high 만 유지
+        this._heightClipPlaneLow = null;    // z >= low 만 유지
+        this._heightClipLow = 0;
+        this._heightClipHigh = 0;
+        this._heightClipZMin = 0;           // 맵 포인트 실제 최소 Z (슬라이더 하한)
+        this._heightClipZMax = 0;           // 맵 포인트 실제 최대 Z (슬라이더 상한)
+        this._heightClipDragging = null;    // 'high' | 'low' | null
     }
 
     _legendRow(name) {
@@ -8993,8 +9006,17 @@ class SlamResultViewer {
         };
 
         this._scene.add(new THREE.AxesHelper(5));
+
+        // Height Clip: material.clippingPlanes를 사용하므로 렌더러에서 활성화 필요
+        this._renderer.localClippingEnabled = true;
+        // high: normal(0,0,-1) → z <= constant 인 포인트만 유지
+        this._heightClipPlaneHigh = new THREE.Plane(new THREE.Vector3(0, 0, -1), Infinity);
+        // low: normal(0,0,1) → z >= -constant 인 포인트만 유지
+        this._heightClipPlaneLow = new THREE.Plane(new THREE.Vector3(0, 0, 1), Infinity);
+
         this._initialized = true;
         this._bindYawDrag();
+        this._bindHeightClipDrag();
         this._startRenderLoop();
     }
 
@@ -9025,6 +9047,87 @@ class SlamResultViewer {
         dom.addEventListener('pointerup', endDrag);
         dom.addEventListener('pointercancel', endDrag);
         window.addEventListener('pointerup', endDrag);
+    }
+
+    /**
+     * 왼쪽 세로 Height Clip 바 드래그 바인딩 (상단 핸들=최대값, 하단 핸들=최소값).
+     * 두 핸들 사이 구간(low <= z <= high)만 렌더링되며, 두 핸들은 서로 교차할 수 없다.
+     * 이 뷰어 인스턴스에 해당 DOM(ids.heightClipTrack)이 없으면 아무 것도 하지 않는다.
+     */
+    _bindHeightClipDrag() {
+        const track = document.getElementById(this._ids.heightClipTrack);
+        const handleHigh = document.getElementById(this._ids.heightClipHandleMax);
+        const handleLow = document.getElementById(this._ids.heightClipHandleMin);
+        if (!track || !handleHigh || !handleLow) return;
+
+        const zFromClientY = (clientY) => {
+            const rect = track.getBoundingClientRect();
+            let frac = rect.height > 0 ? 1 - (clientY - rect.top) / rect.height : 1;
+            frac = Math.max(0, Math.min(1, frac));
+            return this._heightClipZMin + frac * (this._heightClipZMax - this._heightClipZMin);
+        };
+
+        const applyDrag = (which, z) => {
+            if (which === 'high') this.setHeightClipHigh(z);
+            else this.setHeightClipLow(z);
+        };
+
+        // 핸들 각각에 독립적인 드래그 리스너를 바인딩한다(자기 자신에 포인터 캡처).
+        // 트랙 리스너 하나에 두 핸들을 모두 위임하면, 실제 마우스 드래그 중 커서가
+        // 8px 폭의 트랙 밖으로 살짝 벗어나거나 두 핸들이 겹칠 때 이벤트 타깃 판별이
+        // 어긋나 "눌리기만 하고 움직이지 않는" 현상이 발생할 수 있어, 각 핸들이
+        // 자신의 포인터 이벤트를 직접 캡처하도록 하여 이를 원천적으로 방지한다.
+        const bindHandle = (handle, which) => {
+            handle.addEventListener('pointerdown', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                this._heightClipDragging = which;
+                handle.classList.add('height-clip-handle-active');
+                try { handle.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+                applyDrag(which, zFromClientY(e.clientY));
+            });
+            handle.addEventListener('pointermove', (e) => {
+                if (this._heightClipDragging !== which) return;
+                e.preventDefault();
+                applyDrag(which, zFromClientY(e.clientY));
+            });
+            const endDrag = (e) => {
+                if (this._heightClipDragging !== which) return;
+                this._heightClipDragging = null;
+                handle.classList.remove('height-clip-handle-active');
+                try { handle.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
+            };
+            handle.addEventListener('pointerup', endDrag);
+            handle.addEventListener('pointercancel', endDrag);
+        };
+        bindHandle(handleHigh, 'high');
+        bindHandle(handleLow, 'low');
+
+        // 트랙 배경 클릭(핸들 자체 클릭은 stopPropagation으로 여기까지 오지 않음):
+        // 더 가까운 핸들을 해당 위치로 이동시키고 그대로 드래그를 이어간다.
+        track.addEventListener('pointerdown', (e) => {
+            const z = zFromClientY(e.clientY);
+            const which = Math.abs(z - this._heightClipHigh) <= Math.abs(z - this._heightClipLow) ? 'high' : 'low';
+            this._heightClipDragging = which;
+            try { track.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+            applyDrag(which, z);
+        });
+        track.addEventListener('pointermove', (e) => {
+            if (!this._heightClipDragging) return;
+            applyDrag(this._heightClipDragging, zFromClientY(e.clientY));
+        });
+        const endTrackDrag = (e) => {
+            this._heightClipDragging = null;
+            try { track.releasePointerCapture(e.pointerId); } catch (err) { /* noop */ }
+        };
+        track.addEventListener('pointerup', endTrackDrag);
+        track.addEventListener('pointercancel', endTrackDrag);
+
+        // 더블클릭 시 전체 높이 표시로 리셋
+        track.addEventListener('dblclick', () => {
+            this.setHeightClipHigh(this._heightClipZMax);
+            this.setHeightClipLow(this._heightClipZMin);
+        });
     }
 
     _startRenderLoop() {
@@ -9551,6 +9654,7 @@ class SlamResultViewer {
 
         try {
             await this._loadAndRender();
+            this._setupHeightClip();
             this._loaded = true;
         } catch (e) {
             console.error('SlamResultViewer: load failed:', e);
@@ -9583,6 +9687,7 @@ class SlamResultViewer {
             if (!pcd) continue;
             pcd.material = new THREE.PointsMaterial({
                 color: pl.color, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false,
+                clippingPlanes: [this._heightClipPlaneHigh, this._heightClipPlaneLow],
             });
             pcd.material._baseSize = this._pcdPointSize;
             this._addToScene(pcd, pl.layer);
@@ -9822,6 +9927,7 @@ class SlamResultViewer {
             size: this._pcdPointSize * 1.2,
             sizeAttenuation: true,
             vertexColors: false,
+            clippingPlanes: [this._heightClipPlaneHigh, this._heightClipPlaneLow],
             // depthTest: true (기본, LEQUAL) — renderOrder=1로 base 이후 렌더링, 같은 깊이 LEQUAL 통과
             // transparent: false (기본) — opaque 큐, EDL depth 텍스처 올바르게 기록
         });
@@ -9933,6 +10039,102 @@ class SlamResultViewer {
         if (label) label.textContent = size.toFixed(2) + ' m';
     }
 
+    /**
+     * 로드된 PCD 맵 포인트들의 Z(높이) 최소/최대값을 계산하여 Height Clip 바 UI를 초기화한다.
+     * 해당 뷰어 인스턴스에 Height Clip DOM(ids.heightClipOverlay)이 없으면 아무 것도 하지 않는다.
+     */
+    _setupHeightClip() {
+        const overlay = document.getElementById(this._ids.heightClipOverlay);
+        if (!overlay) return;
+
+        let zMin = Infinity;
+        let zMax = -Infinity;
+        for (const obj of this._pcdObjects) {
+            if (!obj.geometry) continue;
+            obj.geometry.computeBoundingBox();
+            const bb = obj.geometry.boundingBox;
+            if (!bb) continue;
+            zMin = Math.min(zMin, bb.min.z);
+            zMax = Math.max(zMax, bb.max.z);
+        }
+
+        if (!isFinite(zMin) || !isFinite(zMax) || zMax - zMin < 1e-3) {
+            overlay.style.display = 'none';
+            return;
+        }
+
+        this._heightClipZMin = zMin;
+        this._heightClipZMax = zMax;
+        overlay.style.display = 'flex';
+
+        const maxLabel = document.getElementById(this._ids.heightClipMaxLabel);
+        const minLabel = document.getElementById(this._ids.heightClipMinLabel);
+        if (maxLabel) maxLabel.textContent = zMax.toFixed(2);
+        if (minLabel) minLabel.textContent = zMin.toFixed(2);
+
+        // 기본값: 전체 범위(low=zMin, high=zMax)에서 시작 — 전체 맵 표시
+        // (직접 대입: setHeightClipHigh/Low의 상호 clamp 로직이 이전 값(0 등)을 참조하지 않도록)
+        this._heightClipLow = zMin;
+        this._heightClipHigh = zMax;
+        if (this._heightClipPlaneHigh) this._heightClipPlaneHigh.constant = zMax;
+        if (this._heightClipPlaneLow) this._heightClipPlaneLow.constant = -zMin;
+        this._updateHeightClipHandles();
+        this._updateHeightClipLabel();
+    }
+
+    /**
+     * Height Clip 상한(High) 값을 설정한다. 이 값보다 높은(z > high) 포인트는 클리핑되어 숨겨진다.
+     * 최소값 핸들(low)보다 아래로 내려갈 수 없다 (두 핸들 교차 방지).
+     * @param {number} z
+     */
+    setHeightClipHigh(z) {
+        z = Math.max(this._heightClipZMin, Math.min(this._heightClipZMax, z));
+        z = Math.max(z, this._heightClipLow);
+        this._heightClipHigh = z;
+        if (this._heightClipPlaneHigh) this._heightClipPlaneHigh.constant = z;
+        this._updateHeightClipHandles();
+        this._updateHeightClipLabel();
+    }
+
+    /**
+     * Height Clip 하한(Low) 값을 설정한다. 이 값보다 낮은(z < low) 포인트는 클리핑되어 숨겨진다.
+     * 최대값 핸들(high)보다 위로 올라갈 수 없다 (두 핸들 교차 방지).
+     * @param {number} z
+     */
+    setHeightClipLow(z) {
+        z = Math.max(this._heightClipZMin, Math.min(this._heightClipZMax, z));
+        z = Math.min(z, this._heightClipHigh);
+        this._heightClipLow = z;
+        if (this._heightClipPlaneLow) this._heightClipPlaneLow.constant = -z;
+        this._updateHeightClipHandles();
+        this._updateHeightClipLabel();
+    }
+
+    _updateHeightClipHandles() {
+        const handleHigh = document.getElementById(this._ids.heightClipHandleMax);
+        const handleLow = document.getElementById(this._ids.heightClipHandleMin);
+        const fill = document.getElementById(this._ids.heightClipFill);
+        const range = this._heightClipZMax - this._heightClipZMin;
+        const fracFor = (z) => range > 1e-6 ? Math.max(0, Math.min(1, (z - this._heightClipZMin) / range)) : 1;
+        const highFrac = fracFor(this._heightClipHigh);
+        const lowFrac = fracFor(this._heightClipLow);
+        const highTopPct = (1 - highFrac) * 100;
+        const lowTopPct = (1 - lowFrac) * 100;
+        if (handleHigh) handleHigh.style.top = highTopPct + '%';
+        if (handleLow) handleLow.style.top = lowTopPct + '%';
+        if (fill) {
+            fill.style.top = highTopPct + '%';
+            fill.style.height = (lowTopPct - highTopPct) + '%';
+        }
+    }
+
+    _updateHeightClipLabel() {
+        const current = document.getElementById(this._ids.heightClipLabel);
+        if (current) {
+            current.textContent = this._heightClipLow.toFixed(2) + ' ~ ' + this._heightClipHigh.toFixed(2) + ' m';
+        }
+    }
+
     _resetAllLegendRows() {
         this._allLegendRows().forEach(row => {
             row.dataset.active = 'true';
@@ -10033,6 +10235,16 @@ class SlamResultViewer {
         }
         // EDL 상태 초기화 (리소스는 재사용을 위해 보존)
         this._edlEnabled = false;
+        // Height Clip 상태 초기화
+        this._heightClipZMin = 0;
+        this._heightClipZMax = 0;
+        this._heightClipLow = 0;
+        this._heightClipHigh = 0;
+        this._heightClipDragging = null;
+        if (this._heightClipPlaneHigh) this._heightClipPlaneHigh.constant = Infinity;
+        if (this._heightClipPlaneLow) this._heightClipPlaneLow.constant = Infinity;
+        const heightClipOverlay = document.getElementById(this._ids.heightClipOverlay);
+        if (heightClipOverlay) heightClipOverlay.style.display = 'none';
         this._syncControlStates();
     }
 }
@@ -10053,6 +10265,14 @@ const slamResultViewer = new SlamResultViewer({
         pointSizeLabel: 'slam-point-size-label',
         diffToggle: 'slam-viewer-diff-toggle',
         diffLegend: 'slam-diff-legend-rows',
+        heightClipOverlay: 'slam-height-clip-overlay',
+        heightClipTrack: 'slam-height-clip-track',
+        heightClipHandleMax: 'slam-height-clip-handle-max',
+        heightClipHandleMin: 'slam-height-clip-handle-min',
+        heightClipFill: 'slam-height-clip-fill',
+        heightClipLabel: 'slam-height-clip-current-label',
+        heightClipMaxLabel: 'slam-height-clip-max-label',
+        heightClipMinLabel: 'slam-height-clip-min-label',
     },
     spec: {
         pathsEndpoint: '/api/slam/result_paths',
@@ -10117,6 +10337,14 @@ const saveMapResultViewer = new SlamResultViewer({
         fsEdlBtn: 'savemap-fs-edl-btn',
         pointSizeSlider: 'savemap-point-size-slider',
         pointSizeLabel: 'savemap-point-size-label',
+        heightClipOverlay: 'savemap-height-clip-overlay',
+        heightClipTrack: 'savemap-height-clip-track',
+        heightClipHandleMax: 'savemap-height-clip-handle-max',
+        heightClipHandleMin: 'savemap-height-clip-handle-min',
+        heightClipFill: 'savemap-height-clip-fill',
+        heightClipLabel: 'savemap-height-clip-current-label',
+        heightClipMaxLabel: 'savemap-height-clip-max-label',
+        heightClipMinLabel: 'savemap-height-clip-min-label',
     },
     spec: {
         pathsEndpoint: '/api/slam/save_map_result',
@@ -10353,9 +10581,12 @@ class SlamAnalyticsDashboard {
             map_time: [],
             total_time: [],
             scan_dop: [],
-            matching_dop: []
+            matching_dop: [],
+            traj_dist: []
         };
         this._WINDOW_SEC = 10;
+        this._SPEED_WINDOW_SEC = 1; // Avg Speed: 1초 이동평균 윈도우
+        this._MAX_TRACE_POINTS = 400; // Plotly trace 무한 누적 방지 (y축 auto-range가 과거 최대값에 고정되는 것 방지)
         this._sysInfo = { total_ram_mb: 0, cpu_cores: 1 };
         // latest-only coalesce: rosbridge/TCP 적체 시 큐를 순서대로 비우지 않음
         this._pendingMsg = null;
@@ -10475,7 +10706,8 @@ class SlamAnalyticsDashboard {
             map_time: [],
             total_time: [],
             scan_dop: [],
-            matching_dop: []
+            matching_dop: [],
+            traj_dist: []
         };
     }
 
@@ -10490,6 +10722,7 @@ class SlamAnalyticsDashboard {
         buf.total_time.push((msg.total_time || 0) * 1000);
         buf.scan_dop.push(msg.scan_dop || 0);
         buf.matching_dop.push(msg.matching_dop || 0);
+        buf.traj_dist.push(msg.traj_dist || 0);
 
         // 10초 초과 항목 제거
         while (buf.timestamps.length > 0 && (now - buf.timestamps[0]) > this._WINDOW_SEC) {
@@ -10500,6 +10733,7 @@ class SlamAnalyticsDashboard {
             buf.total_time.shift();
             buf.scan_dop.shift();
             buf.matching_dop.shift();
+            buf.traj_dist.shift();
         }
 
         this._updateWidgets(msg);
@@ -10725,7 +10959,20 @@ class SlamAnalyticsDashboard {
         const s = runSec % 60;
         timeEl.textContent = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 
-        const speed = (runSec > 0) ? (dist / runSec) : 0;
+        // Avg Speed: 전체 누적평균 대신 최근 1초간 이동거리/이동시간 기준 이동평균으로 계산
+        const buf = this._ringBuffer;
+        const n = buf.timestamps.length;
+        let speed = 0;
+        if (n > 0) {
+            const nowTs = buf.timestamps[n - 1];
+            let idx = n - 1;
+            while (idx > 0 && (nowTs - buf.timestamps[idx - 1]) <= this._SPEED_WINDOW_SEC) {
+                idx--;
+            }
+            const dt = nowTs - buf.timestamps[idx];
+            const dd = dist - buf.traj_dist[idx];
+            speed = (dt > 0) ? (dd / dt) : 0;
+        }
         speedEl.textContent = speed.toFixed(2);
     }
 
@@ -10782,9 +11029,20 @@ class SlamAnalyticsDashboard {
         Plotly.extendTraces('analytics-chart-proctime', {
             x: [[x], [x], [x], [x]],
             y: [[imu], [stateStacked], [mapStacked], [total]]
-        }, [0, 1, 2, 3]);
+        }, [0, 1, 2, 3], this._MAX_TRACE_POINTS);
+
+        // 창(WINDOW_SEC) 내 최근 데이터의 최대값 기준으로 y축 범위 재계산 (과거 한때의 최대값에 고정되지 않도록)
+        const buf = this._ringBuffer;
+        let procMax = 0;
+        for (let i = 0; i < buf.timestamps.length; i++) {
+            const stackedTop = buf.imu_time[i] + buf.state_time[i] + buf.map_time[i];
+            procMax = Math.max(procMax, stackedTop, buf.total_time[i]);
+        }
+        const procYmax = procMax > 0 ? procMax * 1.15 : 10;
+
         Plotly.relayout('analytics-chart-proctime', {
-            'xaxis.range': [new Date(now - (this._WINDOW_SEC * 1000)), x]
+            'xaxis.range': [new Date(now - (this._WINDOW_SEC * 1000)), x],
+            'yaxis.range': [0, procYmax]
         });
     }
 
@@ -10798,7 +11056,7 @@ class SlamAnalyticsDashboard {
         Plotly.extendTraces('analytics-chart-dop', {
             x: [[x], [x]],
             y: [[scan], [matching]]
-        }, [0, 1]);
+        }, [0, 1], this._MAX_TRACE_POINTS);
 
         const allDop = [...buf.scan_dop, ...buf.matching_dop].filter((v) => Number.isFinite(v));
         const dopMax = allDop.length > 0 ? Math.max(...allDop) : 10;
@@ -10865,8 +11123,6 @@ class SlamAnalyticsDashboard {
             ['vel_norm', (v) => `${v.toFixed(3)} m/s`],
             ['acc_bias_norm', (v) => `${v.toFixed(4)}`],
             ['gyr_bias_norm', (v) => `${v.toFixed(5)}`],
-            ['lid_offset', (v) => `${v.toFixed(4)} s`],
-            ['imu_offset', (v) => `${v.toFixed(5)} s`],
             ['search_time', (v) => `${(v * 1000).toFixed(1)} ms`],
             ['delete_time', (v) => `${(v * 1000).toFixed(1)} ms`],
             ['kf_count', (v) => `${v}`],
@@ -10965,6 +11221,8 @@ class LocAnalyticsDashboard {
         this._subscription = null;
         this._plotsInit    = false;
         this._WINDOW_SEC   = 10;
+        this._SPEED_WINDOW_SEC = 1; // Avg Speed: 1초 이동평균 윈도우
+        this._speedBuf     = { timestamps: [], traj_dist: [] };
         this._sysInfo      = {};
         this._rugHistory   = new Array(200).fill(false);
         this._rugCanvas    = null;
@@ -11055,10 +11313,22 @@ class LocAnalyticsDashboard {
         }
         this._ros = null;
         this._resetWidgets();
+        this._speedBuf = { timestamps: [], traj_dist: [] };
     }
 
     _onMessage(msg) {
         this._ensurePlotsInit();
+
+        // Avg Speed 1초 이동평균 계산용 이력 버퍼 갱신
+        const now = Date.now() / 1000;
+        const sbuf = this._speedBuf;
+        sbuf.timestamps.push(now);
+        sbuf.traj_dist.push(msg.traj_dist || 0);
+        while (sbuf.timestamps.length > 0 && (now - sbuf.timestamps[0]) > this._WINDOW_SEC) {
+            sbuf.timestamps.shift();
+            sbuf.traj_dist.shift();
+        }
+
         this._updateWidgets(msg);
     }
 
@@ -11197,7 +11467,22 @@ class LocAnalyticsDashboard {
         const m = Math.floor((runSec % 3600) / 60);
         const s = runSec % 60;
         if (timeEl) timeEl.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-        if (speedEl) speedEl.textContent = (runSec > 0 ? dist / runSec : 0).toFixed(2);
+
+        // Avg Speed: 전체 누적평균 대신 최근 1초간 이동거리/이동시간 기준 이동평균으로 계산
+        const sbuf = this._speedBuf;
+        const n = sbuf.timestamps.length;
+        let speed = 0;
+        if (n > 0) {
+            const nowTs = sbuf.timestamps[n - 1];
+            let idx = n - 1;
+            while (idx > 0 && (nowTs - sbuf.timestamps[idx - 1]) <= this._SPEED_WINDOW_SEC) {
+                idx--;
+            }
+            const dt = nowTs - sbuf.timestamps[idx];
+            const dd = dist - sbuf.traj_dist[idx];
+            speed = (dt > 0) ? (dd / dt) : 0;
+        }
+        if (speedEl) speedEl.textContent = speed.toFixed(2);
     }
 
     _updateCpuCard(msg) {
@@ -11354,8 +11639,6 @@ class LocAnalyticsDashboard {
             ['vel_norm',           (v) => `${v.toFixed(3)} m/s`],
             ['acc_bias_norm',      (v) => `${v.toFixed(4)}`],
             ['gyr_bias_norm',      (v) => `${v.toFixed(5)}`],
-            ['lid_offset',         (v) => `${v.toFixed(4)} s`],
-            ['imu_offset',         (v) => `${v.toFixed(5)} s`],
             ['kf_count',           (v) => `${v}`],
             ['kf_dist_last',       (v) => `${v.toFixed(2)} m`],
             ['is_initialized',     (v) => v ? 'true' : 'false'],
@@ -11387,6 +11670,7 @@ class LocAnalyticsDashboard {
         if (ramBar) ramBar.style.width = '0%';
         this._rugHistory.fill(false);
         this._drawRug();
+        this._speedBuf = { timestamps: [], traj_dist: [] };
         this._updateCount  = 0;
         this._lastUpdateMs = null;
         const countEl = document.getElementById('loc-map-update-count');
