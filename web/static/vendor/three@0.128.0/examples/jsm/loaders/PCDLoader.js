@@ -230,6 +230,9 @@ class PCDLoader extends Loader {
 		const position = [];
 		const normal = [];
 		const color = [];
+		// PCL pcl::PointXYZI(intensity) 필드 지원용 커스텀 확장 (ros_slam_webui)
+		const intensity = [];
+		const intensityFieldIndex = PCDheader.fields ? PCDheader.fields.indexOf( 'intensity' ) : -1;
 
 		// ascii
 
@@ -268,6 +271,12 @@ class PCDLoader extends Loader {
 					normal.push( parseFloat( line[ offset.normal_x ] ) );
 					normal.push( parseFloat( line[ offset.normal_y ] ) );
 					normal.push( parseFloat( line[ offset.normal_z ] ) );
+
+				}
+
+				if ( offset.intensity !== undefined ) {
+
+					intensity.push( parseFloat( line[ offset.intensity ] ) );
 
 				}
 
@@ -317,6 +326,12 @@ class PCDLoader extends Loader {
 
 				}
 
+				if ( offset.intensity !== undefined && intensityFieldIndex >= 0 ) {
+
+					intensity.push( dataview.getFloat32( ( PCDheader.points * offset.intensity ) + PCDheader.size[ intensityFieldIndex ] * i, this.littleEndian ) );
+
+				}
+
 			}
 
 		}
@@ -354,6 +369,12 @@ class PCDLoader extends Loader {
 
 				}
 
+				if ( offset.intensity !== undefined ) {
+
+					intensity.push( dataview.getFloat32( row + offset.intensity, this.littleEndian ) );
+
+				}
+
 			}
 
 		}
@@ -365,6 +386,7 @@ class PCDLoader extends Loader {
 		if ( position.length > 0 ) geometry.setAttribute( 'position', new Float32BufferAttribute( position, 3 ) );
 		if ( normal.length > 0 ) geometry.setAttribute( 'normal', new Float32BufferAttribute( normal, 3 ) );
 		if ( color.length > 0 ) geometry.setAttribute( 'color', new Float32BufferAttribute( color, 3 ) );
+		if ( intensity.length > 0 ) geometry.setAttribute( 'intensity', new Float32BufferAttribute( intensity, 1 ) );
 
 		geometry.computeBoundingSphere();
 

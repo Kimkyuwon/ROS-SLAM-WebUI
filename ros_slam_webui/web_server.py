@@ -120,6 +120,7 @@ from urllib.parse import parse_qs, urlparse
 import subprocess
 import signal
 import math
+import re
 import yaml
 from pathlib import Path as PathLib
 import rosbag2_py
@@ -3870,6 +3871,18 @@ class WebGUINode(Node):
             'is_running': is_running
         }
 
+    def _get_long_term_mapping_voxel_size(self, lt_dir, default=0.4):
+        """long_term_mapping/config/params.yaml에서 voxel_size 파라미터를 읽어온다."""
+        if not lt_dir:
+            return default
+        try:
+            with open(str(lt_dir / 'config' / 'params.yaml'), 'r') as f:
+                config = yaml.safe_load(f)
+            return float(config['/**']['ros__parameters'].get('voxel_size', default))
+        except Exception as e:
+            self.get_logger().warn(f'Failed to read voxel_size from params.yaml: {str(e)}')
+            return default
+
     def get_slam_result_paths(self):
         """Return file paths for Multi-Session SLAM result visualization."""
         lt_dir = _find_sibling_package_dir('long_term_mapping')
@@ -3879,8 +3892,15 @@ class WebGUINode(Node):
             'map1_poses': (self.slam_map1 + '/optimized_poses.txt') if self.slam_map1 else '',
             'map2_poses': (self.slam_map2 + '/optimized_poses.txt') if self.slam_map2 else '',
             'output_poses': (output_dir + '/optimized_poses.txt') if output_dir else '',
+            # Map1/Map2 뷰어 시각화용: 개별 스캔 디렉토리 (뷰어에서 pose로 tf 변환 후 누적·복셀화)
+            'map1_scans_dir': (self.slam_map1 + '/Scans/') if self.slam_map1 else '',
+            'map2_scans_dir': (self.slam_map2 + '/Scans/') if self.slam_map2 else '',
+            'voxel_size': self._get_long_term_mapping_voxel_size(lt_dir),
+            # 참고용 사전 생성 PCD (long_term_mapping이 optimize() 실행 시 동일 방식으로 생성)
             'map1_pcd': (output_dir + '/FirstMap.pcd') if output_dir else '',
             'map2_pcd': (output_dir + '/SecondMap.pcd') if output_dir else '',
+            # 병합 후 동적 객체 제거된 최종 정적맵 (intensity: 1=Map1 출신, 2=Map2 출신)
+            'static_map_pcd': (output_dir + '/StaticMap.pcd') if output_dir else '',
             'pd_pcd': (output_dir + '/Debug/PD.pcd') if output_dir else '',
             'nd_pcd': (output_dir + '/Debug/ND.pcd') if output_dir else '',
             'first_ue_pcd': (output_dir + '/Debug/FirstUE.pcd') if output_dir else '',
@@ -3911,6 +3931,7 @@ class WebGUINode(Node):
 
         return {
             'success': True,
+            'lio_map_pcd': _path_if_exists('LioMap.pcd'),
             'optimized_map_pcd': _path_if_exists('OptimizedMap.pcd'),
             'static_map_pcd': _path_if_exists('StaticMap.pcd'),
             'lio_poses': _path_if_exists('odom_poses.txt'),
@@ -7755,6 +7776,152 @@ def _find_sibling_package_dir(package_name):
     return None
 
 
+# ── Map1/Map2 점군 서버사이드 누적/복셀화 (뷰어 로딩 속도 최적화) ─────────────
+# pcl::io::savePCDFileBinary가 생성하는 uncompressed binary PointXYZI(x y z [intensity],
+# 모두 4바이트 float, 패딩 없음) 포맷만 지원한다. ascii/binary_compressed나 그 외 포맷은
+# None을 반환하여 호출측이 해당 파일을 건너뛰도록 한다.
+def _read_pcd_xyzi_fast(path):
+    """PCD 파일에서 (xyz: Nx3 float32 ndarray, intensity: N float32 ndarray|None)을 반환.
+    실패 시 (None, None)."""
+    if not NUMPY_AVAILABLE:
+        return None, None
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except (FileNotFoundError, OSError):
+        return None, None
+
+    # 헤더는 항상 순수 ASCII이므로 latin-1로 디코딩하면 문자 인덱스 == 바이트 오프셋이 보장된다
+    # (뒤에 이어지는 바이너리 포인트 데이터가 섞여 디코딩돼도 헤더 구간 오프셋 계산에는 영향 없음)
+    head_text = data[:4096].decode('latin-1', errors='replace')
+    data_m = re.search(r'DATA\s+(\S+)', head_text)
+    if not data_m or data_m.group(1).lower() != 'binary':
+        return None, None
+
+    nl = head_text.find('\n', data_m.end())
+    if nl < 0:
+        return None, None
+    header_len = nl + 1
+    header_str = head_text[:header_len]
+
+    fields_m = re.search(r'FIELDS\s+(.*)', header_str)
+    size_m = re.search(r'SIZE\s+(.*)', header_str)
+    points_m = re.search(r'POINTS\s+(.*)', header_str)
+    if not fields_m or not size_m:
+        return None, None
+
+    fields = fields_m.group(1).split()
+    sizes = [int(x) for x in size_m.group(1).split()]
+    if any(s != 4 for s in sizes) or 'x' not in fields or 'y' not in fields or 'z' not in fields:
+        return None, None  # PointXYZ(I) 이외 포맷은 미지원 (호출측 폴백)
+
+    num_fields = len(fields)
+    num_points = int(points_m.group(1)) if points_m else 0
+    if num_points <= 0:
+        return None, None
+
+    try:
+        arr = np.frombuffer(data, dtype='<f4', count=num_points * num_fields, offset=header_len)
+    except ValueError:
+        return None, None  # 파일이 잘렸거나 헤더 정보와 불일치
+    arr = arr.reshape(num_points, num_fields)
+
+    xi, yi, zi = fields.index('x'), fields.index('y'), fields.index('z')
+    xyz = np.ascontiguousarray(arr[:, (xi, yi, zi)], dtype=np.float32)
+    intensity = np.ascontiguousarray(arr[:, fields.index('intensity')], dtype=np.float32) if 'intensity' in fields else None
+    return xyz, intensity
+
+
+def _quat_to_rotation_matrix(qx, qy, qz, qw):
+    """쿼터니언 -> 3x3 회전행렬 (THREE.Quaternion과 동일한 convention)."""
+    n = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if n < 1e-12:
+        return np.eye(3, dtype=np.float64)
+    qx, qy, qz, qw = qx / n, qy / n, qz / n, qw / n
+    return np.array([
+        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+        [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+    ], dtype=np.float64)
+
+
+def _voxel_downsample_centroid(points, voxel_size):
+    """points(Nx3 float)를 voxel_size 격자로 묶어 격자별 중심(centroid)만 남긴다.
+    pcl::VoxelGrid(centroid 모드)와 동등한 결과. points가 비어있으면 그대로 반환."""
+    if points.shape[0] == 0:
+        return points.astype(np.float32)
+
+    inv = 1.0 / max(voxel_size, 1e-6)
+    idx = np.floor(points.astype(np.float64) * inv).astype(np.int64)
+
+    # (ix,iy,iz) -> 정렬 가능한 단일 정수 키로 패킹 (JS 프론트엔드의 _voxelKeyNum과 동일 범위)
+    BASE = 131072   # 2^17
+    OFFSET = 65536  # 2^16, voxel_size 기준 ±약 26km(voxel 0.4m) 범위 커버
+    key = ((idx[:, 0] + OFFSET) * BASE + (idx[:, 1] + OFFSET)) * BASE + (idx[:, 2] + OFFSET)
+
+    order = np.argsort(key, kind='stable')
+    sorted_key = key[order]
+    sorted_pts = points[order].astype(np.float64)
+
+    unique_key, first_idx, counts = np.unique(sorted_key, return_index=True, return_counts=True)
+    cumsum = np.cumsum(sorted_pts, axis=0)
+    end_idx = first_idx + counts - 1
+    totals = cumsum[end_idx]
+    prev = np.zeros_like(totals)
+    has_prev = first_idx > 0
+    prev[has_prev] = cumsum[first_idx[has_prev] - 1]
+    sums = totals - prev
+    centroids = (sums / counts[:, None]).astype(np.float32)
+    return centroids
+
+
+def _parse_optimized_poses_np(file_path):
+    """optimized_poses.txt(timestamp x y z qx qy qz qw)를 파싱해 pose dict 리스트로 반환."""
+    poses = []
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 8:
+                    poses.append({
+                        'x': float(parts[1]), 'y': float(parts[2]), 'z': float(parts[3]),
+                        'qx': float(parts[4]), 'qy': float(parts[5]), 'qz': float(parts[6]), 'qw': float(parts[7]),
+                    })
+    except (FileNotFoundError, OSError):
+        return []
+    return poses
+
+
+def compute_accumulated_scan_map(poses_path, scans_dir, voxel_size, max_workers=8):
+    """posesPath의 각 pose로 scansDir/{i}.pcd 스캔을 tf 변환 후 누적, voxel_size로
+    복셀화한 centroid 포인트(Nx3 float32 ndarray)를 반환한다. 실패 시 None.
+    (long_term_mapping.cpp의 generateOptimizedMap()과 동등한 처리를 서버에서 수행)"""
+    if not NUMPY_AVAILABLE:
+        return None
+    poses = _parse_optimized_poses_np(poses_path)
+    if not poses:
+        return None
+
+    def _load_transform(i):
+        pose = poses[i]
+        scan_path = os.path.join(scans_dir, f'{i}.pcd')
+        xyz, _ = _read_pcd_xyzi_fast(scan_path)
+        if xyz is None or xyz.shape[0] == 0:
+            return None
+        R = _quat_to_rotation_matrix(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+        t = np.array([pose['x'], pose['y'], pose['z']], dtype=np.float64)
+        transformed = xyz.astype(np.float64) @ R.T + t
+        return transformed.astype(np.float32)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        chunks = [c for c in executor.map(_load_transform, range(len(poses))) if c is not None]
+
+    if not chunks:
+        return None
+    points = np.concatenate(chunks, axis=0)
+    return _voxel_downsample_centroid(points, voxel_size)
+
+
 def get_sibling_package_dirs():
     """Return auto-detected directories for sibling packages used by the UI."""
     result = {'success': True}
@@ -7911,6 +8078,12 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             query = parse_qs(parsed_path.query)
             file_path = query.get('path', [''])[0]
             self._serve_slam_pcd(file_path)
+        elif parsed_path.path == '/api/slam/accumulated_map':
+            query = parse_qs(parsed_path.query)
+            poses_path = query.get('poses_path', [''])[0]
+            scans_dir = query.get('scans_dir', [''])[0]
+            voxel_size = query.get('voxel_size', ['0.4'])[0]
+            self._serve_slam_accumulated_map(poses_path, scans_dir, voxel_size)
         elif parsed_path.path == '/api/localization/state':
             self.send_json_response(self.node.get_localization_state())
         elif parsed_path.path == '/api/player/state':
@@ -8549,6 +8722,37 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response({'success': False, 'error': 'File not found'})
         except Exception as e:
             self.send_json_response({'success': False, 'error': str(e)})
+
+    def _serve_slam_accumulated_map(self, poses_path, scans_dir, voxel_size):
+        """Map1/Map2용: poses_path의 pose로 scans_dir의 개별 스캔을 tf 변환·누적·복셀화한
+        결과를 raw float32(x,y,z 반복) 바이너리로 반환한다. 실패 시 빈 바이너리(0바이트)를
+        200으로 반환해 호출측(프론트엔드)이 클라이언트 사이드 폴백을 수행하도록 한다."""
+        if not self._is_allowed_slam_path(poses_path) or not self._is_allowed_slam_path(scans_dir):
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', '0')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            return
+        try:
+            vsize = float(voxel_size)
+        except (TypeError, ValueError):
+            vsize = 0.4
+
+        points = None
+        try:
+            points = compute_accumulated_scan_map(poses_path, scans_dir, vsize)
+        except Exception as e:
+            self.node.get_logger().warn(f'accumulated_map computation failed: {str(e)}')
+
+        data = points.astype('<f4').tobytes() if points is not None else b''
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/octet-stream')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        if data:
+            self.wfile.write(data)
 
     def send_json_response(self, data):
         self.send_response(200)

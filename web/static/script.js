@@ -503,17 +503,11 @@ function _showOptSuccess() {
     const area = domCache.get('slam-opt-status-area');
     const cancelBtn = domCache.get('slam-opt-cancel-btn');
     const spinner = domCache.get('slam-opt-spinner');
+    const msgEl = domCache.get('slam-opt-msg');
 
-    spinner.style.display = 'none';
     cancelBtn.style.display = 'none';
-
-    area.style.transition = 'opacity 0.6s ease';
-    area.style.opacity = '0';
-    setTimeout(() => {
-        area.style.display = 'none';
-        area.style.opacity = '1';
-        area.style.transition = '';
-    }, 620);
+    // 뷰어가 완전히 준비될 때까지 스피너/상태 문구를 유지해, 빈 뷰어 대신 이 표시로 진행 상황을 알린다.
+    msgEl.textContent = 'Loading results...';
 
     _optRunning = false;
     _optComplete = true;
@@ -521,7 +515,16 @@ function _showOptSuccess() {
     runBtn.disabled = false;
     runBtn.textContent = 'Exit';
 
-    slamResultViewer.show();
+    slamResultViewer.show().finally(() => {
+        spinner.style.display = 'none';
+        area.style.transition = 'opacity 0.6s ease';
+        area.style.opacity = '0';
+        setTimeout(() => {
+            area.style.display = 'none';
+            area.style.opacity = '1';
+            area.style.transition = '';
+        }, 620);
+    });
 }
 
 function _showOptError(message, autoHide = false) {
@@ -9559,6 +9562,279 @@ class SlamResultViewer {
         });
     }
 
+    // pose({x,y,z,qx,qy,qz,qw}) -> tf 변환 행렬 (long_term_mapping.cpp의 createTransformMatrix와 동일)
+    _poseToMatrix(pose) {
+        const THREE = window.THREE;
+        const q = new THREE.Quaternion(pose.qx, pose.qy, pose.qz, pose.qw);
+        const m = new THREE.Matrix4();
+        m.makeRotationFromQuaternion(q);
+        m.setPosition(pose.x, pose.y, pose.z);
+        return m;
+    }
+
+    /**
+     * pcl::io::savePCDFileBinary가 생성하는 uncompressed binary PCD를 빠르게 파싱한다.
+     * 벤더 PCDLoader와 달리 (1) 헤더 영역만 텍스트로 디코딩하고(전체 바이너리 포인트
+     * 데이터를 문자열로 변환하지 않음), (2) 값을 배열에 push하는 대신 DataView로 미리
+     * 할당한 Float32Array에 직접 기록한다. 다중 스캔(수백 개) 파일을 반복 로드하는
+     * Map1/Map2 누적 시 병목이 되는 부분이라 별도로 최적화함.
+     * ascii/binary_compressed 등 비표준 포맷이면 null을 반환한다(호출측에서 폴백).
+     */
+    _parsePCDFast(buf) {
+        try {
+            const headLen = Math.min(buf.byteLength, 4096);
+            const headText = new TextDecoder('utf-8').decode(new Uint8Array(buf, 0, headLen));
+
+            // 벤더 PCDLoader.parseHeader()와 동일한 헤더 길이 계산 방식(오프셋 산출 방식을 그대로 따라야 함)
+            const dataSearch = headText.search(/[\r\n]DATA\s(\S*)\s/i);
+            if (dataSearch < 0) return null;
+            const dataMatch = /[\r\n]DATA\s(\S*)\s/i.exec(headText.substr(dataSearch - 1));
+            if (!dataMatch) return null;
+            if (dataMatch[1].toLowerCase() !== 'binary') return null; // ascii/binary_compressed는 폴백
+
+            const headerLen = dataMatch[0].length + dataSearch;
+            const headerStr = headText.substr(0, headerLen).replace(/#.*/gi, '');
+
+            const fieldsM = /FIELDS (.*)/i.exec(headerStr);
+            const sizeM = /SIZE (.*)/i.exec(headerStr);
+            const countM = /COUNT (.*)/i.exec(headerStr);
+            const widthM = /WIDTH (.*)/i.exec(headerStr);
+            const heightM = /HEIGHT (.*)/i.exec(headerStr);
+            const pointsM = /POINTS (.*)/i.exec(headerStr);
+            if (!fieldsM || !sizeM) return null;
+
+            const fields = fieldsM[1].trim().split(/\s+/);
+            const sizes = sizeM[1].trim().split(/\s+/).map(Number);
+            const counts = countM ? countM[1].trim().split(/\s+/).map(Number) : fields.map(() => 1);
+            const width = widthM ? parseInt(widthM[1], 10) : 0;
+            const height = heightM ? parseInt(heightM[1], 10) : 1;
+            const numPoints = pointsM ? parseInt(pointsM[1], 10) : (width * (height || 1));
+            if (!numPoints || numPoints <= 0) return null;
+
+            const offsets = {};
+            let rowSize = 0;
+            for (let i = 0; i < fields.length; i++) {
+                offsets[fields[i]] = rowSize;
+                rowSize += sizes[i] * (counts[i] || 1);
+            }
+            if (offsets.x === undefined || offsets.y === undefined || offsets.z === undefined) return null;
+
+            const dv = new DataView(buf, headerLen);
+            const positions = new Float32Array(numPoints * 3);
+            const hasIntensity = offsets.intensity !== undefined;
+            const intensities = hasIntensity ? new Float32Array(numPoints) : null;
+
+            const offX = offsets.x, offY = offsets.y, offZ = offsets.z, offI = offsets.intensity;
+            for (let i = 0, row = 0; i < numPoints; i++, row += rowSize) {
+                positions[i * 3] = dv.getFloat32(row + offX, true);
+                positions[i * 3 + 1] = dv.getFloat32(row + offY, true);
+                positions[i * 3 + 2] = dv.getFloat32(row + offZ, true);
+                if (hasIntensity) intensities[i] = dv.getFloat32(row + offI, true);
+            }
+
+            return { positions, intensities, count: numPoints };
+        } catch (e) {
+            console.warn('SlamResultViewer: fast PCD parse failed:', e);
+            return null;
+        }
+    }
+
+    /** path의 PCD를 { positions: Float32Array, intensities: Float32Array|null, count } 형태로 가져온다.
+     * 빠른 경로(binary) 실패 시 벤더 PCDLoader(ascii/binary_compressed 등)로 폴백한다. */
+    async _fetchPCDRaw(path) {
+        try {
+            const resp = await fetch('/api/slam/pcd?path=' + encodeURIComponent(path));
+            if (!resp.ok) return null;
+            const buf = await resp.arrayBuffer();
+            const fast = this._parsePCDFast(buf);
+            if (fast) return fast;
+        } catch (e) {
+            console.warn('SlamResultViewer: PCD fetch failed:', path, e);
+            return null;
+        }
+        // 폴백: 표준 PCDLoader (ascii/binary_compressed 등 비표준 케이스)
+        const pts = await this._loadPCD(path);
+        if (!pts || !pts.geometry || !pts.geometry.attributes.position) return null;
+        const posAttr = pts.geometry.attributes.position;
+        const intAttr = pts.geometry.attributes.intensity;
+        const result = {
+            positions: new Float32Array(posAttr.array),
+            intensities: intAttr ? new Float32Array(intAttr.array) : null,
+            count: posAttr.count,
+        };
+        pts.geometry.dispose();
+        return result;
+    }
+
+    // 3D 격자 인덱스(ix,iy,iz)를 문자열 concat 없이 하나의 정수 키로 패킹 (Map 해싱 비용 절감)
+    // BASE=2^17(131072), OFFSET=2^16 → voxel_size=0.4m 기준 ±약 26km 범위 커버
+    _voxelKeyNum(ix, iy, iz) {
+        const BASE = 131072;
+        const OFFSET = 65536;
+        return ((ix + OFFSET) * BASE + (iy + OFFSET)) * BASE + (iz + OFFSET);
+    }
+
+    /**
+     * Map1/Map2 서버사이드 누적 맵 요청. 백엔드(Python/numpy)가 스캔 로드 + tf 변환 +
+     * 누적 + 복셀화를 전부 처리한 뒤, 완성된 point cloud를 raw float32(x,y,z 반복)
+     * 바이너리 하나로 응답한다(요청 1회로 끝남). numpy 미설치 등으로 실패하면 서버가
+     * 빈 응답을 주므로 null을 반환해 호출측이 클라이언트 사이드 폴백을 쓰도록 한다.
+     */
+    async _fetchAccumulatedMapFromServer(posesPath, scansDir, voxelSize) {
+        try {
+            const url = '/api/slam/accumulated_map'
+                + '?poses_path=' + encodeURIComponent(posesPath)
+                + '&scans_dir=' + encodeURIComponent(scansDir)
+                + '&voxel_size=' + encodeURIComponent(voxelSize);
+            const resp = await fetch(url);
+            if (!resp.ok) return null;
+            const buf = await resp.arrayBuffer();
+            if (!buf || buf.byteLength === 0) return null;
+            return new Float32Array(buf);
+        } catch (e) {
+            console.warn('SlamResultViewer: server-side accumulated map fetch failed, falling back:', e);
+            return null;
+        }
+    }
+
+    /**
+     * 클라이언트 사이드 폴백: posesPath(optimized_poses.txt)의 각 pose로 scansDir/{i}.pcd
+     * 스캔을 tf 변환한 뒤 누적하고, voxelSize 간격의 격자 중심(centroid) 다운샘플을 적용해
+     * Float32Array(x,y,z 반복)를 만든다. (pcl::transformPointCloud + accumulate +
+     * pcl::VoxelGrid와 동등한 처리) 스캔 파일들은 CONCURRENCY개씩 병렬로 fetch하고,
+     * 각 스캔은 도착 즉시 tf 변환 후 voxel 그리드에 누적(=즉시 복셀화)하여 원본 포인트를
+     * 따로 쌓아두지 않는다. 서버사이드 처리(_fetchAccumulatedMapFromServer)가 실패했을
+     * 때만 사용된다.
+     */
+    async _loadAccumulatedScanMapClientSide(posesPath, scansDir, voxelSize) {
+        const poses = await this._fetchPoses(posesPath);
+        if (!poses || poses.length === 0) return null;
+
+        const inv = 1.0 / Math.max(voxelSize, 1e-6);
+        const voxelMap = new Map();
+        const CONCURRENCY = 16;
+
+        for (let start = 0; start < poses.length; start += CONCURRENCY) {
+            const end = Math.min(start + CONCURRENCY, poses.length);
+            const batch = [];
+            for (let i = start; i < end; i++) batch.push(this._fetchPCDRaw(scansDir + i + '.pcd'));
+            const results = await Promise.all(batch);
+
+            for (let bi = 0; bi < results.length; bi++) {
+                const raw = results[bi];
+                if (!raw || !raw.positions || raw.count === 0) continue;
+
+                const m = this._poseToMatrix(poses[start + bi]);
+                const e = m.elements;
+                const pos = raw.positions;
+                for (let k = 0; k < raw.count; k++) {
+                    const bx = pos[k * 3], by = pos[k * 3 + 1], bz = pos[k * 3 + 2];
+                    const x = e[0] * bx + e[4] * by + e[8] * bz + e[12];
+                    const y = e[1] * bx + e[5] * by + e[9] * bz + e[13];
+                    const z = e[2] * bx + e[6] * by + e[10] * bz + e[14];
+                    const key = this._voxelKeyNum(Math.floor(x * inv), Math.floor(y * inv), Math.floor(z * inv));
+                    let acc = voxelMap.get(key);
+                    if (!acc) {
+                        acc = { x: 0, y: 0, z: 0, n: 0 };
+                        voxelMap.set(key, acc);
+                    }
+                    acc.x += x; acc.y += y; acc.z += z; acc.n += 1;
+                }
+            }
+        }
+
+        if (voxelMap.size === 0) return null;
+
+        const positions = new Float32Array(voxelMap.size * 3);
+        let idx = 0;
+        for (const acc of voxelMap.values()) {
+            positions[idx++] = acc.x / acc.n;
+            positions[idx++] = acc.y / acc.n;
+            positions[idx++] = acc.z / acc.n;
+        }
+        return positions;
+    }
+
+    /**
+     * Map1/Map2 누적 맵을 로드하여 THREE.Points로 만든다. 우선 백엔드(numpy)가 전체를
+     * 처리한 결과(요청 1회)를 시도하고, 실패한 경우에만 브라우저에서 스캔 파일들을
+     * 병렬로 fetch·복셀화하는 클라이언트 사이드 방식으로 폴백한다.
+     */
+    async _loadAccumulatedScanMap(posesPath, scansDir, voxelSize, color) {
+        const THREE = window.THREE;
+        let positions = await this._fetchAccumulatedMapFromServer(posesPath, scansDir, voxelSize);
+        if (!positions) {
+            positions = await this._loadAccumulatedScanMapClientSide(posesPath, scansDir, voxelSize);
+        }
+        if (!positions || positions.length === 0) return null;
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const pcd = new THREE.Points(geo, new THREE.PointsMaterial({
+            color, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false,
+            clippingPlanes: [this._heightClipPlaneHigh, this._heightClipPlaneLow],
+        }));
+        pcd.material._baseSize = this._pcdPointSize;
+        return pcd;
+    }
+
+    /**
+     * intensity 필드를 가진 단일 PCD(StaticMap.pcd)를 splits 정의(value별 색상/레이어)에 따라
+     * 여러 개의 THREE.Points로 분리하여 씬에 추가한다.
+     * splits: [{ value, color, layer }]
+     */
+    async _loadIntensitySplitPCD(path, splits) {
+        const THREE = window.THREE;
+        const raw = await this._fetchPCDRaw(path);
+        if (!raw || !raw.positions || raw.count === 0) return;
+        if (!raw.intensities) {
+            console.warn('SlamResultViewer: intensity field not found in', path);
+            return;
+        }
+
+        const valueToBucket = new Map();
+        splits.forEach((s, bi) => valueToBucket.set(s.value, bi));
+
+        // 1차 패스: 버킷별 포인트 개수를 먼저 센다 (push 기반 동적 배열 확장/박싱 비용 제거를 위해
+        // 정확한 크기의 Float32Array를 미리 할당하기 위함)
+        const counts = new Array(splits.length).fill(0);
+        const bucketOf = new Int8Array(raw.count).fill(-1);
+        for (let i = 0; i < raw.count; i++) {
+            const bi = valueToBucket.get(Math.round(raw.intensities[i]));
+            if (bi === undefined) continue;
+            bucketOf[i] = bi;
+            counts[bi]++;
+        }
+
+        const bucketArrays = counts.map(c => new Float32Array(c * 3));
+        const cursors = new Array(splits.length).fill(0);
+        // 2차 패스: 미리 할당된 배열에 좌표를 직접 기록
+        for (let i = 0; i < raw.count; i++) {
+            const bi = bucketOf[i];
+            if (bi < 0) continue;
+            const dst = bucketArrays[bi];
+            const c = cursors[bi];
+            const base = i * 3;
+            dst[c] = raw.positions[base];
+            dst[c + 1] = raw.positions[base + 1];
+            dst[c + 2] = raw.positions[base + 2];
+            cursors[bi] = c + 3;
+        }
+
+        splits.forEach((s, bi) => {
+            if (bucketArrays[bi].length === 0) return;
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.BufferAttribute(bucketArrays[bi], 3));
+            const pts = new THREE.Points(geo, new THREE.PointsMaterial({
+                color: s.color, size: this._pcdPointSize, sizeAttenuation: true, vertexColors: false,
+                clippingPlanes: [this._heightClipPlaneHigh, this._heightClipPlaneLow],
+            }));
+            pts.material._baseSize = this._pcdPointSize;
+            this._addToScene(pts, s.layer);
+            this._pcdObjects.push(pts);
+        });
+    }
+
     _computeBounds() {
         const THREE = window.THREE;
         const center = new THREE.Vector3(0, 0, 0);
@@ -9694,6 +9970,26 @@ class SlamResultViewer {
             this._pcdObjects.push(pcd);
         }
 
+        // Map1/Map2: 각 맵 디렉토리의 optimized_poses.txt(궤적) + Scans/의 개별 스캔을
+        // pose로 tf 변환 후 누적, voxel_size로 복셀화하여 시각화
+        const voxelSize = parseFloat(paths[spec.voxelSizeKey || 'voxel_size']) || 0.4;
+        for (const al of (spec.accumulatedLayers || [])) {
+            const posesPath = paths[al.posesKey];
+            const scansDir = paths[al.scansDirKey];
+            if (!posesPath || !scansDir) continue;
+            const pcd = await this._loadAccumulatedScanMap(posesPath, scansDir, voxelSize, al.color);
+            if (!pcd) continue;
+            this._addToScene(pcd, al.layer);
+            this._pcdObjects.push(pcd);
+        }
+
+        // 병합 정적맵(StaticMap.pcd)을 intensity 값으로 분리하여 시각화 (1=Map1 출신, 2=Map2 출신)
+        for (const isl of (spec.intensitySplitLayers || [])) {
+            const path = paths[isl.pathKey];
+            if (!path) continue;
+            await this._loadIntensitySplitPCD(path, isl.splits);
+        }
+
         // 궤적 레이어 로드 (라인 또는 노드)
         const posesByKey = {};
         for (const tl of (spec.trajLayers || [])) {
@@ -9820,6 +10116,15 @@ class SlamResultViewer {
                     u.uSy.value = physH;
                 }
             }
+            // Line2/LineSegments2(LIO·PGO 궤적, Loop Closure) 머티리얼은 생성 시점의
+            // container 크기로 screen-space 두께를 계산하는 resolution uniform을 갖는다.
+            // show() 중 컨테이너가 display:none 상태에서 로드되면 0x0으로 캡처되어 선이
+            // 보이지 않게 되므로, 실제 표시 크기를 알게 되는 매 리사이즈마다 갱신한다.
+            for (const obj of this._allObjects) {
+                if (obj.material && obj.material.resolution && obj.material.resolution.isVector2) {
+                    obj.material.resolution.set(w, h);
+                }
+            }
         }
     }
 
@@ -9827,14 +10132,32 @@ class SlamResultViewer {
         if (context && context.directory) {
             this._directory = context.directory;
         }
-        const viewerEl = document.getElementById(this._ids.viewer);
-        if (viewerEl) viewerEl.style.display = 'block';
-        await this._init();
-        this._resizeRenderer();
-        await this.load();
+        // 이미 준비 중인 show()가 있으면 그 결과를 그대로 기다린다.
+        // (폴링 등으로 show()가 중복 호출돼도 로드 작업이 중복 실행되지 않도록 방지)
+        if (this._showPromise) return this._showPromise;
+
+        const gen = (this._showGen = (this._showGen || 0) + 1);
+        this._showPromise = (async () => {
+            // 컨테이너를 숨긴 채로 초기화·로드를 모두 마친 뒤에야 화면에 표시한다.
+            // → 빈 화면/로딩 표시가 보이는 대신, 시각화 준비가 끝나면 한 번에 뷰어가 나타난다.
+            await this._init();
+            await this.load();
+            // 로드하는 동안 hide()/hideAndReset()이 호출됐다면(예: Exit) 뒤늦게 다시 표시하지 않는다.
+            if (this._showGen !== gen) return;
+            const viewerEl = document.getElementById(this._ids.viewer);
+            if (viewerEl) viewerEl.style.display = 'block';
+            this._resizeRenderer();
+        })();
+        try {
+            await this._showPromise;
+        } finally {
+            this._showPromise = null;
+        }
     }
 
     hide() {
+        // 진행 중인 show()가 있다면 완료되더라도 뷰어를 다시 표시하지 않도록 무효화한다.
+        this._showGen = (this._showGen || 0) + 1;
         const viewerEl = document.getElementById(this._ids.viewer);
         if (viewerEl) viewerEl.style.display = 'none';
     }
@@ -10276,9 +10599,22 @@ const slamResultViewer = new SlamResultViewer({
     },
     spec: {
         pathsEndpoint: '/api/slam/result_paths',
-        pcdLayers: [
-            { pathKey: 'map1_pcd', color: 0x4488ff, layer: 'map1' },
-            { pathKey: 'map2_pcd', color: 0x44dd88, layer: 'map2' },
+        // Map1/Map2: 각 맵 디렉토리의 optimized_poses.txt(궤적) + Scans/ 개별 스캔을
+        // pose로 tf 변환 후 누적, voxel_size로 복셀화하여 시각화 (long_term_mapping과 동일 처리)
+        accumulatedLayers: [
+            { posesKey: 'map1_poses', scansDirKey: 'map1_scans_dir', color: 0x4488ff, layer: 'map1' },
+            { posesKey: 'map2_poses', scansDirKey: 'map2_scans_dir', color: 0x44dd88, layer: 'map2' },
+        ],
+        voxelSizeKey: 'voxel_size',
+        // 병합 정적맵(StaticMap.pcd)을 intensity로 분리하여 시각화 (1=Map1 출신, 2=Map2 출신)
+        intensitySplitLayers: [
+            {
+                pathKey: 'static_map_pcd',
+                splits: [
+                    { value: 1, color: 0xff44cc, layer: 'mergemap1' },
+                    { value: 2, color: 0x00e5ff, layer: 'mergemap2' },
+                ],
+            },
         ],
         trajLayers: [
             { pathKey: 'map1_poses', color: 0xffee44, layer: 'map1traj', asNodes: true },
@@ -10349,6 +10685,7 @@ const saveMapResultViewer = new SlamResultViewer({
     spec: {
         pathsEndpoint: '/api/slam/save_map_result',
         pcdLayers: [
+            { pathKey: 'lio_map_pcd', color: 0xffdd00, layer: 'liomap' },
             { pathKey: 'optimized_map_pcd', color: 0xff3333, layer: 'optimized' },
             { pathKey: 'static_map_pcd', color: 0x44ff88, layer: 'static' },
         ],

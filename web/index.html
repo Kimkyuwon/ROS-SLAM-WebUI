@@ -354,6 +354,7 @@
                                 <span class="height-clip-current" id="savemap-height-clip-current-label">Z: -</span>
                             </div>
                             <div id="savemap-pcd-legend">
+                                <div class="slam-legend-row" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="background:#ffdd00;"></span><span>LIO Map</span></div>
                                 <div class="slam-legend-row" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
                                 <div class="slam-legend-row" data-layer="static" data-active="true" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
                             </div>
@@ -769,6 +770,9 @@
                             <div id="slam-pcd-legend">
                                 <div class="slam-legend-row" data-layer="map1" data-active="true" onclick="toggleSlamLayer('map1')"><span class="slam-legend-dot" style="background:#4488ff;"></span><span>Map1</span></div>
                                 <div class="slam-legend-row" data-layer="map2" data-active="true" onclick="toggleSlamLayer('map2')"><span class="slam-legend-dot" style="background:#44dd88;"></span><span>Map2</span></div>
+                                <div class="slam-legend-separator"></div>
+                                <div class="slam-legend-row" data-layer="mergemap1" data-active="true" onclick="toggleSlamLayer('mergemap1')"><span class="slam-legend-dot" style="background:#ff44cc;"></span><span>Merge Map 1</span></div>
+                                <div class="slam-legend-row" data-layer="mergemap2" data-active="true" onclick="toggleSlamLayer('mergemap2')"><span class="slam-legend-dot" style="background:#00e5ff;"></span><span>Merge Map 2</span></div>
                                 <div id="slam-diff-legend-rows" style="display:none;">
                                     <div class="slam-legend-separator"></div>
                                     <div class="slam-legend-row" data-layer="pd" data-active="true" onclick="toggleSlamLayer('pd')"><span class="slam-legend-dot" style="background:#ff6600;"></span><span>PD (New)</span></div>
@@ -1612,7 +1616,7 @@
     <script src="static/plot_manager.js"></script>
     
     <script src="static/webui_ports.js"></script>
-    <script src="static/script.js?v=20260722a"></script>
+    <script src="static/script.js?v=20260729e"></script>
     
     <!-- Three.js and OrbitControls as ES6 modules (local vendor — offline/navifra compatible) -->
     <script type="module">
