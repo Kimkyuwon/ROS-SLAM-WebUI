@@ -10276,12 +10276,12 @@ class SlamResultViewer {
                         this._diffPaths = await apiCall(this._buildPathsEndpoint());
                     }
                     const paths = this._diffPaths;
-                    // PD / ND — 없을 수 있으므로 각각 독립 try
-                    try { if (paths && paths.pd_pcd) await this._loadDiffPCD(paths.pd_pcd, 0xff6600, 'pd'); } catch (e) { console.warn('PD.pcd not available'); }
-                    try { if (paths && paths.nd_pcd) await this._loadDiffPCD(paths.nd_pcd, 0xdd00ff, 'nd'); } catch (e) { console.warn('ND.pcd not available'); }
+                    // PD / ND — 없을 수 있으므로 각각 독립 try (색상은 slamResultViewer 12색 팔레트 참조)
+                    try { if (paths && paths.pd_pcd) await this._loadDiffPCD(paths.pd_pcd, 0xff1919, 'pd'); } catch (e) { console.warn('PD.pcd not available'); }
+                    try { if (paths && paths.nd_pcd) await this._loadDiffPCD(paths.nd_pcd, 0x8c19ff, 'nd'); } catch (e) { console.warn('ND.pcd not available'); }
                     // FirstUE / SecondUE — 없을 수 있으므로 각각 독립 try
-                    try { if (paths && paths.first_ue_pcd) await this._loadDiffPCD(paths.first_ue_pcd, 0xff0066, 'firstue'); } catch (e) { console.warn('FirstUE.pcd not available'); }
-                    try { if (paths && paths.second_ue_pcd) await this._loadDiffPCD(paths.second_ue_pcd, 0xaaff00, 'secondue'); } catch (e) { console.warn('SecondUE.pcd not available'); }
+                    try { if (paths && paths.first_ue_pcd) await this._loadDiffPCD(paths.first_ue_pcd, 0xff198c, 'firstue'); } catch (e) { console.warn('FirstUE.pcd not available'); }
+                    try { if (paths && paths.second_ue_pcd) await this._loadDiffPCD(paths.second_ue_pcd, 0x8cff19, 'secondue'); } catch (e) { console.warn('SecondUE.pcd not available'); }
                     this._diffLoaded = true;
                 } finally {
                     if (loadingEl) loadingEl.style.display = 'none';
@@ -10601,9 +10601,11 @@ const slamResultViewer = new SlamResultViewer({
         pathsEndpoint: '/api/slam/result_paths',
         // Map1/Map2: 각 맵 디렉토리의 optimized_poses.txt(궤적) + Scans/ 개별 스캔을
         // pose로 tf 변환 후 누적, voxel_size로 복셀화하여 시각화 (long_term_mapping과 동일 처리)
+        // 색상 팔레트 규칙: 12개 레이어(지도 점군 4·diff 점군 4·궤적 3·Loop Closure 1)가
+        // 서로 겹치지 않도록 색상환(Hue) 360°를 12등분(30° 간격)하여 배정 (모두 고유 색상)
         accumulatedLayers: [
-            { posesKey: 'map1_poses', scansDirKey: 'map1_scans_dir', color: 0x4488ff, layer: 'map1' },
-            { posesKey: 'map2_poses', scansDirKey: 'map2_scans_dir', color: 0x44dd88, layer: 'map2' },
+            { posesKey: 'map1_poses', scansDirKey: 'map1_scans_dir', color: 0x198cff, layer: 'map1' },
+            { posesKey: 'map2_poses', scansDirKey: 'map2_scans_dir', color: 0x19ff8c, layer: 'map2' },
         ],
         voxelSizeKey: 'voxel_size',
         // 병합 정적맵(StaticMap.pcd)을 intensity로 분리하여 시각화 (1=Map1 출신, 2=Map2 출신)
@@ -10611,17 +10613,17 @@ const slamResultViewer = new SlamResultViewer({
             {
                 pathKey: 'static_map_pcd',
                 splits: [
-                    { value: 1, color: 0xff44cc, layer: 'mergemap1' },
-                    { value: 2, color: 0x00e5ff, layer: 'mergemap2' },
+                    { value: 1, color: 0xff19ff, layer: 'mergemap1' },
+                    { value: 2, color: 0xff8c19, layer: 'mergemap2' },
                 ],
             },
         ],
         trajLayers: [
-            { pathKey: 'map1_poses', color: 0xffee44, layer: 'map1traj', asNodes: true },
-            { pathKey: 'map2_poses', color: 0xff9900, layer: 'map2traj', asNodes: true },
-            { pathKey: 'output_poses', color: 0x44ffff, layer: 'outputtraj', asNodes: true },
+            { pathKey: 'map1_poses', color: 0xffff19, layer: 'map1traj', asNodes: true },
+            { pathKey: 'map2_poses', color: 0x1919ff, layer: 'map2traj', asNodes: true },
+            { pathKey: 'output_poses', color: 0x19ffff, layer: 'outputtraj', asNodes: true },
         ],
-        edges: { pathKey: 'output_edges', posesFromKey: 'output_poses', color: 0xff2266 },
+        edges: { pathKey: 'output_edges', posesFromKey: 'output_poses', color: 0x19ff19 },
         diff: true,
     },
 });
