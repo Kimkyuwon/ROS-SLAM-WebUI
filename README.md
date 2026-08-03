@@ -11,7 +11,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 </p>
 
 <p align="center">
-  <img src="doc/WEBUI.gif" alt="ROS SLAM WEBUI" width="600" />
+  <img src="doc/SLAMWEBUI.gif" alt="ROS SLAM WEBUI"/>
 </p>
 ---
 
