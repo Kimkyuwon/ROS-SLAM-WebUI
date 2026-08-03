@@ -10,7 +10,9 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg" alt="License Apache 2.0" /></a>
 </p>
 
-![ROS SLAM WEBUI](doc/WEBUI.gif)
+<p align="center">
+  <img src="doc/WEBUI.gif" alt="ROS SLAM WEBUI" width="600" />
+</p>
 ---
 
 ## 🌟 Key Features
