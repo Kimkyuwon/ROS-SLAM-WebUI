@@ -44,13 +44,29 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 - **Real-time Localization** — based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
   - Live YAML configuration editing with instant apply
   - **Inline Live 3D Viewer** — auto-shown while running, with camera follow, Top View, and Snapshot
+
+<p align="center">
+  <img src="doc/localization_live.png" alt="ROS SLAM WEBUI"/>
+</p>
+
   - **Real-time Analytics Dashboard** — same live metrics as LiDAR SLAM, plus a Map Update Rug showing recent map-update events
+
+<p align="center">
+  <img src="doc/localization_dashboard.png" alt="ROS SLAM WEBUI"/>
+</p>
 
 - **Multi-Session SLAM** — based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
   - Map merging (Map 1 / Map 2) and multi-session pose graph optimization
+
+<p align="center">
+  <img src="doc/result.png" alt="ROS SLAM WEBUI"/>
+</p>
+
   - **Optimization Result Viewer** — layer legend (Map 1/2, Merge Map 1/2), Check Difference overlays, loop-closure edges, Depth Filter, and Height Clip cross-section
 
-  ![lt_slam](doc/multi_session_slam.gif)
+<p align="center">
+  <img src="doc/multi_slam_result.gif" alt="ROS SLAM WEBUI"/>
+</p>
 
 ### 📊 Advanced Data Visualization
 - **PlotJuggler-style Real-time Plotting**
@@ -62,7 +78,9 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - Export plots (PNG)
   - XY Plot support
 
-  ![plot](doc/plot.gif)
+<p align="center">
+  <img src="doc/plot.png" alt="ROS SLAM WEBUI"/>
+</p>
 
 - **3D Visualization**
   - Real-time PointCloud2 and Livox CustomMsg visualization
@@ -72,7 +90,9 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - Image topic streaming
   - Snapshot export and **Fullscreen mode**
 
-  ![plot](doc/visualization.gif)
+<p align="center">
+  <img src="doc/3dviewer.png" alt="ROS SLAM WEBUI"/>
+</p>
 
 ### 💾 Data Management
 - **Bag Player**
