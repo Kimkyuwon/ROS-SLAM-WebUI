@@ -24,7 +24,17 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 - **LiDAR SLAM** — based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
   - Live YAML configuration editing with instant apply
   - **Inline Live 3D Viewer** — auto-shown while mapping, with accumulated map, keyframes/trajectory, and camera follow
+
+<p align="center">
+  <img src="doc/slam_live.png" alt="ROS SLAM WEBUI"/>
+</p>
+
   - **Real-time Analytics Dashboard** — sensor Hz, trajectory distance/speed, CPU/RAM usage, per-frame processing time, geometry quality (DOP), and cumulative timing stats
+
+<p align="center">
+  <img src="doc/slam_dashboard.png" alt="ROS SLAM WEBUI"/>
+</p>
+
   - **Save Map Result Viewer** — LIO Map / Optimized / Dynamic Object Removal layers, LIO & PGO trajectories with loop-closure overlays, Depth Filter (Eye-Dome Lighting), and Height Clip cross-section
 
 - **Real-time Localization** — based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
