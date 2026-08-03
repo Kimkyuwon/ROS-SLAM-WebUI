@@ -11,7 +11,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 </p>
 
 <p align="center">
-  <img src="doc/SLAMWEBUI.gif" alt="ROS SLAM WEBUI"/>
+  <img src="doc/SLAMWEBUI.webp" alt="ROS SLAM WEBUI"/>
 </p>
 ---
 
@@ -38,7 +38,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - **Save Map Result Viewer** — LIO Map / Optimized / Dynamic Object Removal layers, LIO & PGO trajectories with loop-closure overlays, Depth Filter (Eye-Dome Lighting), and Height Clip cross-section
 
 <p align="center">
-  <img src="doc/slam_save.gif" alt="ROS SLAM WEBUI"/>
+  <img src="doc/slam_save.webp" alt="ROS SLAM WEBUI"/>
 </p>
 
 - **Real-time Localization** — based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
@@ -65,7 +65,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - **Optimization Result Viewer** — layer legend (Map 1/2, Merge Map 1/2), Check Difference overlays, loop-closure edges, Depth Filter, and Height Clip cross-section
 
 <p align="center">
-  <img src="doc/multi_slam_result.gif" alt="ROS SLAM WEBUI"/>
+  <img src="doc/multi_slam_result.webp" alt="ROS SLAM WEBUI"/>
 </p>
 
 ### 📊 Advanced Data Visualization
