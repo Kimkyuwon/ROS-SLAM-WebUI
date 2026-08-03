@@ -10,7 +10,7 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg" alt="License Apache 2.0" /></a>
 </p>
 
-![ROS SLAM WEBUI](doc/ROS%20SLAM%20WEBUI.gif)
+![ROS SLAM WEBUI](doc/WEBUI.gif)
 ---
 
 ## 🌟 Key Features
@@ -19,16 +19,20 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 
 > **Important:** To use these features, clone the linked repositories and build them in your ROS2 workspace first.
 
-- **LiDAR SLAM** is based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
-- **Real-time Localization** is based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
-- **Multi-Session SLAM** is based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
-- Live YAML configuration editing with instant apply
-- Real-time terminal output monitoring
-- One-click start/stop control
-- Async Save Map
-- **Inline Live 3D Viewer** — auto-shown while SLAM/Localization is running, with accumulated map, keyframes/trajectory, and camera follow
-- **Real-time Analytics Dashboard** — sensor Hz, trajectory distance/speed, CPU/RAM usage, per-frame processing time, geometry quality (DOP), and cumulative timing stats
-- **Save Map / Multi-Session Result Viewers** — Depth Filter (Eye-Dome Lighting) and Height Clip cross-section, in addition to layer legends and loop-closure overlays
+- **LiDAR SLAM** — based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
+  - Live YAML configuration editing with instant apply
+  - **Inline Live 3D Viewer** — auto-shown while mapping, with accumulated map, keyframes/trajectory, and camera follow
+  - **Real-time Analytics Dashboard** — sensor Hz, trajectory distance/speed, CPU/RAM usage, per-frame processing time, geometry quality (DOP), and cumulative timing stats
+  - **Save Map Result Viewer** — LIO Map / Optimized / Dynamic Object Removal layers, LIO & PGO trajectories with loop-closure overlays, Depth Filter (Eye-Dome Lighting), and Height Clip cross-section
+
+- **Real-time Localization** — based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
+  - Live YAML configuration editing with instant apply
+  - **Inline Live 3D Viewer** — auto-shown while running, with camera follow, Top View, and Snapshot
+  - **Real-time Analytics Dashboard** — same live metrics as LiDAR SLAM, plus a Map Update Rug showing recent map-update events
+
+- **Multi-Session SLAM** — based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
+  - Map merging (Map 1 / Map 2) and multi-session pose graph optimization
+  - **Optimization Result Viewer** — layer legend (Map 1/2, Merge Map 1/2), Check Difference overlays, loop-closure edges, Depth Filter, and Height Clip cross-section
 
   ![lt_slam](doc/multi_session_slam.gif)
 
