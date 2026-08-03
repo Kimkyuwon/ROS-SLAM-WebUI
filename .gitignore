@@ -6,13 +6,12 @@ __pycache__/
 .Python
 *.egg-info/
 dist/
-build/
+/build/
 *.egg
 
 # ROS2
-install/
-log/
-build/
+/install/
+/log/
 
 # IDE
 .vscode/

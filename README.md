@@ -26,6 +26,9 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 - Real-time terminal output monitoring
 - One-click start/stop control
 - Async Save Map
+- **Inline Live 3D Viewer** — auto-shown while SLAM/Localization is running, with accumulated map, keyframes/trajectory, and camera follow
+- **Real-time Analytics Dashboard** — sensor Hz, trajectory distance/speed, CPU/RAM usage, per-frame processing time, geometry quality (DOP), and cumulative timing stats
+- **Save Map / Multi-Session Result Viewers** — Depth Filter (Eye-Dome Lighting) and Height Clip cross-section, in addition to layer legends and loop-closure overlays
 
   ![lt_slam](doc/multi_session_slam.gif)
 
@@ -106,10 +109,11 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 
 2. **Install Python dependencies**
    ```bash
-   pip install rosbags ruamel.yaml numpy opencv-python
+   pip install rosbags ruamel.yaml numpy opencv-python psutil
    ```
    > `rosbags`: ROS1 bag read/write and format conversion  
-   > `opencv-python`: camera image processing in File Player
+   > `opencv-python`: camera image processing in File Player  
+   > `psutil` *(optional)*: CPU core count / total RAM for the SLAM & Localization Analytics Dashboards — without it, CPU/RAM widgets fall back to defaults
 
 3. **Clone SLAM-related packages**
    The SLAM & Localization features are based on the following packages:
@@ -141,8 +145,11 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 source /opt/ros/jazzy/setup.bash
 source ~/your_workspace/install/setup.bash
 
-# Launch the web server
+# Launch the web server (also starts rosbridge_server by default)
 ros2 launch ros_slam_webui ros_slam_webui.launch.py
+
+# If rosbridge_server is already running elsewhere, skip launching a duplicate instance:
+ros2 launch ros_slam_webui ros_slam_webui.launch.py start_rosbridge:=false
 ```
 
 ### Access Web Interface
@@ -173,12 +180,25 @@ Open the URL in your web browser. For network access from another device (e.g. t
    - Click "Start SLAM" button
    - Monitor real-time terminal output in the web UI
    - Green status indicator shows running state
+   - **SLAM Live Viewer** appears inline automatically:
+     - Live-streamed accumulated map (`/PGO_map`) plus the current scan, keyframe nodes (`/kf_node`), LIO/Pose Graph trajectories, and loop-closure lines
+     - **Follow** button toggles camera tracking of the robot pose
+     - **Top View**, **Snapshot**, and **Fullscreen** buttons in the bottom-right corner
+   - **SLAM Analytics Dashboard** appears below the viewer:
+     - Sensor Frequency (IMU/LiDAR Hz), Trajectory (distance/uptime/avg speed), CPU/RAM usage gauges
+     - Per-frame Processing Time (stacked area) and Geometry Quality/DOP charts, plus Cumulative Timing Statistics table
+     - "Full Statistics" toggle expands detailed IESEKF/Feature Matching/Residual/IMU/Keyframe fields
 
 3. **Save Map**
    - Click "Save Map" to trigger pose graph optimization
-   - Async operation — progress status shown while saving
+   - Async operation — progress status shown while saving (Live Viewer/Dashboard are hidden during this step)
    - Click "Cancel Save Map" to abort if needed
    - Map is saved to configured output directory
+   - **Save Map Result Viewer** *(auto-shown on completion)*:
+     - **LIO Map** (raw), **Optimized**, and **Dynamic Object Removal** point cloud layers, toggleable via legend
+     - **LIO** / **PGO** trajectories with **Loop Closure** edge lines
+     - **Depth Filter** (Eye-Dome Lighting shading) and **Height Clip** (draggable vertical slider for a Z-height cross-section) toolbar buttons
+     - **Top View**, **Point Size** slider, **Reset View**, **Snapshot**, and **Fullscreen**
 
 4. **Stop SLAM**
    - Click "Stop SLAM" button
@@ -200,10 +220,11 @@ Open the URL in your web browser. For network access from another device (e.g. t
    - Button label changes to "Exit" after completion — click to reset UI
 
 4. **Optimization Result Viewer** *(auto-shown on completion)*
-   - Inline Three.js 3D viewer shows Map1 / Map2 point clouds and pose trajectory nodes
+   - Inline Three.js 3D viewer shows Map1 / Map2 accumulated point clouds (individually re-projected from each session's scans), the merged **Merge Map 1** / **Merge Map 2** static map (split by source via intensity), and pose trajectory nodes
    - **Layer legend**: click any legend item to toggle that layer's visibility on/off
    - **Check Difference**: toggle to load and display difference PCD layers — Positive Differences (PD, orange), Negative Differences (ND, purple), First Unexplored area (FirstUE, hot-pink), Second Unexplored area (SecondUE, lime)
    - **Loop Closure**: thick edge lines drawn between non-adjacent pose nodes
+   - **Depth Filter** (Eye-Dome Lighting shading) and **Height Clip** (draggable vertical slider for a Z-height cross-section) toolbar buttons
    - **Top View** toggle, **Point Size** slider, **Reset View** button
    - **Snapshot** (📷): exports current 3D view as a high-resolution PNG (2× render scale)
    - **Fullscreen** (⛶): expand viewer to full screen
@@ -216,9 +237,26 @@ When you click **Start Localization**, an inline 3D viewer appears automatically
 |---|---|
 | **Display panel** (left) | Toggle individual topic layers on/off via checkboxes |
 | **3D canvas** (right) | Real-time Three.js visualization |
+| **Follow** button | Toggle camera tracking of the robot pose |
 | **Top View** toggle | Switch between perspective and top-down view |
+| **Snapshot** button | Export current 3D view as a PNG |
 | **Fullscreen** button | Expand canvas to full screen |
 | **Reset View** button | Return camera to default position |
+
+### 📊 Analytics Dashboards
+
+Both **Start SLAM** and **Start Localization** show a live analytics dashboard beneath their respective viewer, subscribed to the `/lio_analytics` (`fast_lio/msg/LioAnalytics`) or `/loc_analytics` (`fast_lio/msg/LocAnalytics`) topic:
+
+| Widget | Description |
+|---|---|
+| **Sensor Frequency** | IMU / LiDAR message rate (Hz) |
+| **Trajectory** | Cumulative distance, uptime, and average speed |
+| **CPU / RAM Usage** | Gauge + donut charts (via `/api/system/info`) |
+| **Per-frame Processing Time** | Stacked-area chart of the last 10 seconds |
+| **Geometry Quality (DOP)** | Scan/matching Dilution-of-Precision, lower is better |
+| **Cumulative Timing Statistics** | Mean/Max table per pipeline component |
+| **Map Update Rug** *(Localization only)* | Canvas strip showing the last 200 map-update events plus an "Initialized" status badge |
+| **Full Statistics** toggle | Expands detailed Scan/Map, Feature Matching, Residual, IESEKF, IMU State, and Keyframe fields |
 
 ### 📊 Real-time Plotting
 
@@ -307,6 +345,7 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
    - Use the speed slider to adjust playback rate (applies to both ROS1 and ROS2 bags)
    - Toggle **Loop** checkbox to replay automatically when finished
    - Click "Stop" to stop playback
+   - ROS1 bag messages are decoded/converted on a background prefetch thread ahead of publishing, keeping playback timing stable even under CPU load (e.g. while SLAM is running concurrently)
 
 4. **Format Conversion**
    - **ROS1 bag loaded**: "Convert to ROS2" button appears — converts offline using `rosbags-convert`
@@ -450,11 +489,18 @@ source /opt/ros/jazzy/setup.bash
 
 ### Change Server Port
 
-Edit `ros_slam_webui/web_server.py`:
+The web server port (default: `8080`) and the PC2 binary WebSocket port (default: `8081`, used for PointCloud2/Path/Image streaming) are defined in `ros_slam_webui/web_server.py`. Update **both** occurrences to keep them in sync:
+
 ```python
-# Change port number (default: 8080)
-web_thread = threading.Thread(target=run_web_server, args=(node, 9090), daemon=True)
+# 1. WebGUINode.__init__ — exposed to the frontend via GET /api/server_config
+self.web_port = 8080
+self.pc2_ws_port = 8081
+
+# 2. main() — actual HTTP server bind port (must match self.web_port above)
+web_thread = threading.Thread(target=run_web_server, args=(_ros_node, 8080), daemon=True)
 ```
+
+The frontend (`webui_ports.js`) reads the active ports from `/api/server_config` at page load, so no JavaScript files need to be edited — only the two Python values above.
 
 Then rebuild:
 ```bash
@@ -476,14 +522,17 @@ ros_slam_webui/
 ├── web/
 │   ├── index.html                 # Main web interface
 │   └── static/
-│       ├── script.js              # Main UI logic & API calls
+│       ├── script.js              # Main UI logic, API calls & live viewers/dashboards (SlamLiveViewer, SlamResultViewer, Analytics Dashboards, etc.)
 │       ├── plot_manager.js        # Plotly.js plot management
 │       ├── plot_tab_manager.js    # Plot tab management
 │       ├── plot_tree.js           # PlotJuggler-style tree view
-│       ├── threejs_display.js     # Three.js 3D visualization
+│       ├── threejs_display.js     # Three.js 3D visualization (general-purpose Display tab)
 │       ├── pc2_stream_worker.js   # Web Worker for binary PointCloud2 streaming
 │       ├── img_stream_worker.js   # Web Worker for binary Image streaming (JPEG/GPU decode)
-│       └── style.css              # UI styling
+│       ├── latency_ping_worker.js # Web Worker for Latency Monitor round-trip pings
+│       ├── webui_ports.js         # Reads web/PC2 WS/rosbridge ports from /api/server_config
+│       ├── vendor/                # Locally bundled Three.js, roslibjs, Plotly.js (no CDN dependency)
+│       └── style.css              # UI styling (dark theme)
 ├── launch/
 │   └── ros_slam_webui.launch.py  # ROS2 launch configuration
 ├── package.xml                    # ROS2 package manifest
@@ -521,13 +570,18 @@ This project is licensed under the **Apache License 2.0** - see the [LICENSE](LI
 
 ### Third-Party Notices
 
-The following libraries are loaded at runtime and are **not** bundled in this repository:
+The following JavaScript libraries are bundled locally under `web/static/vendor/` (no CDN dependency, works fully offline):
 
 | Library | Version | License | Usage |
 |---|---|---|---|
 | [Three.js](https://github.com/mrdoob/three.js) | 0.128.0 | MIT | 3D rendering |
 | [Plotly.js](https://github.com/plotly/plotly.js) | 2.27.0 | MIT | Interactive plots |
 | [roslibjs](https://github.com/RobotWebTools/roslibjs) | 1.1.0 | BSD-3-Clause | ROS WebSocket bridge |
+
+The following is a separate ROS2 package dependency (not bundled):
+
+| Package | Version | License | Usage |
+|---|---|---|---|
 | [rosbridge_suite](https://github.com/RobotWebTools/rosbridge_suite) | — | BSD-3-Clause | ROS WebSocket server |
 
 The following Python packages are installed separately as runtime dependencies:
