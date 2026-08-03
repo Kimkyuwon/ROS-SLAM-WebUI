@@ -37,6 +37,10 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
 
   - **Save Map Result Viewer** — LIO Map / Optimized / Dynamic Object Removal layers, LIO & PGO trajectories with loop-closure overlays, Depth Filter (Eye-Dome Lighting), and Height Clip cross-section
 
+<p align="center">
+  <img src="doc/slam_save.gif" alt="ROS SLAM WEBUI"/>
+</p>
+
 - **Real-time Localization** — based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
   - Live YAML configuration editing with instant apply
   - **Inline Live 3D Viewer** — auto-shown while running, with camera follow, Top View, and Snapshot
