@@ -96,6 +96,16 @@ const mulranState = {
     // 진행률/완료/오류는 8081 WebSocket mulran_convert_* 메시지로 수신
 };
 
+const heliprState = {
+    baseDir: null,    // 사용자가 선택한 HeLiPR 최상위 디렉토리
+    sequences: [],    // 시퀀스 목록 [{name, path}]
+    converting: false, // 변환 중 여부
+    // 진행률/완료/오류는 8081 WebSocket helipr_convert_* 메시지로 수신
+};
+
+// bag-format select 공통 라벨 (Bag Recorder, File Player 데이터셋 변환 공통 사용)
+const BAG_FORMAT_LABELS = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
+
 // Cached DOM elements
 const domCache = {
     elements: {},
@@ -1239,12 +1249,18 @@ function updatePlayerFormatSelectDefault() {
 
 /**
  * 선택한 포맷으로 bag 변환
+ * Selected Topics만 변환된 bag에 저장
  * POST /api/bag/convert 호출 후 변환된 bag 자동 로드
  */
 async function convertBag() {
     const bagPath = domCache.get('bag-directory').value;
     if (!bagPath) {
         alert('Please load a bag file first');
+        return;
+    }
+
+    if (!bagPlayerState.selectedTopics || bagPlayerState.selectedTopics.length === 0) {
+        alert('Please select at least one topic before convert');
         return;
     }
 
@@ -1262,7 +1278,10 @@ async function convertBag() {
     btn.textContent = 'Converting...';
 
     try {
-        const result = await apiCall('/api/bag/convert', { format: targetFormat });
+        const result = await apiCall('/api/bag/convert', {
+            format: targetFormat,
+            topics: bagPlayerState.selectedTopics,
+        });
         btn.disabled = false;
         btn.textContent = originalText;
 
@@ -1305,12 +1324,20 @@ function onDatasetFormatChange(format) {
     const kittiUi = domCache.get('kitti-ui');
     const kaistUi = domCache.get('kaist-ui');
     const mulranUi = domCache.get('mulran-ui');
+    const heliprUi = domCache.get('helipr-ui');
     const conprSaveRow = domCache.get('conpr-save-row');
 
-    if (format === 'kitti') {
-        kittiUi.style.display = 'block';
+    // 모든 데이터셋 전용 UI를 우선 숨김 처리 (분기마다 반복 방지)
+    const hideAll = () => {
+        if (kittiUi) { kittiUi.style.display = 'none'; }
         if (kaistUi) { kaistUi.style.display = 'none'; }
         if (mulranUi) { mulranUi.style.display = 'none'; }
+        if (heliprUi) { heliprUi.style.display = 'none'; }
+    };
+
+    if (format === 'kitti') {
+        hideAll();
+        kittiUi.style.display = 'block';
         if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
         kittiState.baseDir = null;
         kittiState.calibDir = null;
@@ -1319,9 +1346,8 @@ function onDatasetFormatChange(format) {
         _resetKittiDriveSelect();
         _resetKittiProgressBar();
     } else if (format === 'kaist') {
-        if (kittiUi) { kittiUi.style.display = 'none'; }
+        hideAll();
         if (kaistUi) { kaistUi.style.display = 'block'; }
-        if (mulranUi) { mulranUi.style.display = 'none'; }
         if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
         kaistState.baseDir = null;
         kaistState.sequences = [];
@@ -1329,8 +1355,7 @@ function onDatasetFormatChange(format) {
         _resetKaistSequenceSelect();
         _resetKaistProgressBar();
     } else if (format === 'mulran') {
-        if (kittiUi) { kittiUi.style.display = 'none'; }
-        if (kaistUi) { kaistUi.style.display = 'none'; }
+        hideAll();
         if (mulranUi) { mulranUi.style.display = 'block'; }
         if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
         mulranState.baseDir = null;
@@ -1338,10 +1363,17 @@ function onDatasetFormatChange(format) {
         domCache.get('player-path-label').textContent = '—';
         _resetMulranSequenceSelect();
         _resetMulranProgressBar();
+    } else if (format === 'helipr') {
+        hideAll();
+        if (heliprUi) { heliprUi.style.display = 'block'; }
+        if (conprSaveRow) { conprSaveRow.style.display = 'none'; }
+        heliprState.baseDir = null;
+        heliprState.sequences = [];
+        domCache.get('player-path-label').textContent = '—';
+        _resetHeliprSequenceSelect();
+        _resetHeliprProgressBar();
     } else {
-        if (kittiUi) { kittiUi.style.display = 'none'; }
-        if (kaistUi) { kaistUi.style.display = 'none'; }
-        if (mulranUi) { mulranUi.style.display = 'none'; }
+        hideAll();
         if (conprSaveRow) { conprSaveRow.style.display = ''; }
     }
 }
@@ -1406,6 +1438,28 @@ function _resetMulranProgressBar() {
     const fill = domCache.get('mulran-progress-fill');
     const text = domCache.get('mulran-progress-text');
     const msg = domCache.get('mulran-progress-msg');
+    if (bar) { bar.style.display = 'none'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msg) { msg.textContent = ''; }
+}
+
+/**
+ * HeLiPR 시퀀스 선택 셀렉트를 초기 상태로 리셋
+ */
+function _resetHeliprSequenceSelect() {
+    const sel = domCache.get('helipr-sequence-select');
+    if (sel) { sel.innerHTML = '<option value="">— Select a sequence —</option>'; }
+}
+
+/**
+ * HeLiPR 변환 진행바 리셋
+ */
+function _resetHeliprProgressBar() {
+    const bar = domCache.get('helipr-progress-bar');
+    const fill = domCache.get('helipr-progress-fill');
+    const text = domCache.get('helipr-progress-text');
+    const msg = domCache.get('helipr-progress-msg');
     if (bar) { bar.style.display = 'none'; }
     if (fill) { fill.style.width = '0%'; }
     if (text) { text.textContent = '0%'; }
@@ -1611,7 +1665,7 @@ async function convertKitti() {
     }
 
     const bagFormatSel = domCache.get('kitti-bag-format-select');
-    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2_db3';
     kittiState.bagFormat = bagFormat;
 
     const btn   = domCache.get('kitti-convert-btn');
@@ -1622,7 +1676,7 @@ async function convertKitti() {
 
     kittiState.converting = true;
     btn.disabled = true;
-    btn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…';
+    btn.textContent = `Saving (${BAG_FORMAT_LABELS[bagFormat] || bagFormat})…`;
 
     if (bar)   { bar.style.display = 'block'; }
     if (fill)  { fill.style.width = '0%'; }
@@ -1749,7 +1803,7 @@ async function convertKaist() {
     }
 
     const bagFormatSel = domCache.get('kaist-bag-format-select');
-    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2_db3';
 
     const btn   = domCache.get('kaist-convert-btn');
     const bar   = domCache.get('kaist-progress-bar');
@@ -1758,7 +1812,7 @@ async function convertKaist() {
     const msgEl = domCache.get('kaist-progress-msg');
 
     kaistState.converting = true;
-    if (btn) { btn.disabled = true; btn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…'; }
+    if (btn) { btn.disabled = true; btn.textContent = `Saving (${BAG_FORMAT_LABELS[bagFormat] || bagFormat})…`; }
     if (bar) { bar.style.display = 'block'; }
     if (fill) { fill.style.width = '0%'; }
     if (text) { text.textContent = '0%'; }
@@ -1912,7 +1966,7 @@ async function convertMulran() {
     }
 
     const bagFormatSel = domCache.get('mulran-bag-format-select');
-    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2_db3';
 
     const btn   = domCache.get('mulran-convert-btn');
     const bar   = domCache.get('mulran-progress-bar');
@@ -1921,7 +1975,7 @@ async function convertMulran() {
     const msgEl = domCache.get('mulran-progress-msg');
 
     mulranState.converting = true;
-    if (btn) { btn.disabled = true; btn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…'; }
+    if (btn) { btn.disabled = true; btn.textContent = `Saving (${BAG_FORMAT_LABELS[bagFormat] || bagFormat})…`; }
     if (bar) { bar.style.display = 'block'; }
     if (fill) { fill.style.width = '0%'; }
     if (text) { text.textContent = '0%'; }
@@ -1968,6 +2022,171 @@ async function _onMulranConvertDone(bagPath, btn, bar, fill, text, msg) {
     if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
 }
 
+// ── HeLiPR ────────────────────────────────────────────────────────────────────
+
+/**
+ * HeLiPR 디렉토리 탐색: scan_helipr API 호출 후 시퀀스 목록 업데이트
+ * ``.../HeLiPR`` 상위만 고르면 각 시퀀스가 드롭다운에 채워지고,
+ * 시퀀스가 1개면 자동으로 load_data까지 수행한다.
+ */
+async function loadHeliprDirectory() {
+    openFileBrowser(async (path) => {
+        domCache.get('player-path-label').textContent = 'Scanning...';
+        _resetHeliprSequenceSelect();
+        _resetHeliprProgressBar();
+
+        const result = await apiCall('/api/player/scan_helipr', { path });
+        if (!result.success) {
+            domCache.get('player-path-label').textContent = 'Scan failed';
+            alert('HeLiPR scan failed: ' + (result.error || result.message || 'Unknown error'));
+            return;
+        }
+
+        const sequences = result.sequences || [];
+        heliprState.baseDir = path;
+        heliprState.sequences = sequences;
+
+        domCache.get('player-path-label').textContent = path;
+
+        const sel = domCache.get('helipr-sequence-select');
+        if (sel) {
+            sel.innerHTML = '<option value="">— Select a sequence —</option>';
+            sequences.forEach((seq, idx) => {
+                const opt = document.createElement('option');
+                opt.value = String(idx);
+                opt.textContent = seq.name || seq.path || `Sequence ${idx}`;
+                sel.appendChild(opt);
+            });
+        }
+
+        if (sequences.length === 0) {
+            alert('No HeLiPR sequences found in the selected directory.');
+        } else {
+            console.log(`[HeLiPR] Found ${sequences.length} sequence(s) in ${path}`);
+            // 시퀀스가 하나뿐이면 드롭다운 선택·load_data 까지 자동 (상위 HeLiPR 폴더만 고른 경우)
+            if (sequences.length === 1 && sel) {
+                sel.value = '0';
+                await onHeliprSequenceChange('0');
+            }
+        }
+    }, '~');
+}
+
+/**
+ * HeLiPR 시퀀스 드롭다운 선택 변경 시 자동 호출.
+ * 선택된 시퀀스를 load_data API로 바로 로드 → Direct Play 활성화.
+ */
+async function onHeliprSequenceChange(seqIdx) {
+    if (seqIdx === '' || seqIdx === null || !heliprState.baseDir) return;
+    const seq = heliprState.sequences[parseInt(seqIdx)];
+    if (!seq) return;
+
+    domCache.get('player-path-label').textContent = 'Loading...';
+    const sequencePath = seq.path || seq;
+    const result = await apiCall('/api/player/load_data', { path: sequencePath });
+    if (result && result.success) {
+        domCache.get('player-path-label').textContent = sequencePath;
+        console.log('[HeLiPR] Sequence auto-loaded:', sequencePath);
+        applyPlayerLoadDataViewerSync(result);
+
+        const autoStartCheck = domCache.get('player-auto-start');
+        if (autoStartCheck && autoStartCheck.checked) {
+            console.log('[HeLiPR] Auto start enabled — starting playback');
+            await playPlayer();
+        }
+    } else {
+        const errMsg = result ? (result.message || result.error || 'Unknown') : 'No response';
+        domCache.get('player-path-label').textContent = 'Load failed';
+        console.error('[HeLiPR] Sequence auto-load failed:', errMsg);
+    }
+}
+
+/**
+ * HeLiPR 시퀀스를 ROS bag으로 변환 (Save Bag).
+ * 현재 선택된 시퀀스를 /api/player/convert_helipr 으로 전송.
+ * 진행률은 WebSocket(8081)을 통해 수신.
+ */
+async function convertHelipr() {
+    const sel = domCache.get('helipr-sequence-select');
+    const seqIdx = sel ? sel.value : '';
+    if (seqIdx === '' || seqIdx === null) {
+        alert('먼저 시퀀스를 선택하세요.');
+        return;
+    }
+    if (!heliprState.baseDir) {
+        alert('HeLiPR 디렉토리를 먼저 로드하세요.');
+        return;
+    }
+
+    const seq = heliprState.sequences[parseInt(seqIdx)];
+    if (!seq) {
+        alert('유효하지 않은 시퀀스 선택입니다.');
+        return;
+    }
+
+    const sequenceDir = seq.path || seq;
+    if (heliprState.converting) {
+        alert('이미 변환 중입니다.');
+        return;
+    }
+
+    const bagFormatSel = domCache.get('helipr-bag-format-select');
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2_db3';
+
+    const btn   = domCache.get('helipr-convert-btn');
+    const bar   = domCache.get('helipr-progress-bar');
+    const fill  = domCache.get('helipr-progress-fill');
+    const text  = domCache.get('helipr-progress-text');
+    const msgEl = domCache.get('helipr-progress-msg');
+
+    heliprState.converting = true;
+    if (btn) { btn.disabled = true; btn.textContent = `Saving (${BAG_FORMAT_LABELS[bagFormat] || bagFormat})…`; }
+    if (bar) { bar.style.display = 'block'; }
+    if (fill) { fill.style.width = '0%'; }
+    if (text) { text.textContent = '0%'; }
+    if (msgEl) { msgEl.textContent = 'Starting conversion...'; }
+
+    const outputPath = sequenceDir + '_converted';
+
+    const result = await apiCall('/api/player/convert_helipr', {
+        sequence_dir: sequenceDir,
+        output_path: outputPath,
+        bag_format: bagFormat
+    });
+
+    if (!result || !result.success) {
+        heliprState.converting = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+        if (bar) { bar.style.display = 'none'; }
+        const errMsg = result ? (result.error || result.message || 'Unknown') : 'No response';
+        alert('변환 시작 실패: ' + errMsg);
+    }
+    // 진행률·완료·오류는 _handleBackendWsMessage의 WebSocket 핸들러에서 처리
+}
+
+/**
+ * HeLiPR 변환 완료 후 처리: 진행바 완료 표시 → load_data로 자동 로드
+ */
+async function _onHeliprConvertDone(bagPath, btn, bar, fill, text, msg) {
+    if (fill) { fill.style.width = '100%'; }
+    if (text) { text.textContent = '100%'; }
+    if (msg) { msg.textContent = 'Conversion complete! Loading bag...'; }
+
+    const loadResult = await apiCall('/api/player/load_data', { path: bagPath });
+    if (loadResult && loadResult.success) {
+        domCache.get('player-path-label').textContent = bagPath;
+        if (msg) { msg.textContent = 'Ready to play'; }
+        console.log('[HeLiPR] Bag loaded:', bagPath);
+        applyPlayerLoadDataViewerSync(loadResult);
+    } else {
+        if (msg) { msg.textContent = 'Load failed'; }
+        alert('Failed to load converted bag: ' + (loadResult ? (loadResult.message || loadResult.error || 'Unknown error') : 'No response'));
+    }
+
+    heliprState.converting = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+}
+
 async function _onKittiConvertDone(bagPath, btn, bar, fill, text, msg) {
     // 진행바 100% 완료 표시
     fill.style.width = '100%';
@@ -2009,6 +2228,10 @@ async function loadPlayerPath() {
     }
     if (format === 'mulran') {
         await loadMulranDirectory();
+        return;
+    }
+    if (format === 'helipr') {
+        await loadHeliprDirectory();
         return;
     }
 
@@ -2062,7 +2285,7 @@ async function saveBag() {
         return; // 이미 저장 중
     }
 
-    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2';
+    const bagFormat = bagFormatSel ? bagFormatSel.value : 'ros2_db3';
     const originalBtnText = saveBagBtn ? saveBagBtn.textContent : 'Save bag';
 
     // KITTI와 완전 동일한 레이아웃: 진행바+메시지+format select+버튼 모두 표시, 버튼만 비활성화
@@ -2073,7 +2296,7 @@ async function saveBag() {
     if (bagFormatSel) { bagFormatSel.disabled = true; }
     if (saveBagBtn) {
         saveBagBtn.disabled = true;
-        saveBagBtn.textContent = bagFormat === 'ros1' ? 'Saving ROS1…' : 'Saving…';
+        saveBagBtn.textContent = `Saving (${BAG_FORMAT_LABELS[bagFormat] || bagFormat})…`;
     }
 
     function setProgress(pct) {
@@ -4173,6 +4396,34 @@ function _handleBackendWsMessage(rawData) {
         const bar   = domCache.get('mulran-progress-bar');
         const msgEl = domCache.get('mulran-progress-msg');
         mulranState.converting = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
+        if (bar) { bar.style.display = 'none'; }
+        if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
+        alert('Conversion error: ' + (msg.error || 'Unknown'));
+
+    // ── HeLiPR 변환 진행률 / 완료 / 오류 ─────────────────────────────────────
+    } else if (msg.type === 'helipr_convert_progress') {
+        const fill  = domCache.get('helipr-progress-fill');
+        const text  = domCache.get('helipr-progress-text');
+        const msgEl = domCache.get('helipr-progress-msg');
+        const pct = parseInt(msg.progress || 0);
+        if (fill && !isNaN(pct)) { fill.style.width = pct + '%'; }
+        if (text && !isNaN(pct)) { text.textContent = pct + '%'; }
+        if (msgEl && msg.message) { msgEl.textContent = msg.message; }
+
+    } else if (msg.type === 'helipr_convert_done') {
+        const btn   = domCache.get('helipr-convert-btn');
+        const bar   = domCache.get('helipr-progress-bar');
+        const fill  = domCache.get('helipr-progress-fill');
+        const text  = domCache.get('helipr-progress-text');
+        const msgEl = domCache.get('helipr-progress-msg');
+        _onHeliprConvertDone(msg.bag_path, btn, bar, fill, text, msgEl).catch(console.error);
+
+    } else if (msg.type === 'helipr_convert_error') {
+        const btn   = domCache.get('helipr-convert-btn');
+        const bar   = domCache.get('helipr-progress-bar');
+        const msgEl = domCache.get('helipr-progress-msg');
+        heliprState.converting = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
         if (bar) { bar.style.display = 'none'; }
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
@@ -10608,15 +10859,11 @@ const slamResultViewer = new SlamResultViewer({
             { posesKey: 'map2_poses', scansDirKey: 'map2_scans_dir', color: 0x19ff8c, layer: 'map2' },
         ],
         voxelSizeKey: 'voxel_size',
-        // 병합 정적맵(StaticMap.pcd)을 intensity로 분리하여 시각화 (1=Map1 출신, 2=Map2 출신)
-        intensitySplitLayers: [
-            {
-                pathKey: 'static_map_pcd',
-                splits: [
-                    { value: 1, color: 0xff19ff, layer: 'mergemap1' },
-                    { value: 2, color: 0xff8c19, layer: 'mergemap2' },
-                ],
-            },
+        // Merge Map1/Map2: long_term_mapping이 세션별로 생성한 FirstMap.pcd/SecondMap.pcd를
+        // 그대로 로드하여 시각화 (병합 좌표계로 정렬된 세션별 원본 맵, optimize() 실행 시 생성됨)
+        pcdLayers: [
+            { pathKey: 'map1_pcd', color: 0xff19ff, layer: 'mergemap1' },
+            { pathKey: 'map2_pcd', color: 0xff8c19, layer: 'mergemap2' },
         ],
         trajLayers: [
             { pathKey: 'map1_poses', color: 0xffff19, layer: 'map1traj', asNodes: true },

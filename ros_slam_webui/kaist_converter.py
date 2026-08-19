@@ -128,14 +128,16 @@ class KaistConverter:
         sequence_dir: str,
         output_path: str,
         sensors: list | None = None,
+        storage_id: str = 'sqlite3',
         progress_cb=None,
     ) -> None:
-        """KAIST 시퀀스를 ROS2 bag (.db3) 파일로 변환한다.
+        """KAIST 시퀀스를 ROS2 bag 파일로 변환한다.
 
         Args:
             sequence_dir: 시퀀스 디렉토리 (calibration/, sensor_data/, global_pose.csv 포함)
             output_path: 출력 bag 경로 (확장자 없음, 예: /path/to/output_bag)
             sensors: 포함할 센서 목록 (None이면 전체). 예: ['vlp_left','vlp_right','imu','gps',...]
+            storage_id: rosbag2 storage 플러그인 - 'sqlite3'(기본, db3) 또는 'mcap'
             progress_cb: 진행률 콜백 (선택), signature: progress_cb(progress: int, message: str)
         """
         if not _ROSBAG2_AVAILABLE:
@@ -274,7 +276,7 @@ class KaistConverter:
         # ── 3. rosbag2 Writer 초기화 ─────────────────────────────
         _progress(2, 'Initializing bag writer...')
         writer = rosbag2_py.SequentialWriter()
-        storage_options = rosbag2_py.StorageOptions(uri=output_path, storage_id='sqlite3')
+        storage_options = rosbag2_py.StorageOptions(uri=output_path, storage_id=storage_id)
         converter_options = rosbag2_py.ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr',

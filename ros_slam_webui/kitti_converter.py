@@ -164,9 +164,10 @@ class KittiConverter:
         calib_dir: str,
         data_path: str,
         output_bag_path: str,
+        storage_id: str = 'sqlite3',
         progress_cb=None,
     ) -> None:
-        """KITTI 데이터를 ROS2 bag (.db3) 파일로 변환한다.
+        """KITTI 데이터를 ROS2 bag 파일로 변환한다.
 
         Args:
             calib_dir:        calib 파일 디렉토리
@@ -175,6 +176,7 @@ class KittiConverter:
                               (image_00/, velodyne_points/, oxts/ 등 포함)
             output_bag_path:  출력 ROS2 bag 디렉토리 경로 (확장자 없음)
                               예: '/path/to/2011_09_30/converted/drive_0034_sync'
+            storage_id:       rosbag2 storage 플러그인 - 'sqlite3'(기본, db3) 또는 'mcap'
             progress_cb:      진행률 콜백 (선택)
                               signature: progress_cb(progress: int, message: str)
         """
@@ -231,7 +233,7 @@ class KittiConverter:
         # ── 6. rosbag2 Writer 초기화 ─────────────────────────────────
         _progress(2, 'Initializing bag writer...')
         writer = rosbag2_py.SequentialWriter()
-        storage_options = rosbag2_py.StorageOptions(uri=output_bag_path, storage_id='sqlite3')
+        storage_options = rosbag2_py.StorageOptions(uri=output_bag_path, storage_id=storage_id)
         converter_options = rosbag2_py.ConverterOptions(
             input_serialization_format='cdr',
             output_serialization_format='cdr',

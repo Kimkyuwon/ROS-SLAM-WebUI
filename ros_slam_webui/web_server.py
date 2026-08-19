@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.serialization import serialize_message
 from std_msgs.msg import Bool
-from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, NavSatFix, PointCloud2, PointField
+from sensor_msgs.msg import Image, Imu, CameraInfo, LaserScan, MagneticField, NavSatFix, PointCloud2, PointField
 from geometry_msgs.msg import PointStamped, TransformStamped, TwistStamped
 from nav_msgs.msg import Odometry, Path as NavPath
 from rosgraph_msgs.msg import Clock
@@ -188,6 +188,10 @@ KAIST_FILE_PLAYER_PC2_TOPICS = ['/ns2/velodyne_points', '/ns1/velodyne_points']
 MULRAN_FILE_PLAYER_PC2_TOPIC = '/os1_points'
 # MulRan /clock: ROSThread 기준 10ms 이상 간격 — direct play에서 과도한 publish 방지
 _MULRAN_CLOCK_MIN_INTERVAL_NS = 10_000_000
+# HeLiPR: 4종 LiDAR (Ouster/Velodyne/Aeva는 PointCloud2, Avia는 Livox CustomMsg — PC2 동기화 대상에서 제외)
+HELIPR_FILE_PLAYER_PC2_TOPICS = ['/ouster/points', '/velodyne/points', '/aeva/points']
+# HeLiPR /clock: 다른 데이터셋과 동일한 10ms 정책 (참고: ROSThread.cpp)
+_HELIPR_CLOCK_MIN_INTERVAL_NS = 10_000_000
 
 
 def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
@@ -2786,6 +2790,23 @@ class WebGUINode(Node):
         # 레퍼런스 OusterThread/RadarpolarThread 패턴: 센서별 백그라운드 publish 워커
         self._mulran_ouster_worker: '_SensorPublishWorker | None' = None
         self._mulran_radar_worker: '_SensorPublishWorker | None' = None
+
+        # ── HeLiPR direct play 모드 ───────────────────────────────────────────
+        self.player_is_helipr = False
+        self.helipr_dataset_path = None
+        self.helipr_ctx = None                 # HeliprConverter._load_sequence_context 결과
+        self.helipr_events_by_stamp = {}       # stamp_ns → [sensor_name, ...] (stamp.csv 순서 유지)
+        self._helipr_conv = None
+        self._helipr_pubs_initialized = False
+        self._helipr_last_clock_pub_ns = None
+        self.helipr_converter_running = False
+        self.helipr_convert_thread = None
+        # 레퍼런스 OusterThread/VelodyneThread/AviaThread/AevaThread 패턴: LiDAR별 백그라운드 publish 워커
+        self._helipr_ouster_worker: '_SensorPublishWorker | None' = None
+        self._helipr_velodyne_worker: '_SensorPublishWorker | None' = None
+        self._helipr_avia_worker: '_SensorPublishWorker | None' = None
+        self._helipr_aeva_worker: '_SensorPublishWorker | None' = None
+
         # KAIST VLP/SICK/Stereo 백그라운드 publish 워커
         self._kaist_vlp_left_worker: '_SensorPublishWorker | None' = None
         self._kaist_vlp_right_worker: '_SensorPublishWorker | None' = None
@@ -3086,6 +3107,8 @@ class WebGUINode(Node):
         """모든 중량 센서 publish 워커를 정지한다 (데이터셋 전환 전 호출)."""
         for attr in (
             '_mulran_ouster_worker', '_mulran_radar_worker',
+            '_helipr_ouster_worker', '_helipr_velodyne_worker',
+            '_helipr_avia_worker', '_helipr_aeva_worker',
             '_kaist_vlp_left_worker', '_kaist_vlp_right_worker',
             '_kaist_sick_back_worker', '_kaist_sick_mid_worker',
             '_kaist_stereo_worker',
@@ -3104,13 +3127,24 @@ class WebGUINode(Node):
         self._mulran_radar_worker = _SensorPublishWorker()
         self._mulran_radar_worker._thread.name = 'mulran-radar'
 
+    def _start_helipr_workers(self):
+        """HeLiPR 전용 Ouster/Velodyne/Avia/Aeva 백그라운드 워커를 (재)시작한다."""
+        self._helipr_ouster_worker = _SensorPublishWorker()
+        self._helipr_ouster_worker._thread.name = 'helipr-ouster'
+        self._helipr_velodyne_worker = _SensorPublishWorker()
+        self._helipr_velodyne_worker._thread.name = 'helipr-velodyne'
+        self._helipr_avia_worker = _SensorPublishWorker()
+        self._helipr_avia_worker._thread.name = 'helipr-avia'
+        self._helipr_aeva_worker = _SensorPublishWorker()
+        self._helipr_aeva_worker._thread.name = 'helipr-aeva'
+
     def _clear_all_sensor_workers(self):
         """모든 센서 워커 큐를 비워 pending 프레임 publish를 취소한다.
 
         정지/일시정지 직후 백그라운드 워커가 큐에 남은 대용량 프레임을
         publish하면 ROS2/DDS 레이어가 수백 ms 동안 바빠져 HTTP ping 응답이
         지연된다. clear()로 미처리 항목을 버려 이 현상을 방지한다.
-        모든 데이터셋(KAIST/KITTI/MulRan/ConPR) 워커를 포함한다.
+        모든 데이터셋(KAIST/KITTI/MulRan/HeLiPR/ConPR) 워커를 포함한다.
         """
         for attr in (
             '_kaist_vlp_left_worker', '_kaist_vlp_right_worker',
@@ -3118,6 +3152,8 @@ class WebGUINode(Node):
             '_kaist_stereo_worker',
             '_kitti_velo_worker', '_kitti_cam_worker',
             '_mulran_ouster_worker', '_mulran_radar_worker',
+            '_helipr_ouster_worker', '_helipr_velodyne_worker',
+            '_helipr_avia_worker', '_helipr_aeva_worker',
             '_conpr_livox_worker', '_conpr_cam_worker',
         ):
             worker = getattr(self, attr, None)
@@ -3180,6 +3216,37 @@ class WebGUINode(Node):
 
         # DDS warmup: MulRan Ouster PC2 구독 미리 생성 (첫 프레임 즉시 수신 보장)
         self.pc2_ws_server._presubscribe_pc2(MULRAN_FILE_PLAYER_PC2_TOPIC)
+
+    def _init_helipr_ros_interfaces(self):
+        """HeLiPR 전용 publisher 초기화 (lazy)."""
+        self._init_common_ros_interfaces()
+        if self._helipr_pubs_initialized:
+            return
+
+        # QoS: 대용량 메시지(PC2/CustomMsg)는 depth=5, 경량 메시지(IMU/GPS)는 depth=10~20
+        self.helipr_ouster_pub = self.create_publisher(
+            PointCloud2, '/ouster/points', 5)
+        self.helipr_velodyne_pub = self.create_publisher(
+            PointCloud2, '/velodyne/points', 5)
+        self.helipr_aeva_pub = self.create_publisher(
+            PointCloud2, '/aeva/points', 5)
+        if LIVOX_AVAILABLE:
+            self.helipr_avia_pub = self.create_publisher(
+                CustomMsg, '/avia/points', 5)
+        else:
+            self.helipr_avia_pub = None
+        self.helipr_imu_pub = self.create_publisher(Imu, '/imu/data_raw', 20)
+        self.helipr_mag_pub = self.create_publisher(MagneticField, '/imu/mag', 20)
+        self.helipr_gps_pub = self.create_publisher(NavSatFix, '/gps/fix', 10)
+        self.helipr_gt_pub = self.create_publisher(Odometry, '/gt', 10)
+        self.helipr_tf_pub = self.create_publisher(TFMessage, '/tf', 10)
+
+        self._helipr_pubs_initialized = True
+        self.get_logger().info('HeLiPR File Player publishers initialized')
+
+        # DDS warmup: HeLiPR PC2 토픽(Ouster/Velodyne/Aeva) 구독 미리 생성
+        for _topic in HELIPR_FILE_PLAYER_PC2_TOPICS:
+            self.pc2_ws_server._presubscribe_pc2(_topic)
 
     def _find_kitti_calib_dir(self, drive_path):
         """드라이브 경로에서 calib 디렉토리를 탐색하여 반환한다.
@@ -3896,7 +3963,8 @@ class WebGUINode(Node):
             'map1_scans_dir': (self.slam_map1 + '/Scans/') if self.slam_map1 else '',
             'map2_scans_dir': (self.slam_map2 + '/Scans/') if self.slam_map2 else '',
             'voxel_size': self._get_long_term_mapping_voxel_size(lt_dir),
-            # 참고용 사전 생성 PCD (long_term_mapping이 optimize() 실행 시 동일 방식으로 생성)
+            # Merge Map1/Map2 뷰어 시각화용: long_term_mapping이 optimize() 실행 시 생성하는
+            # 세션별 원본 맵(병합 좌표계로 정렬됨, intensity 1=Map1/2=Map2)
             'map1_pcd': (output_dir + '/FirstMap.pcd') if output_dir else '',
             'map2_pcd': (output_dir + '/SecondMap.pcd') if output_dir else '',
             # 병합 후 동적 객체 제거된 최종 정적맵 (intensity: 1=Map1 출신, 2=Map2 출신)
@@ -4198,6 +4266,21 @@ class WebGUINode(Node):
         except Exception:
             return False
 
+    def _is_helipr_dataset_path(self, path: str) -> bool:
+        """HeLiPR 시퀀스 루트인지 판별한다.
+
+        stamp.csv (MulRan/KAIST의 data_stamp.csv와 파일명이 다름) + LiDAR/{Ouster,Velodyne,Avia,Aeva}
+        레이아웃으로 구분한다. 다른 데이터셋과 확장자/구조가 겹치지 않아 판별 순서는 자유롭다.
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            from ros_slam_webui.helipr_converter import HeliprConverter
+            conv = HeliprConverter()
+            return conv._is_helipr_sequence(path)
+        except Exception:
+            return False
+
     def _load_kitti_direct(self, path: str) -> dict:
         """KITTI drive 디렉토리를 직접 File Player로 로드한다.
 
@@ -4223,6 +4306,9 @@ class WebGUINode(Node):
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
+        self.player_is_helipr = False
+        self.helipr_ctx = None
+        self.helipr_events_by_stamp = {}
 
         ts_file = os.path.join(path, 'velodyne_points', 'timestamps.txt')
         try:
@@ -4538,6 +4624,9 @@ class WebGUINode(Node):
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
+        self.player_is_helipr = False
+        self.helipr_ctx = None
+        self.helipr_events_by_stamp = {}
 
         sensor_dir = os.path.join(path, 'sensor_data')
         calib_dir = os.path.join(path, 'calibration')
@@ -4939,6 +5028,200 @@ class WebGUINode(Node):
                 clock_msg.clock = Time(nanoseconds=stamp_ns).to_msg()
                 self.clock_pub.publish(clock_msg)
 
+    # ── HeLiPR direct play ────────────────────────────────────────────────────
+
+    def _load_helipr_direct(self, path: str) -> dict:
+        """HeLiPR 시퀀스를 File Player로 직접 로드한다 (stamp.csv 타임라인)."""
+        from ros_slam_webui.helipr_converter import HeliprConverter
+
+        self.player_playing = False
+        self.player_paused = False
+        if self.playback_active:
+            self.playback_active = False
+            old_thread = self.playback_thread
+            self.playback_thread = None
+            if old_thread and old_thread.is_alive():
+                old_thread.join(timeout=1.0)
+
+        # 이전 데이터셋의 중량 센서 워커 정지
+        self._stop_heavy_sensor_workers()
+
+        try:
+            conv = HeliprConverter()
+            ctx = conv._load_sequence_context(path)
+        except Exception as e:
+            self.get_logger().error(f'HeLiPR load failed: {e}')
+            return self._player_load_result(False, str(e), 'helipr', None)
+
+        if not ctx['data_stamps']:
+            return self._player_load_result(
+                False, 'No stamp.csv entries', 'helipr', None)
+
+        events_by_stamp = {}
+        for stamp_ns, sensor_name in ctx['data_stamps']:
+            events_by_stamp.setdefault(stamp_ns, []).append(sensor_name)
+
+        sorted_stamps = sorted(events_by_stamp.keys())
+        self.data_stamp = {s: 'helipr' for s in sorted_stamps}
+        self.helipr_events_by_stamp = events_by_stamp
+        self.helipr_ctx = ctx
+        self.helipr_dataset_path = path
+
+        self.player_initial_stamp = sorted_stamps[0]
+        self.player_last_stamp = sorted_stamps[-1]
+        self.player_timestamp = self.player_initial_stamp
+        self.player_processed_stamp = 0
+        self.player_slider_pos = 0
+        self.player_seek_requested = False
+        self.player_seek_to_stamp = self.player_initial_stamp
+
+        self.player_path = path
+        self.player_is_kitti = False
+        self.player_is_kaist = False
+        self.player_is_mulran = False
+        self.player_is_helipr = True
+        self.player_is_ros2_bag = False
+        self.player_is_ros1_bag = False
+
+        self.livox_cache = {}
+        self.cam_cache = {}
+        self._helipr_last_clock_pub_ns = None
+
+        self._init_helipr_ros_interfaces()
+        # 중량 센서 백그라운드 워커 (재)시작 (Ouster/Velodyne/Avia/Aeva 파일 I/O 비동기화)
+        self._start_helipr_workers()
+
+        self.player_data_loaded = True
+        gt_src = ctx.get('gt_source')
+        self.get_logger().info(
+            f'HeLiPR sequence loaded: {path} ({len(self.data_stamp)} timeline stamps, '
+            f'GT source={gt_src or "none"})'
+        )
+        pc2_topics = [
+            t for t, present in (
+                ('/ouster/points', ctx.get('ouster_dir')),
+                ('/velodyne/points', ctx.get('velodyne_dir')),
+                ('/aeva/points', ctx.get('aeva_dir')),
+            ) if present
+        ]
+        return self._player_load_result(
+            True, 'HeLiPR loaded', 'helipr', pc2_topics if pc2_topics else None)
+
+    def _helipr_do_ouster(self, bin_path: str, stamp_time, pub, conv):
+        """백그라운드: Ouster 바이너리 파일 읽기 + publish."""
+        msg = conv._make_ouster_pc2(bin_path, stamp_time)
+        if msg and pub:
+            pub.publish(msg)
+
+    def _helipr_do_velodyne(self, bin_path: str, stamp_time, pub, conv):
+        """백그라운드: Velodyne 바이너리 파일 읽기 + publish."""
+        msg = conv._make_velodyne_pc2(bin_path, stamp_time)
+        if msg and pub:
+            pub.publish(msg)
+
+    def _helipr_do_avia(self, bin_path: str, stamp_ns: int, stamp_time, pub, conv):
+        """백그라운드: Avia(Livox) 바이너리 파일 읽기 + publish."""
+        msg = conv._make_avia_custom_msg(bin_path, stamp_ns, stamp_time)
+        if msg and pub:
+            pub.publish(msg)
+
+    def _helipr_do_aeva(self, bin_path: str, stamp_ns: int, stamp_time, pub, conv):
+        """백그라운드: Aeva 바이너리 파일 읽기 + publish."""
+        msg = conv._make_aeva_pc2(bin_path, stamp_ns, stamp_time)
+        if msg and pub:
+            pub.publish(msg)
+
+    def _publish_helipr_frame(self, stamp_ns: int):
+        """HeLiPR stamp.csv 한 시각의 센서 이벤트를 publish.
+
+        레퍼런스 ROSThread.cpp 패턴:
+        - Ouster/Velodyne/Avia/Aeva: 백그라운드 워커(_SensorPublishWorker)에 위임 (파일 I/O 비블록)
+        - IMU/GPS(inspva): 비트맵 조회만 하므로 인라인으로 즉시 publish
+        - GT/TF: LiDAR 이벤트 발생 시에만 nearest lookup 후 publish
+        """
+        ctx = self.helipr_ctx
+        if not ctx:
+            return
+        if self._helipr_conv is None:
+            from ros_slam_webui.helipr_converter import HeliprConverter
+            self._helipr_conv = HeliprConverter()
+        conv = self._helipr_conv
+        stamp_time = conv._ns_to_time_msg(stamp_ns)
+
+        has_gt_event = False
+
+        for sensor_name in self.helipr_events_by_stamp.get(stamp_ns, []):
+            sn = sensor_name.lower()
+            if sn == 'ouster' and ctx['ouster_dir'] and self.helipr_ouster_pub:
+                bin_path = os.path.join(ctx['ouster_dir'], f'{stamp_ns}.bin')
+                if self._helipr_ouster_worker:
+                    self._helipr_ouster_worker.push(
+                        self._helipr_do_ouster, bin_path, stamp_time,
+                        self.helipr_ouster_pub, conv)
+                else:
+                    self._helipr_do_ouster(bin_path, stamp_time, self.helipr_ouster_pub, conv)
+                has_gt_event = True
+            elif sn == 'velodyne' and ctx['velodyne_dir'] and self.helipr_velodyne_pub:
+                bin_path = os.path.join(ctx['velodyne_dir'], f'{stamp_ns}.bin')
+                if self._helipr_velodyne_worker:
+                    self._helipr_velodyne_worker.push(
+                        self._helipr_do_velodyne, bin_path, stamp_time,
+                        self.helipr_velodyne_pub, conv)
+                else:
+                    self._helipr_do_velodyne(bin_path, stamp_time, self.helipr_velodyne_pub, conv)
+                has_gt_event = True
+            elif sn == 'livox_avia' and ctx['avia_dir'] and self.helipr_avia_pub:
+                bin_path = os.path.join(ctx['avia_dir'], f'{stamp_ns}.bin')
+                if self._helipr_avia_worker:
+                    self._helipr_avia_worker.push(
+                        self._helipr_do_avia, bin_path, stamp_ns, stamp_time,
+                        self.helipr_avia_pub, conv)
+                else:
+                    self._helipr_do_avia(bin_path, stamp_ns, stamp_time, self.helipr_avia_pub, conv)
+                has_gt_event = True
+            elif sn == 'aeva' and ctx['aeva_dir'] and self.helipr_aeva_pub:
+                bin_path = os.path.join(ctx['aeva_dir'], f'{stamp_ns}.bin')
+                if self._helipr_aeva_worker:
+                    self._helipr_aeva_worker.push(
+                        self._helipr_do_aeva, bin_path, stamp_ns, stamp_time,
+                        self.helipr_aeva_pub, conv)
+                else:
+                    self._helipr_do_aeva(bin_path, stamp_ns, stamp_time, self.helipr_aeva_pub, conv)
+                has_gt_event = True
+            elif sn == 'imu' and ctx['imu_bisect'][0] and self.helipr_imu_pub:
+                row = conv._find_nearest(ctx['imu_bisect'], stamp_ns)
+                if row:
+                    self.helipr_imu_pub.publish(conv._make_imu_msg(row, stamp_time, ctx['imu_version']))
+                    if ctx['imu_version'] >= 2 and self.helipr_mag_pub:
+                        mag_msg = conv._make_mag_msg(row, stamp_time)
+                        if mag_msg:
+                            self.helipr_mag_pub.publish(mag_msg)
+            elif sn == 'inspva' and ctx['inspva_bisect'][0] and self.helipr_gps_pub:
+                row = conv._find_nearest(ctx['inspva_bisect'], stamp_ns)
+                if row:
+                    self.helipr_gps_pub.publish(conv._make_navsatfix_msg(row, stamp_time))
+
+        # GT/TF: LiDAR 이벤트(Ouster/Velodyne/Avia/Aeva) 발생 시에만 nearest lookup 후 publish
+        if has_gt_event and ctx['gt_bisect'][0]:
+            row = conv._find_nearest(ctx['gt_bisect'], stamp_ns)
+            if row:
+                if self.helipr_gt_pub:
+                    odom_msg = conv._make_gt_odometry(row, stamp_time)
+                    if odom_msg:
+                        self.helipr_gt_pub.publish(odom_msg)
+                if self.helipr_tf_pub:
+                    tf_msg = conv._make_dynamic_tf(row, stamp_time)
+                    if tf_msg:
+                        self.helipr_tf_pub.publish(tf_msg)
+
+        if self.clock_pub:
+            last = self._helipr_last_clock_pub_ns
+            if last is None or (stamp_ns - last) >= _HELIPR_CLOCK_MIN_INTERVAL_NS:
+                self._helipr_last_clock_pub_ns = stamp_ns
+                clock_msg = Clock()
+                clock_msg.clock = Time(nanoseconds=stamp_ns).to_msg()
+                self.clock_pub.publish(clock_msg)
+
     # ── KAIST 백그라운드 워커 함수 ─────────────────────────────────────────────
 
     def _kaist_do_vlp(self, bin_path: str, frame_id: str, stamp_time, pub, conv):
@@ -5093,20 +5376,33 @@ class WebGUINode(Node):
                                           self.kaist_stereo_right_pub, conv)
 
     def _is_ros2_bag_path(self, path: str) -> bool:
-        """경로가 ROS2 bag (.db3 파일 또는 bag 디렉토리)인지 확인한다."""
+        """경로가 ROS2 bag (.db3/.mcap 파일 또는 bag 디렉토리)인지 확인한다."""
         if not path:
             return False
-        # .db3 파일 직접 지정
-        if path.endswith('.db3') and os.path.exists(path):
+        # .db3 / .mcap 파일 직접 지정
+        if (path.endswith('.db3') or path.endswith('.mcap')) and os.path.exists(path):
             return True
-        # 디렉토리인 경우: metadata.yaml 또는 .db3 파일 포함 여부 확인
+        # 디렉토리인 경우: metadata.yaml 또는 bag 파일 포함 여부 확인
         if os.path.isdir(path):
             if os.path.exists(os.path.join(path, 'metadata.yaml')):
                 return True
-            db3_files = glob.glob(os.path.join(path, '*.db3'))
-            if db3_files:
+            if glob.glob(os.path.join(path, '*.db3')):
+                return True
+            if glob.glob(os.path.join(path, '*.mcap')):
                 return True
         return False
+
+    @staticmethod
+    def _normalize_ros2_bag_path(path: str) -> str:
+        """Normalize ROS2 bag path for ros2 bag play/info (directory with metadata.yaml)."""
+        if not path:
+            return path
+        normalized = path.rstrip('/')
+        if normalized.endswith('.db3') or normalized.endswith('.mcap'):
+            parent = os.path.dirname(normalized)
+            if parent:
+                return parent
+        return normalized
 
     def _load_ros2_bag_player(self, path: str) -> dict:
         """ROS2 bag 경로를 기존 bag_play_toggle 인프라로 로드한다.
@@ -5138,11 +5434,8 @@ class WebGUINode(Node):
             self.bag_playing = False
             self.bag_paused = False
 
-        # .db3 파일인 경우 부모 디렉토리를 bag 경로로 사용
-        if path.endswith('.db3'):
-            bag_dir = os.path.dirname(path)
-        else:
-            bag_dir = path
+        # .db3 / .mcap 파일인 경우 부모 디렉토리를 bag 경로로 사용
+        bag_dir = self._normalize_ros2_bag_path(path)
 
         self.bag_path = bag_dir
 
@@ -5156,6 +5449,9 @@ class WebGUINode(Node):
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
+        self.player_is_helipr = False
+        self.helipr_ctx = None
+        self.helipr_events_by_stamp = {}
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.livox_cache = {}
@@ -5197,6 +5493,9 @@ class WebGUINode(Node):
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
+        self.player_is_helipr = False
+        self.helipr_ctx = None
+        self.helipr_events_by_stamp = {}
         self.player_slider_pos = 0
         self.player_timestamp = 0
         self.livox_cache = {}
@@ -5214,6 +5513,11 @@ class WebGUINode(Node):
         if self._is_kitti_drive_path(path):
             self.get_logger().info(f'Detected KITTI drive path: {path}')
             return self._load_kitti_direct(path)
+
+        # HeLiPR (stamp.csv 파일명이 다른 데이터셋의 data_stamp.csv와 겹치지 않아 순서 무관하게 판별 가능)
+        if self._is_helipr_dataset_path(path):
+            self.get_logger().info(f'Detected HeLiPR sequence path: {path}')
+            return self._load_helipr_direct(path)
 
         # MulRan (KAIST와 data_stamp.csv 경로가 겹칠 수 있어 KAIST보다 먼저 판별)
         if self._is_mulran_dataset_path(path):
@@ -5252,6 +5556,9 @@ class WebGUINode(Node):
         self.player_is_mulran = False
         self.mulran_ctx = None
         self.mulran_events_by_stamp = {}
+        self.player_is_helipr = False
+        self.helipr_ctx = None
+        self.helipr_events_by_stamp = {}
 
         # ROS1 bag 재생 중이면 중지 (PointCloud2 publisher 정리 → ConPR CustomMsg 생성 가능)
         self.stop_ros1_playback()
@@ -5423,16 +5730,17 @@ class WebGUINode(Node):
         calib_dir: str,
         data_path: str,
         drive_name: str,
-        bag_format: str = 'ros2',
+        bag_format: str = 'ros2_db3',
     ) -> dict:
         """KITTI 데이터를 ROS2 bag 또는 ROS1 .bag으로 변환하는 백그라운드 스레드를 시작한다.
 
         변환 진행률은 WebSocket(포트 8081)을 통해 전체 클라이언트에 push된다.
 
         Args:
-            bag_format: 출력 bag 형식 - 'ros2' (기본) 또는 'ros1'
+            bag_format: 출력 bag 형식 - 'ros2_mcap' | 'ros2_db3' (기본, 하위호환) | 'ros1'
                         'ros1'이면 KittiConverter.convert_to_ros1bag()로 직접 변환 (.bag).
-                        'ros2'이면 KittiConverter.convert_to_ros2bag()로 변환 (_bag 디렉토리).
+                        'ros2_mcap'/'ros2_db3'이면 KittiConverter.convert_to_ros2bag()로
+                        변환 (_bag 디렉토리, storage_id만 mcap/sqlite3로 분기).
 
         Returns:
             {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
@@ -5471,11 +5779,13 @@ class WebGUINode(Node):
                         progress_cb=_progress_cb,
                     )
                 else:
-                    # ROS2: KITTI → ROS2 bag 변환
+                    # ROS2: KITTI → ROS2 bag 변환 (mcap 또는 sqlite3/db3)
+                    storage_id = 'mcap' if bag_format == 'ros2_mcap' else 'sqlite3'
                     converter.convert_to_ros2bag(
                         calib_dir=calib_dir,
                         data_path=data_path,
                         output_bag_path=final_output_path,
+                        storage_id=storage_id,
                         progress_cb=_progress_cb,
                     )
 
@@ -5529,7 +5839,7 @@ class WebGUINode(Node):
         sequence_dir: str,
         output_path: str,
         sensors: list | None = None,
-        bag_format: str = 'ros2',
+        bag_format: str = 'ros2_db3',
     ) -> dict:
         """KAIST 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
 
@@ -5539,7 +5849,7 @@ class WebGUINode(Node):
             sequence_dir: KAIST 시퀀스 디렉토리 (calibration/, sensor_data/, global_pose.csv 포함)
             output_path: 출력 경로 (ROS2: 디렉토리, ROS1: 무시하고 sequence_name.bag 사용)
             sensors: 포함할 센서 목록 (None이면 전체)
-            bag_format: 'ros2' (기본) 또는 'ros1'
+            bag_format: 'ros2_mcap' | 'ros2_db3' (기본, 하위호환) | 'ros1'
 
         Returns:
             {'success': True, 'output_bag_path': '...'} or {'success': False, 'error': '...'}
@@ -5579,10 +5889,12 @@ class WebGUINode(Node):
                         progress_cb=_progress_cb,
                     )
                 else:
+                    storage_id = 'mcap' if bag_format == 'ros2_mcap' else 'sqlite3'
                     converter.convert_to_ros2bag(
                         sequence_dir=sequence_dir,
                         output_path=output_bag_path,
                         sensors=sensors,
+                        storage_id=storage_id,
                         progress_cb=_progress_cb,
                     )
 
@@ -5627,9 +5939,13 @@ class WebGUINode(Node):
         sequence_dir: str,
         output_path: str,
         sensors: list | None = None,
-        bag_format: str = 'ros2',
+        bag_format: str = 'ros2_db3',
     ) -> dict:
-        """MulRan 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다."""
+        """MulRan 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
+
+        Args:
+            bag_format: 'ros2_mcap' | 'ros2_db3' (기본, 하위호환) | 'ros1'
+        """
         if self.mulran_converter_running:
             return {'success': False, 'error': 'Conversion already in progress'}
 
@@ -5665,10 +5981,12 @@ class WebGUINode(Node):
                         progress_cb=_progress_cb,
                     )
                 else:
+                    storage_id = 'mcap' if bag_format == 'ros2_mcap' else 'sqlite3'
                     converter.convert_to_ros2bag(
                         sequence_dir=sequence_dir,
                         output_path=output_bag_path,
                         sensors=sensors,
+                        storage_id=storage_id,
                         progress_cb=_progress_cb,
                     )
 
@@ -5691,6 +6009,100 @@ class WebGUINode(Node):
         self.mulran_convert_thread = threading.Thread(
             target=_run, daemon=True, name='mulran-convert')
         self.mulran_convert_thread.start()
+        return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
+
+    # ── HeLiPR 변환 함수 ───────────────────────────────────────────────────────
+
+    def scan_helipr_directory(self, path: str) -> dict:
+        """HeLiPR 데이터셋 베이스 디렉토리를 탐색하여 시퀀스 목록을 반환한다."""
+        try:
+            from ros_slam_webui.helipr_converter import HeliprConverter
+            converter = HeliprConverter()
+            result = converter.scan_directory(path)
+            self.get_logger().info(
+                f'HeLiPR scan complete: {len(result["sequences"])} sequence(s) found')
+            return result
+        except Exception as e:
+            self.get_logger().error(f'HeLiPR scan failed: {str(e)}')
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    def start_helipr_conversion(
+        self,
+        sequence_dir: str,
+        output_path: str,
+        sensors: list | None = None,
+        bag_format: str = 'ros2_db3',
+    ) -> dict:
+        """HeLiPR 시퀀스를 ROS1/ROS2 bag으로 변환하는 백그라운드 스레드를 시작한다.
+
+        Args:
+            bag_format: 'ros2_mcap' | 'ros2_db3' (기본, 하위호환) | 'ros1'
+        """
+        if self.helipr_converter_running:
+            return {'success': False, 'error': 'Conversion already in progress'}
+
+        if bag_format == 'ros1':
+            seq_name = os.path.basename(sequence_dir.rstrip(os.sep))
+            output_bag_path = os.path.join(
+                os.path.dirname(sequence_dir), seq_name + '.bag'
+            )
+        else:
+            output_bag_path = output_path
+
+        def _run():
+            self.helipr_converter_running = True
+            try:
+                from ros_slam_webui.helipr_converter import HeliprConverter
+                converter = HeliprConverter()
+
+                def _progress_cb(pct: int, msg: str):
+                    self.pc2_ws_server.broadcast_json_all({
+                        'type': 'helipr_convert_progress',
+                        'progress': pct,
+                        'message': msg,
+                    })
+
+                self.get_logger().info(
+                    f'HeLiPR conversion started: {sequence_dir} → {output_bag_path} [format={bag_format}]')
+
+                if bag_format == 'ros1':
+                    converter.convert_to_ros1bag(
+                        sequence_dir=sequence_dir,
+                        output_bag_path=output_bag_path,
+                        sensors=sensors,
+                        progress_cb=_progress_cb,
+                    )
+                else:
+                    storage_id = 'mcap' if bag_format == 'ros2_mcap' else 'sqlite3'
+                    converter.convert_to_ros2bag(
+                        sequence_dir=sequence_dir,
+                        output_path=output_bag_path,
+                        sensors=sensors,
+                        storage_id=storage_id,
+                        progress_cb=_progress_cb,
+                    )
+
+                self.get_logger().info(f'HeLiPR conversion complete: {output_bag_path}')
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'helipr_convert_done',
+                    'bag_path': output_bag_path,
+                })
+            except Exception as e:
+                self.get_logger().error(f'HeLiPR conversion failed: {str(e)}')
+                import traceback
+                traceback.print_exc()
+                self.pc2_ws_server.broadcast_json_all({
+                    'type': 'helipr_convert_error',
+                    'error': str(e),
+                })
+            finally:
+                self.helipr_converter_running = False
+
+        self.helipr_convert_thread = threading.Thread(
+            target=_run, daemon=True, name='helipr-convert')
+        self.helipr_convert_thread.start()
         return {'success': True, 'message': 'Conversion started', 'output_bag_path': output_bag_path}
 
     # ── ConPR 백그라운드 워커 헬퍼 ───────────────────────────────────────────
@@ -6208,6 +6620,60 @@ class WebGUINode(Node):
                 return 'ros2_db3'
         return 'ros2_db3'
 
+    def _resolve_bag_play_topics(self, selected_topics=None):
+        """Resolve topic list for ros2 bag play.
+
+        Adds /tf, /tf_static only when they exist in the loaded bag.
+        Returns (topics_to_play, play_all).
+        """
+        bag_topics = set(getattr(self, 'bag_topics', None) or [])
+        if not selected_topics:
+            return [], True
+
+        topics_to_play = [
+            t for t in selected_topics if isinstance(t, str) and t.strip()
+        ]
+        if not topics_to_play:
+            return [], True
+
+        for tf_topic in ('/tf', '/tf_static'):
+            if tf_topic not in topics_to_play and tf_topic in bag_topics:
+                topics_to_play.append(tf_topic)
+                self.get_logger().info(f'[bag play] Including {tf_topic} for 3D Viewer TF')
+
+        if bag_topics:
+            selected_set = set(topics_to_play)
+            if selected_set >= bag_topics and (selected_set - bag_topics) <= {'/tf', '/tf_static'}:
+                return topics_to_play, True
+
+        return topics_to_play, False
+
+    def _build_bag_play_topic_regex(self, topics_to_play):
+        """Build --regex filter for ros2 bag play.
+
+        mcap bag(특히 rosbags-convert 산출물)은 --topics 사용 시 즉시 종료되는
+        rosbag2 이슈가 있어 --regex를 사용한다.
+        """
+        if not topics_to_play:
+            return None
+        escaped = [re.escape(topic) for topic in topics_to_play]
+        return f'^({"|".join(escaped)})$'
+
+    def _append_bag_play_topic_filter(self, cmd, selected_topics=None):
+        """Append topic filter to ros2 bag play command."""
+        topics_to_play, play_all = self._resolve_bag_play_topics(selected_topics)
+        if topics_to_play:
+            self.bag_selected_topics = list(topics_to_play)
+        if play_all:
+            self.get_logger().info('Playing all topics')
+            return cmd
+
+        topic_regex = self._build_bag_play_topic_regex(topics_to_play)
+        if topic_regex:
+            cmd.extend(['--regex', topic_regex])
+            self.get_logger().info(f'Playing selected topics (regex): {topics_to_play}')
+        return cmd
+
     def _get_rosbags_convert_cmd(self):
         import os
         import shutil
@@ -6218,8 +6684,35 @@ class WebGUINode(Node):
             return None
         return convert_cmd
 
-    def convert_bag(self, target_format='ros2_db3'):
-        """Convert loaded bag to target format (ros1 | ros2_db3 | ros2_mcap)."""
+    def _resolve_convert_topics(self, topics=None):
+        """Resolve topics for bag conversion (Selected Topics only).
+
+        Prefers explicit request topics; falls back to bag_selected_topics.
+        Returns (topic_list, error_dict). error_dict is set on failure.
+        """
+        if topics is None:
+            topics = getattr(self, 'bag_selected_topics', None) or []
+        resolved = [t for t in topics if isinstance(t, str) and t.strip()]
+        if not resolved:
+            return [], {
+                'success': False,
+                'error': 'No topics selected. Select at least one topic before convert.',
+            }
+        self.bag_selected_topics = list(resolved)
+        return resolved, None
+
+    @staticmethod
+    def _append_include_topics(cmd, topics):
+        """Append rosbags-convert --include-topic filter for selected topics."""
+        if topics:
+            cmd.extend(['--include-topic', *topics])
+        return cmd
+
+    def convert_bag(self, target_format='ros2_db3', topics=None):
+        """Convert loaded bag to target format (ros1 | ros2_db3 | ros2_mcap).
+
+        Only Selected Topics are written into the converted bag.
+        """
         if not self.bag_path:
             return {'success': False, 'error': 'No bag file loaded'}
 
@@ -6230,17 +6723,19 @@ class WebGUINode(Node):
         if source_format == 'ros1':
             if target_format == 'ros1':
                 return {'success': False, 'error': 'Bag is already ROS1 format'}
-            return self.convert_ros1_bag(target_format=target_format)
+            return self.convert_ros1_bag(target_format=target_format, topics=topics)
         if target_format == 'ros1':
-            return self.convert_ros2_to_ros1_bag()
-        return self.convert_ros2_bag_format(target_format=target_format)
+            return self.convert_ros2_to_ros1_bag(topics=topics)
+        return self.convert_ros2_bag_format(target_format=target_format, topics=topics)
 
-    def convert_ros1_bag(self, target_format='ros2_db3'):
+    def convert_ros1_bag(self, target_format='ros2_db3', topics=None):
         """Convert ROS1 .bag file to ROS2 bag format using rosbags-convert.
 
         Output directory:
           ros2_db3  → {bag_filename_without_ext}/
           ros2_mcap → {bag_filename_without_ext}_mcap/ (or same name if unused)
+
+        Only Selected Topics are included (--include-topic).
 
         Returns:
             dict: {'success': bool, 'output_path': str, 'error': str (on failure)}
@@ -6253,6 +6748,10 @@ class WebGUINode(Node):
 
         if target_format not in ('ros2_db3', 'ros2_mcap'):
             return {'success': False, 'error': f'Unsupported ROS1 conversion target: {target_format}'}
+
+        selected_topics, topics_error = self._resolve_convert_topics(topics)
+        if topics_error:
+            return topics_error
 
         try:
             import os
@@ -6273,7 +6772,8 @@ class WebGUINode(Node):
                 shutil.rmtree(output_dir)
 
             self.get_logger().info(
-                f'Converting ROS1 bag: {self.bag_path} -> {output_dir} ({target_format})'
+                f'Converting ROS1 bag: {self.bag_path} -> {output_dir} ({target_format}), '
+                f'topics={len(selected_topics)}'
             )
 
             convert_cmd = self._get_rosbags_convert_cmd()
@@ -6291,6 +6791,7 @@ class WebGUINode(Node):
                 '--dst-storage',
                 dst_storage,
             ]
+            self._append_include_topics(cmd, selected_topics)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -6321,11 +6822,13 @@ class WebGUINode(Node):
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
 
-    def convert_ros2_to_ros1_bag(self):
+    def convert_ros2_to_ros1_bag(self, topics=None):
         """Convert ROS2 bag directory to ROS1 .bag format using rosbags-convert.
 
         Output: {bag_dirname}.bag (같은 부모 디렉토리, .bag 확장자)
         예: /path/to/my_bag/ → /path/to/my_bag.bag
+
+        Only Selected Topics are included (--include-topic).
 
         Returns:
             dict: {'success': bool, 'output_path': str, 'error': str (on failure)}
@@ -6335,6 +6838,10 @@ class WebGUINode(Node):
 
         if self.bag_path.endswith('.bag'):
             return {'success': False, 'error': 'Current bag is already a ROS1 .bag file'}
+
+        selected_topics, topics_error = self._resolve_convert_topics(topics)
+        if topics_error:
+            return topics_error
 
         try:
             import os
@@ -6348,16 +6855,16 @@ class WebGUINode(Node):
                 os.remove(output_path)
 
             self.get_logger().info(
-                f'Converting ROS2 bag: {self.bag_path} -> {output_path}'
+                f'Converting ROS2 bag: {self.bag_path} -> {output_path}, '
+                f'topics={len(selected_topics)}'
             )
 
-            # rosbags-convert 경로 탐색 (pip user install 경로 포함)
-            convert_cmd = shutil.which('rosbags-convert') or '/home/kkw/.local/bin/rosbags-convert'
-            if not os.path.isfile(convert_cmd):
-                self.get_logger().error('rosbags-convert not found. Install with: pip install rosbags')
+            convert_cmd = self._get_rosbags_convert_cmd()
+            if convert_cmd is None:
                 return {'success': False, 'error': 'rosbags-convert not found. Run: pip install rosbags'}
 
             cmd = [convert_cmd, '--src', self.bag_path, '--dst', output_path]
+            self._append_include_topics(cmd, selected_topics)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -6385,8 +6892,11 @@ class WebGUINode(Node):
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
 
-    def convert_ros2_bag_format(self, target_format='ros2_mcap'):
-        """Convert ROS2 bag between sqlite3 (db3) and mcap storage."""
+    def convert_ros2_bag_format(self, target_format='ros2_mcap', topics=None):
+        """Convert ROS2 bag between sqlite3 (db3) and mcap storage.
+
+        Only Selected Topics are included (--include-topic).
+        """
         if not self.bag_path:
             return {'success': False, 'error': 'No bag file loaded'}
 
@@ -6395,6 +6905,10 @@ class WebGUINode(Node):
 
         if target_format not in ('ros2_db3', 'ros2_mcap'):
             return {'success': False, 'error': f'Unsupported ROS2 conversion target: {target_format}'}
+
+        selected_topics, topics_error = self._resolve_convert_topics(topics)
+        if topics_error:
+            return topics_error
 
         try:
             import os
@@ -6412,7 +6926,8 @@ class WebGUINode(Node):
                 shutil.rmtree(output_dir)
 
             self.get_logger().info(
-                f'Converting ROS2 bag storage: {self.bag_path} -> {output_dir} ({target_format})'
+                f'Converting ROS2 bag storage: {self.bag_path} -> {output_dir} ({target_format}), '
+                f'topics={len(selected_topics)}'
             )
 
             convert_cmd = self._get_rosbags_convert_cmd()
@@ -6428,6 +6943,7 @@ class WebGUINode(Node):
                 '--dst-storage',
                 dst_storage,
             ]
+            self._append_include_topics(cmd, selected_topics)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -6517,22 +7033,7 @@ class WebGUINode(Node):
                 if self.bag_player_loop:
                     self.get_logger().info('Loop playback enabled (managed by monitor thread)')
 
-                # Add topic filter if topics are selected
-                # ROS1 bag player 참조: /tf, /tf_static는 3D Viewer 좌표 변환에 필수.
-                # 토픽 선택 시 항상 /tf, /tf_static 포함 (나올때가 있고 안나올때가 있는 문제 해결)
-                # ros2 bag play는 bag에 없는 토픽은 무시하므로 항상 추가해도 무방
-                if selected_topics and len(selected_topics) > 0:
-                    topics_to_play = list(selected_topics)
-                    for tf_topic in ('/tf', '/tf_static'):
-                        if tf_topic not in topics_to_play:
-                            topics_to_play.append(tf_topic)
-                            self.get_logger().info(f'[bag play] Including {tf_topic} for 3D Viewer TF')
-                    self.bag_selected_topics = topics_to_play
-                    cmd.append('--topics')
-                    cmd.extend(topics_to_play)
-                    self.get_logger().info(f'Playing selected topics: {topics_to_play}')
-                else:
-                    self.get_logger().info('Playing all topics')
+                self._append_bag_play_topic_filter(cmd, selected_topics)
 
                 self.get_logger().info(f'Command: {" ".join(cmd)}')
 
@@ -6602,13 +7103,7 @@ class WebGUINode(Node):
                 rate = self.bag_playback_rate
                 if rate != 1.0:
                     cmd.extend(['--rate', str(rate)])
-                if self.bag_selected_topics and len(self.bag_selected_topics) > 0:
-                    topics_to_play = list(self.bag_selected_topics)
-                    for tf_topic in ('/tf', '/tf_static'):
-                        if tf_topic not in topics_to_play:
-                            topics_to_play.append(tf_topic)
-                    cmd.append('--topics')
-                    cmd.extend(topics_to_play)
+                self._append_bag_play_topic_filter(cmd, self.bag_selected_topics)
 
                 new_proc = subprocess.Popen(
                     cmd, env=self._ros_env,
@@ -6786,10 +7281,7 @@ class WebGUINode(Node):
             cmd.extend(['--rate', str(rate)])
         if self.bag_player_loop:
             cmd.append('--loop')
-        topics = getattr(self, 'bag_selected_topics', [])
-        if topics:
-            cmd.append('--topics')
-            cmd.extend(topics)
+        self._append_bag_play_topic_filter(cmd, self.bag_selected_topics)
         self.get_logger().info(f'[restart] {" ".join(cmd)}')
         proc = subprocess.Popen(
             cmd,
@@ -7109,6 +7601,16 @@ class WebGUINode(Node):
                     time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
                     continue
 
+                if getattr(self, 'player_is_helipr', False):
+                    try:
+                        # /clock 는 _publish_helipr_frame 내부에서 10ms 간격으로 throttle
+                        self._publish_helipr_frame(stamp)
+                    except Exception as e:
+                        self.get_logger().warn(f'HeLiPR frame publish error: {e}')
+                    self.player_timestamp = stamp
+                    time.sleep(0)  # GIL 해제 → HTTP 핸들러 스레드에 CPU 양보
+                    continue
+
                 if data_type == "pose" and stamp in self.pose_data:
                     x, y, z = self.pose_data[stamp]
                     msg = PointStamped()
@@ -7209,8 +7711,12 @@ class WebGUINode(Node):
 
         self.get_logger().info(f'Seek requested: pos={position} → stamp={target_stamp}')
 
-    def save_rosbag(self):
-        """Save loaded data to rosbag2 format"""
+    def save_rosbag(self, storage_id: str = 'sqlite3'):
+        """Save loaded ConPR data to ROS2 bag format.
+
+        Args:
+            storage_id: rosbag2 storage 플러그인 - 'sqlite3'(기본, db3) 또는 'mcap'
+        """
         if not self.player_data_loaded:
             self.get_logger().error('No data loaded. Please load data first.')
             return False
@@ -7221,14 +7727,14 @@ class WebGUINode(Node):
             bag_path = os.path.join(self.player_path, f"{bag_name}_bag")
             self.save_bag_progress = "0%"
             self.save_bag_message = "Starting conversion..."
-            self.get_logger().info(f'Starting rosbag conversion to: {bag_path}')
+            self.get_logger().info(f'Starting rosbag conversion to: {bag_path} (storage={storage_id})')
 
             # Create writer
             writer = rosbag2_py.SequentialWriter()
 
             storage_options = rosbag2_py.StorageOptions(
                 uri=bag_path,
-                storage_id='sqlite3'
+                storage_id=storage_id
             )
 
             converter_options = rosbag2_py.ConverterOptions(
@@ -7613,12 +8119,13 @@ class WebGUINode(Node):
             traceback.print_exc()
             return False
 
-    def start_save_rosbag(self, bag_format: str = 'ros2'):
+    def start_save_rosbag(self, bag_format: str = 'ros2_db3'):
         """save_rosbag() 또는 save_rosbag_ros1()을 백그라운드 스레드에서 실행한다.
 
         Args:
-            bag_format: 'ros2' (기본) — ROS2 bag (output/ 디렉토리)
-                        'ros1'        — ROS1 .bag 파일 (output.bag)
+            bag_format: 'ros2_mcap' — ROS2 bag (mcap storage)
+                        'ros2_db3'  (기본, 하위호환) — ROS2 bag (sqlite3/db3 storage)
+                        'ros1'      — ROS1 .bag 파일 (output.bag)
         """
         if self.save_bag_saving:
             self.get_logger().warn('Bag save already in progress')
@@ -7631,7 +8138,8 @@ class WebGUINode(Node):
                 if bag_format == 'ros1':
                     self.save_bag_success = self.save_rosbag_ros1()
                 else:
-                    self.save_bag_success = self.save_rosbag()
+                    storage_id = 'mcap' if bag_format == 'ros2_mcap' else 'sqlite3'
+                    self.save_bag_success = self.save_rosbag(storage_id=storage_id)
             finally:
                 self.save_bag_saving = False
                 self.save_bag_progress = None
@@ -8096,7 +8604,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 'success': True,
                 'topics': info['topics'],
                 'duration': info['duration'],
-                'bag_type': info.get('bag_type', 'ros2')
+                'bag_type': info.get('bag_type', 'ros2'),
+                'bag_format': info.get('bag_format'),
             })
         elif parsed_path.path == '/api/bag/ros1_play_status':
             self.send_json_response(self.node.get_ros1_playback_status())
@@ -8224,16 +8733,22 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                         old_thread.join(timeout=1.0)
                 self.node.stop_ros1_playback()
             self.node.invalidate_ros_topics_list_cache()
-            self.node.bag_path = path
+            if path and path.endswith('.bag'):
+                self.node.bag_path = path
+            elif path:
+                self.node.bag_path = self.node._normalize_ros2_bag_path(path)
+            else:
+                self.node.bag_path = path
             # Automatically get bag info when loading
             info = self.node.get_bag_info()
             response = {
                 'success': True,
                 'message': 'Bag path set',
-                'path': path,
+                'path': self.node.bag_path,
                 'topics': info['topics'],
                 'duration': info['duration'],
-                'bag_type': info.get('bag_type', 'ros2')
+                'bag_type': info.get('bag_type', 'ros2'),
+                'bag_format': info.get('bag_format'),
             }
         elif parsed_path.path == '/api/bag/play':
             selected_topics = data.get('topics', [])
@@ -8259,14 +8774,17 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             response = result
         elif parsed_path.path == '/api/bag/convert':
             target_format = data.get('format', 'ros2_db3')
-            result = self.node.convert_bag(target_format=target_format)
+            topics = data.get('topics')
+            result = self.node.convert_bag(target_format=target_format, topics=topics)
             response = result
         elif parsed_path.path == '/api/bag/convert_ros1':
             target_format = data.get('format', 'ros2_db3')
-            result = self.node.convert_ros1_bag(target_format=target_format)
+            topics = data.get('topics')
+            result = self.node.convert_ros1_bag(target_format=target_format, topics=topics)
             response = result
         elif parsed_path.path == '/api/bag/convert_to_ros1':
-            result = self.node.convert_ros2_to_ros1_bag()
+            topics = data.get('topics')
+            result = self.node.convert_ros2_to_ros1_bag(topics=topics)
             response = result
 
         # ROS1 Bag Player API endpoints
@@ -8513,12 +9031,12 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
         elif parsed_path.path == '/api/player/convert_kitti':
             # KITTI → ROS2 bag 또는 ROS1 .bag 변환
             # body: { "base_dir": "...", "calib_dir": "...", "data_path": "...",
-            #         "drive_name": "...", "bag_format": "ros2"|"ros1" }
+            #         "drive_name": "...", "bag_format": "ros2_mcap"|"ros2_db3"|"ros1" }
             base_dir   = data.get('base_dir', '')
             calib_dir  = data.get('calib_dir', '')
             data_path  = data.get('data_path', '')
             drive_name = data.get('drive_name', '')
-            bag_format = data.get('bag_format', 'ros2')
+            bag_format = data.get('bag_format', 'ros2_db3')
             if not all([base_dir, calib_dir, data_path, drive_name]):
                 response = {'success': False, 'error': 'Missing required fields: base_dir, calib_dir, data_path, drive_name'}
             else:
@@ -8539,11 +9057,12 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
 
         elif parsed_path.path == '/api/player/convert_kaist':
             # KAIST → ROS1/ROS2 bag 변환
-            # body: { "sequence_dir": "...", "output_path": "...", "sensors": [...], "bag_format": "ros2"|"ros1" }
+            # body: { "sequence_dir": "...", "output_path": "...", "sensors": [...],
+            #         "bag_format": "ros2_mcap"|"ros2_db3"|"ros1" }
             sequence_dir = data.get('sequence_dir', '')
             output_path = data.get('output_path', '')
             sensors = data.get('sensors')
-            bag_format = data.get('bag_format', 'ros2')
+            bag_format = data.get('bag_format', 'ros2_db3')
             if not sequence_dir:
                 response = {'success': False, 'error': 'Missing sequence_dir'}
             elif not output_path:
@@ -8566,16 +9085,46 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 response = self.node.scan_mulran_directory(path)
 
         elif parsed_path.path == '/api/player/convert_mulran':
+            # body: { "sequence_dir": "...", "output_path": "...", "sensors": [...],
+            #         "bag_format": "ros2_mcap"|"ros2_db3"|"ros1" }
             sequence_dir = data.get('sequence_dir', '')
             output_path = data.get('output_path', '')
             sensors = data.get('sensors')
-            bag_format = data.get('bag_format', 'ros2')
+            bag_format = data.get('bag_format', 'ros2_db3')
             if not sequence_dir:
                 response = {'success': False, 'error': 'Missing sequence_dir'}
             elif not output_path:
                 response = {'success': False, 'error': 'Missing output_path'}
             else:
                 response = self.node.start_mulran_conversion(
+                    sequence_dir=sequence_dir,
+                    output_path=output_path,
+                    sensors=sensors,
+                    bag_format=bag_format,
+                )
+
+        elif parsed_path.path == '/api/player/scan_helipr':
+            path = data.get('path', '')
+            if not path:
+                response = {'success': False, 'error': 'Missing path'}
+            elif not os.path.isdir(path):
+                response = {'success': False, 'error': f'Directory not found: {path}'}
+            else:
+                response = self.node.scan_helipr_directory(path)
+
+        elif parsed_path.path == '/api/player/convert_helipr':
+            # body: { "sequence_dir": "...", "output_path": "...", "sensors": [...],
+            #         "bag_format": "ros2_mcap"|"ros2_db3"|"ros1" }
+            sequence_dir = data.get('sequence_dir', '')
+            output_path = data.get('output_path', '')
+            sensors = data.get('sensors')
+            bag_format = data.get('bag_format', 'ros2_db3')
+            if not sequence_dir:
+                response = {'success': False, 'error': 'Missing sequence_dir'}
+            elif not output_path:
+                response = {'success': False, 'error': 'Missing output_path'}
+            else:
+                response = self.node.start_helipr_conversion(
                     sequence_dir=sequence_dir,
                     output_path=output_path,
                     sensors=sensors,
@@ -8607,8 +9156,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             success = self.node.player_pause_toggle()
             response = {'success': success, 'paused': self.node.player_paused}
         elif parsed_path.path == '/api/player/save_bag':
-            # body: { "bag_format": "ros2" | "ros1" }  (기본값 "ros2")
-            bag_fmt = data.get('bag_format', 'ros2')
+            # body: { "bag_format": "ros2_mcap" | "ros2_db3" | "ros1" }  (기본값 "ros2_db3", 하위호환)
+            bag_fmt = data.get('bag_format', 'ros2_db3')
             started = self.node.start_save_rosbag(bag_format=bag_fmt)
             response = {'success': started, 'message': 'Save started' if started else 'Save already in progress'}
         elif parsed_path.path == '/api/player/set_loop':

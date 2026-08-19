@@ -111,11 +111,12 @@ ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and r
   - Real-time recording status badge (shows active format)
 
 - **File Player** — Multi-dataset direct playback
-  - Supports 4 dataset formats selectable via dropdown:
+  - Supports 5 dataset formats selectable via dropdown:
     - **ConPR**: CSV-based trajectory/LiDAR/camera data
     - **KITTI Raw**: Velodyne HDL-64E, 4 cameras (color/gray), IMU/GPS (OXTS), TF
     - **KAIST Complex Urban**: VLP-16 (left/right), SICK LiDAR (back/mid), stereo camera, IMU, GPS, VRS
     - **MulRan**: Ouster OS1-64 LiDAR, radar polar image, IMU, GPS
+    - **HeLiPR**: 4 heterogeneous LiDARs (Ouster, Velodyne, Livox Avia, Aeva) selected via `stamp.csv` timeline, xsens IMU (+ magnetic field), inspva GPS, and per-LiDAR ground-truth Odometry/TF (`LiDAR_GT/*.txt`, priority Ouster > Velodyne > Aeva > Avia)
   - **Drive/Sequence selection** per dataset (scanned from directory)
   - **Save Bag** in ROS2 or ROS1 format
   - Playback controls: Loop / Skip stop section / Auto start
@@ -372,7 +373,7 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
 
 1. **Load Bag**
    - Click "Load Bag File" to open a file browser (starts from your home directory)
-   - ROS2 bags (`.db3` directory) and ROS1 `.bag` files are both supported
+   - ROS2 bags (`.db3` directory or single-file `.mcap`) and ROS1 `.bag` files are all supported
    - A badge (ROS1 Bag / ROS2 Bag) shows the detected format
 
 2. **Select Topics**
@@ -391,13 +392,14 @@ The Plot feature provides PlotJuggler-style visualization directly in your brows
    - **ROS1 bag loaded**: "Convert to ROS2" button appears — converts offline using `rosbags-convert`
    - **ROS2 bag loaded**: "Convert to ROS1" button appears — converts to `.bag` format
    - Direct playback without conversion is available for both formats
+   - Conversion always requires at least one topic selected in step 2 — only the **Selected Topics** are written to the converted bag (`rosbags-convert --include-topic`)
 
 ### 📂 File Player
 
-The File Player supports direct playback of four dataset formats without conversion.
+The File Player supports direct playback of five dataset formats without conversion.
 
 1. **Select Dataset Format**
-   - Use the "Dataset" dropdown to choose: ConPR / KITTI Raw / KAIST Complex Urban / MulRan
+   - Use the "Dataset" dropdown to choose: ConPR / KITTI Raw / KAIST Complex Urban / MulRan / HeLiPR
 
 2. **Load Directory**
    - Click "Load" to open a file browser (starts from your home directory)
@@ -405,10 +407,11 @@ The File Player supports direct playback of four dataset formats without convers
    - For KITTI: select the base directory containing drive folders (`2011_09_26_drive_*`)
    - For KAIST: select the directory containing sequence folders (`urban00`, `urban01`, …)
    - For MulRan: select the directory containing sequence folders (`Riverside01`, `KAIST01`, …)
+   - For HeLiPR: select the top-level directory containing sequence folders (each with `stamp.csv` and a `LiDAR/` — or flat `Ouster`/`Velodyne`/`Avia`/`Aeva` — layout); both directory layouts used by official HeLiPR releases are auto-detected
 
-3. **Select Drive/Sequence** *(KITTI / KAIST / MulRan only)*
+3. **Select Drive/Sequence** *(KITTI / KAIST / MulRan / HeLiPR only)*
    - A dropdown is populated with detected drives or sequences
-   - Select the desired entry to load it
+   - Select the desired entry to load it (for HeLiPR, a single detected sequence auto-loads)
 
 4. **Play**
    - Click "▶ Play" to start publishing sensor data to ROS2 topics
@@ -423,7 +426,7 @@ The File Player supports direct playback of four dataset formats without convers
    | **Auto start** | Begin playback automatically after loading |
 
 6. **Save Bag**
-   - Choose output format (ROS2 or ROS1) from the dropdown next to the "Save Bag" button
+   - Choose output format — **ROS2 (mcap)**, **ROS2 (db3)**, or **ROS1 (.bag)** — from the dropdown next to the "Save Bag" button
    - Click "Save Bag" to convert the current dataset to a bag file
    - Progress bar shows conversion progress
 
@@ -435,6 +438,7 @@ The File Player supports direct playback of four dataset formats without convers
 | **KITTI Raw** | `/kitti/velo/pointcloud`, `/kitti/camera_*/image_raw`, `/kitti/imu`, `/kitti/gps/fix`, `/tf` |
 | **KAIST Complex Urban** | `/velodyne_left/points`, `/velodyne_right/points`, `/sick_back/points`, `/sick_mid/points`, `/stereo/left/image_raw`, `/imu/data`, `/gps/fix`, `/vrs_gps/fix`, `/tf` |
 | **MulRan** | `/os1_points`, `/radar/polar`, `/imu/data_raw`, `/gps/fix`, `/tf` |
+| **HeLiPR** | `/ouster/points`, `/velodyne/points`, `/avia/points` (Livox `CustomMsg`), `/aeva/points`, `/imu/data_raw`, `/imu/mag`, `/gps/fix`, `/gt`, `/tf` |
 
 ### 🌐 3D Visualization
 
@@ -558,6 +562,7 @@ ros_slam_webui/
 │   ├── kitti_converter.py         # KITTI Raw dataset → ROS2 message converter
 │   ├── kaist_converter.py         # KAIST Complex Urban dataset → ROS2 message converter
 │   ├── mulran_converter.py        # MulRan dataset → ROS2 message converter
+│   ├── helipr_converter.py        # HeLiPR dataset (4 heterogeneous LiDARs + IMU/GPS/GT) → ROS2 message converter
 │   └── __init__.py
 ├── web/
 │   ├── index.html                 # Main web interface
@@ -595,6 +600,7 @@ ros_slam_webui/
 - [KITTI](https://www.cvlibs.net/datasets/kitti/) - KITTI Raw dataset
 - [KAIST Complex Urban](https://irap.kaist.ac.kr/dataset/) - KAIST Urban dataset
 - [MulRan](https://sites.google.com/view/mulran-pr) - MulRan dataset
+- [HeLiPR](https://sites.google.com/view/heliprdataset) - Heterogeneous LiDAR dataset (Ouster/Velodyne/Livox/Aeva) for inter-LiDAR place recognition; converter references [HeLiPR-File-Player](https://github.com/minwoo0611/HeLiPR-File-Player)
 - [PlotJuggler](https://github.com/facontidavide/PlotJuggler) - Inspiration for plot UI
 
 ### Visualization
