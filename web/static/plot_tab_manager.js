@@ -54,11 +54,9 @@ class PlotTabManager {
     createTabBar() {
         // 탭 바 레이아웃: 왼쪽에 탭 목록, 오른쪽에 + 버튼
         this.tabBarContainer.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 6px; border-bottom: 2px solid rgba(124, 111, 255, 0.2); margin-bottom: 8px; padding-bottom: 2px; flex-wrap: nowrap; min-height: 40px; max-height: 40px; overflow: hidden;">
-                <div id="plot-tab-list" style="display: flex; align-items: center; gap: 6px; flex: 1; overflow-x: hidden; flex-wrap: nowrap;"></div>
-                <button id="plot-tab-add-btn" 
-                        style="padding: 8px 14px; background: linear-gradient(135deg, rgba(124, 111, 255, 0.2), rgba(124, 111, 255, 0.2)); border: 1px solid rgba(124, 111, 255, 0.4); border-radius: 6px; color: #b0a8ff; font-size: 16px; font-weight: 600; cursor: pointer; min-width: 36px; transition: all 0.25s ease; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2); flex-shrink: 0;"
-                        title="Add new plot tab">+</button>
+            <div class="ui-plot-tabs">
+                <div id="plot-tab-list" class="ui-plot-tab-list"></div>
+                <button id="plot-tab-add-btn" class="ui-plot-tab-add" title="Add new plot tab">+</button>
             </div>
         `;
         
@@ -66,20 +64,6 @@ class PlotTabManager {
         const addBtn = document.getElementById('plot-tab-add-btn');
         addBtn.addEventListener('click', () => {
             this.createTab();
-        });
-        
-        // + 버튼 호버 효과
-        addBtn.addEventListener('mouseenter', () => {
-            addBtn.style.background = 'linear-gradient(135deg, rgba(124, 111, 255, 0.35), rgba(124, 111, 255, 0.35))';
-            addBtn.style.borderColor = 'rgba(124, 111, 255, 0.7)';
-            addBtn.style.transform = 'scale(1.05)';
-            addBtn.style.boxShadow = '0 4px 12px rgba(124, 111, 255, 0.3)';
-        });
-        addBtn.addEventListener('mouseleave', () => {
-            addBtn.style.background = 'linear-gradient(135deg, rgba(124, 111, 255, 0.2), rgba(124, 111, 255, 0.2))';
-            addBtn.style.borderColor = 'rgba(124, 111, 255, 0.4)';
-            addBtn.style.transform = 'scale(1)';
-            addBtn.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.2)';
         });
     }
 
@@ -98,11 +82,8 @@ class PlotTabManager {
         const plotDivId = `plot-area-${tabId}`;
         const plotDiv = document.createElement('div');
         plotDiv.id = plotDivId;
-        plotDiv.style.width = '100%';
-        plotDiv.style.height = '100%';
+        plotDiv.className = 'ui-plot-area';
         plotDiv.style.display = 'none';  // 초기에는 숨김
-        plotDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
-        plotDiv.style.borderRadius = '8px';
         this.plotAreaContainer.appendChild(plotDiv);
         
         // PlotlyPlotManager 인스턴스 생성
@@ -140,40 +121,13 @@ class PlotTabManager {
         
         const tabElement = document.createElement('div');
         tabElement.id = `plot-tab-ui-${tab.id}`;
-        tabElement.style.cssText = `
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            padding: 8px 6px;
-            background: linear-gradient(135deg, rgba(30, 30, 40, 0.95), rgba(25, 25, 35, 0.95));
-            border: 1px solid rgba(124, 111, 255, 0.15);
-            border-bottom: none;
-            border-radius: 8px 8px 0 0;
-            cursor: pointer;
-            position: relative;
-            flex: 1 1 0;
-            min-width: 30px;
-            max-width: 180px;
-            overflow: hidden;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-        `;
+        tabElement.className = 'ui-plot-tab';
         
         // 탭 제목
         const titleSpan = document.createElement('span');
         titleSpan.id = `plot-tab-title-${tab.id}`;
+        titleSpan.className = 'ui-plot-tab-title';
         titleSpan.textContent = tab.title;
-        titleSpan.style.cssText = `
-            flex: 1 1 0;
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            font-size: 11px;
-            font-weight: 500;
-            color: rgba(255, 255, 255, 0.85);
-            transition: color 0.2s ease;
-        `;
         
         // 탭 제목 더블클릭 이벤트 (편집 모드)
         titleSpan.addEventListener('dblclick', (e) => {
@@ -186,35 +140,10 @@ class PlotTabManager {
         // 닫기 버튼 (탭이 1개일 때도 표시 — 마지막 탭은 플롯만 초기화)
         const closeBtn = document.createElement('button');
         closeBtn.id = `plot-tab-close-${tab.id}`;
+        closeBtn.className = 'ui-plot-tab-close';
         closeBtn.textContent = '×';
-        closeBtn.style.cssText = `
-            padding: 0;
-            width: 16px;
-            height: 16px;
-            background: transparent;
-            border: none;
-            color: rgba(255, 255, 255, 0.6);
-            font-size: 16px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 3px;
-            transition: all 0.2s ease;
-            flex-shrink: 0;
-        `;
         closeBtn.title = 'Close tab';
 
-        closeBtn.addEventListener('mouseenter', () => {
-            closeBtn.style.background = 'rgba(255, 70, 85, 0.25)';
-            closeBtn.style.color = 'rgba(255, 255, 255, 0.95)';
-            closeBtn.style.transform = 'scale(1.1)';
-        });
-        closeBtn.addEventListener('mouseleave', () => {
-            closeBtn.style.background = 'transparent';
-            closeBtn.style.color = 'rgba(255, 255, 255, 0.6)';
-            closeBtn.style.transform = 'scale(1)';
-        });
         closeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             this.closeTab(tab.id);
@@ -225,26 +154,6 @@ class PlotTabManager {
         // 탭 클릭 이벤트 (전환)
         tabElement.addEventListener('click', () => {
             this.switchTab(tab.id);
-        });
-        
-        // 탭 호버 이벤트
-        tabElement.addEventListener('mouseenter', () => {
-            if (this.activeTabId !== tab.id) {
-                tabElement.style.background = 'linear-gradient(135deg, rgba(40, 45, 60, 0.95), rgba(35, 40, 55, 0.95))';
-                tabElement.style.borderColor = 'rgba(124, 111, 255, 0.3)';
-                tabElement.style.transform = 'translateY(-2px)';
-                tabElement.style.boxShadow = '0 4px 12px rgba(124, 111, 255, 0.15)';
-                titleSpan.style.color = 'rgba(255, 255, 255, 0.95)';
-            }
-        });
-        tabElement.addEventListener('mouseleave', () => {
-            if (this.activeTabId !== tab.id) {
-                tabElement.style.background = 'linear-gradient(135deg, rgba(30, 30, 40, 0.95), rgba(25, 25, 35, 0.95))';
-                tabElement.style.borderColor = 'rgba(124, 111, 255, 0.15)';
-                tabElement.style.transform = 'translateY(0)';
-                tabElement.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.2)';
-                titleSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-            }
         });
         
         tabList.appendChild(tabElement);
@@ -273,16 +182,7 @@ class PlotTabManager {
                 prevTab.plotDiv.style.display = 'none';
                 const prevTabUI = document.getElementById(`plot-tab-ui-${prevTab.id}`);
                 if (prevTabUI) {
-                    prevTabUI.style.background = 'linear-gradient(135deg, rgba(30, 30, 40, 0.95), rgba(25, 25, 35, 0.95))';
-                    prevTabUI.style.borderColor = 'rgba(124, 111, 255, 0.15)';
-                    prevTabUI.style.borderBottom = 'none';
-                    prevTabUI.style.transform = 'translateY(0)';
-                    prevTabUI.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.2)';
-                    
-                    const prevTitleSpan = document.getElementById(`plot-tab-title-${prevTab.id}`);
-                    if (prevTitleSpan) {
-                        prevTitleSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-                    }
+                    prevTabUI.classList.remove('ui-plot-tab-active');
                 }
             }
         }
@@ -293,16 +193,7 @@ class PlotTabManager {
         
         const tabUI = document.getElementById(`plot-tab-ui-${tabId}`);
         if (tabUI) {
-            tabUI.style.background = 'linear-gradient(135deg, rgba(124, 111, 255, 0.25), rgba(124, 111, 255, 0.25))';
-            tabUI.style.borderColor = 'rgba(124, 111, 255, 0.6)';
-            tabUI.style.borderBottom = '3px solid rgba(124, 111, 255, 0.9)';
-            tabUI.style.transform = 'translateY(0)';
-            tabUI.style.boxShadow = '0 4px 16px rgba(124, 111, 255, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.1)';
-            
-            const titleSpan = document.getElementById(`plot-tab-title-${tabId}`);
-            if (titleSpan) {
-                titleSpan.style.color = 'rgba(255, 255, 255, 1)';
-            }
+            tabUI.classList.add('ui-plot-tab-active');
         }
         
         console.log(`[PlotTabManager] Switched to tab: ${tabId}`);
@@ -400,16 +291,7 @@ class PlotTabManager {
         const input = document.createElement('input');
         input.type = 'text';
         input.value = currentTitle;
-        input.style.cssText = `
-            flex: 1;
-            padding: 2px 4px;
-            background: rgba(0, 0, 0, 0.5);
-            border: 1px solid var(--primary);
-            border-radius: 3px;
-            color: var(--text);
-            font-size: 13px;
-            outline: none;
-        `;
+        input.className = 'ui-plot-tab-input';
         
         // Enter 키 또는 포커스 아웃 시 저장
         const saveTitle = () => {
@@ -452,7 +334,7 @@ class PlotTabManager {
         this.tabs.forEach((tab) => {
             const closeBtn = document.getElementById(`plot-tab-close-${tab.id}`);
             if (closeBtn) {
-                closeBtn.style.display = 'flex';
+                closeBtn.style.display = '';
             }
         });
     }
@@ -471,14 +353,10 @@ class PlotTabManager {
         if (this.tabs.length >= this.maxTabs) {
             // 최대 개수에 도달하면 버튼 비활성화
             addBtn.disabled = true;
-            addBtn.style.opacity = '0.4';
-            addBtn.style.cursor = 'not-allowed';
             addBtn.title = `최대 ${this.maxTabs}개의 Plot 탭만 생성할 수 있습니다`;
         } else {
             // 정상 상태로 복구
             addBtn.disabled = false;
-            addBtn.style.opacity = '1';
-            addBtn.style.cursor = 'pointer';
             addBtn.title = 'Add new plot tab';
         }
     }
@@ -665,11 +543,8 @@ class PlotTabManager {
         const plotDivId = `plot-area-${tabId}`;
         const plotDiv = document.createElement('div');
         plotDiv.id = plotDivId;
-        plotDiv.style.width = '100%';
-        plotDiv.style.height = '100%';
+        plotDiv.className = 'ui-plot-area';
         plotDiv.style.display = 'none';
-        plotDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
-        plotDiv.style.borderRadius = '8px';
         this.plotAreaContainer.appendChild(plotDiv);
         
         // PlotlyPlotManager 인스턴스 생성

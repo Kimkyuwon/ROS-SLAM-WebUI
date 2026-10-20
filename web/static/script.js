@@ -4401,6 +4401,25 @@ function _initBackendWs() {
     });
 }
 
+// plot_data 최신값을 모아 250ms마다 트리·그래프 카드에 한 번에 반영한다. 첫 데이터가 올 때 한 번만 만든다.
+function _ensurePlotValueFlush() {
+    if (plotState._latestValues) return;
+    plotState._latestValues = new Map();
+    setInterval(() => {
+        const latest = plotState._latestValues;
+        if (latest.size === 0) return;
+        if (plotState.tree) {
+            latest.forEach((value, path) => plotState.tree.updateValue(path, value));
+        }
+        if (plotState.plotTabManager) {
+            plotState.plotTabManager.tabs.forEach((tab) => {
+                if (tab.plotManager) tab.plotManager.setCurrentValues(latest);
+            });
+        }
+        latest.clear();
+    }, 250);
+}
+
 function _handleBackendWsMessage(rawData) {
     let msg;
     try { msg = JSON.parse(rawData); } catch (e) { return; }
@@ -4410,9 +4429,11 @@ function _handleBackendWsMessage(rawData) {
         const { topic, stamp_sec, stamp_nanosec, values } = msg;
         const timestamp = stamp_sec + stamp_nanosec / 1e9;
         const topicKey  = topic.startsWith('/') ? topic.substring(1) : topic;
+        _ensurePlotValueFlush();
 
         for (const [field, value] of Object.entries(values)) {
             const fullPath = `${topicKey}/${field}`;
+            plotState._latestValues.set(fullPath, value);
             if (plotState.plotTabManager && plotState.plotTabManager.tabs.length > 0) {
                 plotState.plotTabManager.tabs.forEach(tab => {
                     if (tab.plotManager && tab.plotManager.dataBuffers.has(fullPath)) {

@@ -360,11 +360,38 @@ body {
     border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--color-mute); font-size: 14px; line-height: 1; cursor: pointer;
 }
 .ui-plot-tab-close:hover, .ui-plot-tab-add:hover { background: var(--color-line); color: var(--color-ink); }
+.ui-plot-tabs { margin-bottom: 8px; }
+.ui-plot-tab-list { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; overflow: hidden; }
+.ui-plot-tab { flex: 0 1 auto; min-width: 48px; max-width: 180px; padding-right: 6px; }
+.ui-plot-tab-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ui-plot-tab-close { flex-shrink: 0; }
+.ui-plot-tab-add { flex-shrink: 0; width: 28px; height: 28px; font-size: 16px; }
+.ui-plot-tab-add:disabled { opacity: 0.4; cursor: not-allowed; }
+.ui-plot-tab-add:disabled:hover { background: transparent; color: var(--color-mute); }
+.ui-plot-tab-input {
+    flex: 1; min-width: 0; padding: 2px 4px; border: 1px solid var(--color-info); border-radius: var(--radius-xs);
+    background: var(--color-bg); color: var(--color-ink); font: inherit; outline: none;
+}
+.ui-plot-area { position: relative; width: 100%; height: 100%; border-radius: var(--radius-md); background: var(--color-surface); }
 .ui-context-menu {
     z-index: 3500; min-width: 160px; padding: 4px; border: 1px solid var(--color-line2); border-radius: var(--radius-md);
     background: var(--color-raised); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); color: var(--color-ink); font-size: 13px;
 }
 .ui-plot-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; padding: 48px 16px; text-align: center; color: var(--color-mute); font-size: 13px; }
+.ui-context-menu { position: absolute; }
+.ui-context-menu-item { padding: 8px 12px; border-radius: var(--radius-xs); color: var(--color-ink); cursor: pointer; }
+.ui-context-menu-item:hover { background: var(--color-line); }
+.ui-context-menu-item-disabled, .ui-context-menu-item-disabled:hover { background: transparent; color: var(--color-dim); cursor: not-allowed; }
+.ui-context-menu-sep { height: 1px; margin: 4px 0; background: var(--color-line); }
+.ui-plot-empty { box-sizing: border-box; width: 100%; height: 100%; border: 1px dashed var(--color-line2); border-radius: var(--radius-md); }
+.ui-plot-empty-title { color: var(--color-ink); font-size: 16px; font-weight: 500; }
+.ui-plot-empty-hint { max-width: 400px; line-height: 1.6; }
+.ui-plot-current {
+    position: absolute; top: 34px; right: 12px; z-index: 1; display: flex; align-items: baseline; gap: 6px;
+    max-width: 108px; pointer-events: none; font-size: 13px;
+}
+.ui-plot-current-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-ink); font-weight: 600; }
+.ui-plot-current-paused { flex-shrink: 0; color: var(--color-warn); font-size: 11px; }
 
 /* --- 앱 셸: 사이드바 + 본문 (body.ui-has-sidebar 없으면 옛 탭 레이아웃) --- */
 .ui-sidebar { display: none; }

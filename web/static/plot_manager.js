@@ -350,6 +350,24 @@ class PlotDataFilter {
     }
 }
 
+// Plotly는 CSS 변수를 못 읽으므로 :root 토큰을 한 번만 읽어 둔다.
+let plotThemeColors = null;
+
+function getPlotThemeColors() {
+    if (plotThemeColors) return plotThemeColors;
+    const css = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+    plotThemeColors = {
+        surface: read('--color-surface', '#11151A'),
+        raised: read('--color-raised', '#171C22'),
+        grid: read('--color-line', '#252B33'),
+        zero: read('--color-line2', '#323A45'),
+        ink: read('--color-ink', '#E8ECF0'),
+        mute: read('--color-mute', '#8B95A1')
+    };
+    return plotThemeColors;
+}
+
 // PlotlyPlotManager 클래스 - Plotly.js를 이용한 Plot 생성 및 업데이트
 class PlotlyPlotManager {
     constructor(containerId, bufferTime = 5.0) {  // 기본 5초 (ROS time 기준)
@@ -412,34 +430,9 @@ class PlotlyPlotManager {
         }
 
         container.innerHTML = `
-            <div style="
-                width: 100%;
-                height: 100%;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                background: linear-gradient(135deg, #f8f8f8 0%, #ffffff 100%);
-                border: 2px dashed #cccccc;
-                border-radius: 8px;
-                font-family: Arial, sans-serif;
-            ">
-                <div style="
-                    font-size: 24px;
-                    font-weight: 500;
-                    color: #666666;
-                    margin-bottom: 16px;
-                    text-align: center;
-                ">
-                    📊 Drag and drop topics to plot
-                </div>
-                <div style="
-                    font-size: 14px;
-                    color: #999999;
-                    text-align: center;
-                    max-width: 400px;
-                    line-height: 1.6;
-                ">
+            <div class="ui-plot-empty">
+                <div class="ui-plot-empty-title">Drag and drop topics to plot</div>
+                <div class="ui-plot-empty-hint">
                     Use 「+ Add」in the left panel to choose topics, then drag fields here to plot
                 </div>
             </div>
@@ -504,42 +497,42 @@ class PlotlyPlotManager {
             this.traces.push(trace);
         });
 
-        // Plotly layout 설정 (흰색 배경, 검은색 격자선)
+        const theme = getPlotThemeColors();
         const layout = {
             title: {
                 text: paths.length === 1 ? `Plot: ${paths[0]}` : `Plot: ${paths.length} items`,
                 font: {
-                    color: '#dde1f5',
+                    color: theme.ink,
                     size: 14
                 }
             },
             xaxis: {
                 title: {
                     text: 'Time (seconds, relative to t0)',  // 디폴트로 상대 시간 표시
-                    font: { color: '#7b82ab' }
+                    font: { color: theme.mute }
                 },
                 showgrid: true,
-                gridcolor: '#1e2238',
+                gridcolor: theme.grid,
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#2e3358',
+                zerolinecolor: theme.zero,
                 zerolinewidth: 1,
-                tickfont: { color: '#7b82ab' },
+                tickfont: { color: theme.mute },
                 exponentformat: 'e',  // 과학적 표기법 (1.23e+08)
                 showexponent: 'all'
             },
             yaxis: {
                 title: {
                     text: 'Value',
-                    font: { color: '#7b82ab' }
+                    font: { color: theme.mute }
                 },
                 showgrid: true,
-                gridcolor: '#1e2238',
+                gridcolor: theme.grid,
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#2e3358',
+                zerolinecolor: theme.zero,
                 zerolinewidth: 1,
-                tickfont: { color: '#7b82ab' },
+                tickfont: { color: theme.mute },
                 exponentformat: 'e',  // 과학적 표기법 (1.23e+08)
                 showexponent: 'all'
             },
@@ -549,10 +542,10 @@ class PlotlyPlotManager {
                 xanchor: 'right',
                 y: 1,
                 yanchor: 'top',
-                bgcolor: 'rgba(17,20,38,0.9)',
-                bordercolor: '#2e3358',
+                bgcolor: theme.raised,
+                bordercolor: theme.zero,
                 borderwidth: 1,
-                font: { color: '#dde1f5' }
+                font: { color: theme.ink }
             },
             margin: {
                 l: 60,
@@ -560,10 +553,10 @@ class PlotlyPlotManager {
                 b: 50,
                 t: 50
             },
-            paper_bgcolor: '#0b0d18',
-            plot_bgcolor: '#0e1020',
+            paper_bgcolor: theme.surface,
+            plot_bgcolor: theme.surface,
             font: {
-                color: '#dde1f5',
+                color: theme.ink,
                 family: 'Arial, sans-serif'
             }
         };
@@ -735,40 +728,40 @@ class PlotlyPlotManager {
         };
         this.traces.push(trace);
 
-        // Plotly layout 설정
+        const theme = getPlotThemeColors();
         const layout = {
             title: {
                 text: `XY Plot: ${yPath} vs ${xPath}`,
                 font: {
-                    color: '#dde1f5',
+                    color: theme.ink,
                     size: 14
                 }
             },
             xaxis: {
                 title: {
                     text: xPath,  // X축 라벨은 데이터명
-                    font: { color: '#7b82ab' }
+                    font: { color: theme.mute }
                 },
                 showgrid: true,
-                gridcolor: '#1e2238',
+                gridcolor: theme.grid,
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#2e3358',
+                zerolinecolor: theme.zero,
                 zerolinewidth: 1,
-                tickfont: { color: '#7b82ab' }
+                tickfont: { color: theme.mute }
             },
             yaxis: {
                 title: {
                     text: yPath,  // Y축 라벨은 데이터명
-                    font: { color: '#7b82ab' }
+                    font: { color: theme.mute }
                 },
                 showgrid: true,
-                gridcolor: '#1e2238',
+                gridcolor: theme.grid,
                 gridwidth: 1,
                 zeroline: true,
-                zerolinecolor: '#2e3358',
+                zerolinecolor: theme.zero,
                 zerolinewidth: 1,
-                tickfont: { color: '#7b82ab' }
+                tickfont: { color: theme.mute }
             },
             showlegend: true,
             legend: {
@@ -776,10 +769,10 @@ class PlotlyPlotManager {
                 xanchor: 'right',
                 y: 1,
                 yanchor: 'top',
-                bgcolor: 'rgba(17,20,38,0.9)',
-                bordercolor: '#2e3358',
+                bgcolor: theme.raised,
+                bordercolor: theme.zero,
                 borderwidth: 1,
-                font: { color: '#dde1f5' }
+                font: { color: theme.ink }
             },
             margin: {
                 l: 60,
@@ -787,10 +780,10 @@ class PlotlyPlotManager {
                 b: 50,
                 t: 50
             },
-            paper_bgcolor: '#0b0d18',
-            plot_bgcolor: '#0e1020',
+            paper_bgcolor: theme.surface,
+            plot_bgcolor: theme.surface,
             font: {
-                color: '#dde1f5',
+                color: theme.ink,
                 family: 'Arial, sans-serif'
             }
         };
@@ -1002,18 +995,9 @@ class PlotlyPlotManager {
             // 커스텀 메뉴 생성
             const menu = document.createElement('div');
             menu.id = 'plot-context-menu';
-            menu.style.cssText = `
-                position: absolute;
-                left: ${e.pageX}px;
-                top: ${e.pageY}px;
-                background: #ffffff;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-                z-index: 10000;
-                font-size: 13px;
-                min-width: 180px;
-            `;
+            menu.className = 'ui-context-menu';
+            menu.style.left = `${e.pageX}px`;
+            menu.style.top = `${e.pageY}px`;
             
             const menuItems = [
                 { label: '📷 Export as PNG', action: () => this.exportToPNG() },
@@ -1027,25 +1011,16 @@ class PlotlyPlotManager {
             menuItems.forEach(item => {
                 if (item.separator) {
                     const separator = document.createElement('div');
-                    separator.style.cssText = 'height: 1px; background: #ddd; margin: 4px 0;';
+                    separator.className = 'ui-context-menu-sep';
                     menu.appendChild(separator);
                 } else {
                     const menuItem = document.createElement('div');
                     menuItem.textContent = item.label;
-                    menuItem.style.cssText = `
-                        padding: 8px 16px;
-                        cursor: ${item.disabled ? 'not-allowed' : 'pointer'};
-                        color: ${item.disabled ? '#999' : '#000'};
-                        background: transparent;
-                    `;
+                    menuItem.className = item.disabled
+                        ? 'ui-context-menu-item ui-context-menu-item-disabled'
+                        : 'ui-context-menu-item';
                     
                     if (!item.disabled) {
-                        menuItem.onmouseenter = () => {
-                            menuItem.style.background = '#f0f0f0';
-                        };
-                        menuItem.onmouseleave = () => {
-                            menuItem.style.background = 'transparent';
-                        };
                         menuItem.onclick = () => {
                             item.action();
                             menu.remove();
@@ -1335,18 +1310,9 @@ class PlotlyPlotManager {
                 
                 const menu = document.createElement('div');
                 menu.id = 'plot-delete-menu';
-                menu.style.cssText = `
-                    position: absolute;
-                    left: ${e.pageX}px;
-                    top: ${e.pageY}px;
-                    background: #ffffff;
-                    border: 1px solid #ccc;
-                    border-radius: 4px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-                    z-index: 10001;
-                    font-size: 13px;
-                    min-width: 150px;
-                `;
+                menu.className = 'ui-context-menu';
+                menu.style.left = `${e.pageX}px`;
+                menu.style.top = `${e.pageY}px`;
                 
                 // 메뉴 항목 목록: 🗑️ Delete plot
                 const traceMenuItems = [
@@ -1362,19 +1328,8 @@ class PlotlyPlotManager {
                 traceMenuItems.forEach(itemDef => {
                     const menuItem = document.createElement('div');
                     menuItem.textContent = itemDef.label;
-                    menuItem.style.cssText = `
-                        padding: 8px 16px;
-                        cursor: pointer;
-                        color: #000;
-                        background: transparent;
-                    `;
+                    menuItem.className = 'ui-context-menu-item';
 
-                    menuItem.onmouseenter = () => {
-                        menuItem.style.background = '#f0f0f0';
-                    };
-                    menuItem.onmouseleave = () => {
-                        menuItem.style.background = 'transparent';
-                    };
                     menuItem.onclick = itemDef.action;
 
                     menu.appendChild(menuItem);
@@ -1401,18 +1356,9 @@ class PlotlyPlotManager {
                 
                 const menu = document.createElement('div');
                 menu.id = 'plot-context-menu';
-                menu.style.cssText = `
-                    position: absolute;
-                    left: ${e.pageX}px;
-                    top: ${e.pageY}px;
-                    background: #ffffff;
-                    border: 1px solid #ccc;
-                    border-radius: 4px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-                    z-index: 10000;
-                    font-size: 13px;
-                    min-width: 180px;
-                `;
+                menu.className = 'ui-context-menu';
+                menu.style.left = `${e.pageX}px`;
+                menu.style.top = `${e.pageY}px`;
                 
                 const menuItems = [
                     { label: '⚙️ Plot Settings', action: () => this.openPlotSettings() },
@@ -1432,24 +1378,13 @@ class PlotlyPlotManager {
                 menuItems.forEach(item => {
                     if (item.separator) {
                         const separator = document.createElement('div');
-                        separator.style.cssText = 'height: 1px; background: #ddd; margin: 4px 0;';
+                        separator.className = 'ui-context-menu-sep';
                         menu.appendChild(separator);
                     } else {
                         const menuItem = document.createElement('div');
                         menuItem.textContent = item.label;
-                        menuItem.style.cssText = `
-                            padding: 8px 16px;
-                            cursor: pointer;
-                            color: #000;
-                            background: transparent;
-                        `;
+                        menuItem.className = 'ui-context-menu-item';
                         
-                        menuItem.onmouseenter = () => {
-                            menuItem.style.background = '#f0f0f0';
-                        };
-                        menuItem.onmouseleave = () => {
-                            menuItem.style.background = 'transparent';
-                        };
                         menuItem.onclick = () => {
                             item.action();
                             menu.remove();
@@ -1509,9 +1444,10 @@ class PlotlyPlotManager {
             // Plotly.react로 전체 다시 렌더링
             const plotDiv = document.getElementById(this.containerId);
             const currentLayout = plotDiv.layout;
+            const theme = getPlotThemeColors();
             if (currentLayout) {
-                currentLayout.paper_bgcolor = '#0b0d18';
-                currentLayout.plot_bgcolor = '#0e1020';
+                currentLayout.paper_bgcolor = theme.surface;
+                currentLayout.plot_bgcolor = theme.surface;
             }
             Plotly.react(this.containerId, this.traces, currentLayout);
         }
@@ -2450,10 +2386,11 @@ class PlotlyPlotManager {
             
             // 제목 업데이트 (드래그한 메시지 제목으로 변경)
             const totalPaths = Array.from(this.dataBuffers.keys());
+            const theme = getPlotThemeColors();
             currentLayout.title = {
                 text: totalPaths.length === 1 ? `Plot: ${totalPaths[0]}` : `Plot: ${totalPaths.length} items`,
                 font: {
-                    color: '#000000',
+                    color: theme.ink,
                     size: 14
                 }
             };
@@ -2573,6 +2510,39 @@ class PlotlyPlotManager {
         }
     }
 
+    // 첫 trace(XY는 Y축)의 최신값을 plot 우측 상단에 표시한다. 일시정지 중에는 값을 고정한다.
+    setCurrentValues(latest) {
+        if (!this.isInitialized || this.isPaused) return;
+        const path = this.isXYPlot ? this.yPath : this.dataBuffers.keys().next().value;
+        if (!latest.has(path)) return;
+        const value = latest.get(path);
+        const text = typeof value === 'number' && !Number.isInteger(value) ? value.toFixed(3) : String(value);
+        const valueEl = this._ensureCurrentValueEl().firstChild;
+        if (valueEl.textContent !== text) valueEl.textContent = text;
+    }
+
+    _ensureCurrentValueEl() {
+        let el = this.container.querySelector('.ui-plot-current');
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'ui-plot-current ui-mono';
+            const valueEl = document.createElement('span');
+            valueEl.className = 'ui-plot-current-value';
+            const pausedEl = document.createElement('span');
+            pausedEl.className = 'ui-plot-current-paused';
+            pausedEl.textContent = '일시정지';
+            pausedEl.hidden = !this.isPaused;
+            el.append(valueEl, pausedEl);
+            this.container.appendChild(el);
+        }
+        return el;
+    }
+
+    _syncPausedBadge() {
+        if (!this.isInitialized) return;
+        this._ensureCurrentValueEl().lastChild.hidden = !this.isPaused;
+    }
+
     togglePause(forceState = null) {
         // forceState: true=일시정지, false=재생, null=토글
         if (forceState !== null) {
@@ -2582,6 +2552,7 @@ class PlotlyPlotManager {
         }
         
         console.log(`[PlotlyPlotManager] Plot ${this.isPaused ? 'PAUSED' : 'RESUMED'}`);
+        this._syncPausedBadge();
         
         const plotDiv = document.getElementById(this.containerId);
         
