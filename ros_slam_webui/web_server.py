@@ -19,6 +19,7 @@ import glob
 import queue
 import threading
 import asyncio
+import collections
 import json
 import os
 import time
@@ -3498,7 +3499,7 @@ class WebGUINode(Node):
             self.get_logger().info(f'XAUTHORITY: {self._ros_env.get("XAUTHORITY", "NOT SET")}')
             
             # Capture stderr to log rviz2 errors
-            stderr_file = open('/tmp/web_gui_slam_stderr.log', 'w')
+            stderr_file = open(PROCESS_LOG_PATHS['slam'], 'w')
             self.slam_process = subprocess.Popen(
                 cmd,
                 env=self._ros_env,
@@ -3533,6 +3534,9 @@ class WebGUINode(Node):
 
     def save_slam_map(self, directory):
         """Start async SLAM map save, return immediately"""
+        name_error = validate_map_dir_name(directory)
+        if name_error:
+            return False, name_error
         if self.slam_map_saving:
             return False, 'Map save already in progress'
 
@@ -3661,7 +3665,7 @@ class WebGUINode(Node):
             self.get_logger().info(f'XAUTHORITY: {self._ros_env.get("XAUTHORITY", "NOT SET")}')
             
             # Capture stderr to log rviz2 errors
-            stderr_file = open('/tmp/web_gui_localization_stderr.log', 'w')
+            stderr_file = open(PROCESS_LOG_PATHS['localization'], 'w')
             self.localization_process = subprocess.Popen(
                 cmd,
                 env=self._ros_env,
@@ -8317,6 +8321,58 @@ def _find_sibling_package_dir(package_name):
     return None
 
 
+MAP_DIR_NAME_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
+RESERVED_MAP_DIR_NAMES = {'Map'}  # pose_graph_optimization 라이브 스테이징 폴더 (시작 시 rm -r 됨)
+PROCESS_LOG_PATHS = {
+    'slam': '/tmp/web_gui_slam_stderr.log',
+    'localization': '/tmp/web_gui_localization_stderr.log',
+}
+PROCESS_LOG_DEFAULT_LINES = 50
+PROCESS_LOG_MAX_LINES = 200
+
+
+def validate_map_dir_name(name):
+    """지도 폴더 이름 검사. 문제 없으면 None, 있으면 사용자용 문구."""
+    if not isinstance(name, str) or not MAP_DIR_NAME_RE.fullmatch(name):
+        return '영문·숫자·_·- 만 쓸 수 있습니다 (1~64자)'
+    if name in RESERVED_MAP_DIR_NAMES:
+        return f'"{name}"은(는) 예약된 이름입니다'
+    return None
+
+
+def tail_text_file(path, max_lines):
+    """파일 마지막 max_lines줄. 없으면 빈 목록."""
+    try:
+        with open(path, 'r', errors='replace') as f:
+            return [line.rstrip('\n') for line in collections.deque(f, maxlen=max_lines)]
+    except OSError:
+        return []
+
+
+def clamp_log_lines(raw):
+    """쿼리 lines 값을 1~PROCESS_LOG_MAX_LINES로 자른다. 숫자가 아니면 기본값."""
+    try:
+        lines = int(raw)
+    except (TypeError, ValueError):
+        return PROCESS_LOG_DEFAULT_LINES
+    return max(1, min(PROCESS_LOG_MAX_LINES, lines))
+
+
+def get_save_map_check(name, pgo_dir):
+    """GET /api/slam/save_map_check 응답. exists는 이름이 유효할 때만 pgo_dir/<name>/을 확인."""
+    reason = validate_map_dir_name(name)
+    exists = reason is None and pgo_dir is not None and (pgo_dir / name).is_dir()
+    return {'success': True, 'data': {'valid': reason is None, 'reason': reason or '', 'exists': exists}}
+
+
+def get_process_log(name, lines_raw):
+    """GET /api/system/process_log 응답. name은 PROCESS_LOG_PATHS 키만 허용."""
+    path = PROCESS_LOG_PATHS.get(name) if isinstance(name, str) else None
+    if path is None:
+        return {'success': False, 'error': 'Unknown process log name'}
+    return {'success': True, 'data': {'lines': tail_text_file(path, clamp_log_lines(lines_raw))}}
+
+
 # ── Map1/Map2 점군 서버사이드 누적/복셀화 (뷰어 로딩 속도 최적화) ─────────────
 # pcl::io::savePCDFileBinary가 생성하는 uncompressed binary PointXYZI(x y z [intensity],
 # 모두 4바이트 float, 패딩 없음) 포맷만 지원한다. ascii/binary_compressed나 그 외 포맷은
@@ -8593,8 +8649,15 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response({'total_ram_mb': total_ram_mb, 'cpu_cores': cpu_cores})
         elif parsed_path.path == '/api/system/status_summary':
             self.send_json_response(self.node.get_status_summary())
+        elif parsed_path.path == '/api/system/process_log':
+            query = parse_qs(parsed_path.query)
+            self.send_json_response(get_process_log(query.get('name', [''])[0], query.get('lines', [None])[0]))
         elif parsed_path.path == '/api/slam/state':
             self.send_json_response(self.node.get_slam_state())
+        elif parsed_path.path == '/api/slam/save_map_check':
+            query = parse_qs(parsed_path.query)
+            pgo_dir = _find_sibling_package_dir('pose_graph_optimization')
+            self.send_json_response(get_save_map_check(query.get('name', [''])[0], pgo_dir))
         elif parsed_path.path == '/api/slam/save_map_status':
             self.send_json_response(self.node.get_save_map_status())
         elif parsed_path.path == '/api/slam/optimization_status':
@@ -8741,6 +8804,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             directory = data.get('directory', 'map')
             success, message = self.node.save_slam_map(directory)
             response = {'success': success, 'message': message}
+            if not success:
+                response['error'] = message
         elif parsed_path.path == '/api/slam/cancel_save_map':
             success, message = self.node.cancel_save_slam_map()
             response = {'success': success, 'message': message}
