@@ -199,31 +199,32 @@
                                             <div id="slam-live-legend">
                                                 <div class="slam-live-legend-item">
                                                     <span class="slam-live-legend-line" style="background:#00ff44;"></span>
-                                                    <span class="slam-live-legend-label">LIO</span>
+                                                    <span class="slam-live-legend-label">LIO (원래 자세)</span>
                                                 </div>
                                                 <div class="slam-live-legend-item">
                                                     <span class="slam-live-legend-line" style="background:#ffffff;"></span>
-                                                    <span class="slam-live-legend-label">Pose Graph</span>
+                                                    <span class="slam-live-legend-label">Pose Graph (최적화)</span>
                                                 </div>
+                                                <div class="slam-live-legend-note">지도: 최근 50 m</div>
                                             </div>
 
                                             <div id="slam-live-viewer-actions">
-                                                <button class="slam-action-btn" id="slam-live-reset-btn"
-                                                        onclick="resetSlamLiveViewer()" title="Reset View">
+                                                <button class="slam-action-btn ui-icon-btn" id="slam-live-reset-btn"
+                                                        onclick="resetSlamLiveViewer()" title="Reset View" aria-label="Reset View">
                                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                         <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                                                         <polyline points="9 22 9 12 15 12 15 22"/>
                                                     </svg>
                                                 </button>
-                                                <button class="slam-action-btn" id="slam-live-follow-btn"
-                                                        onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
+                                                <button class="slam-action-btn ui-icon-btn" id="slam-live-follow-btn"
+                                                        onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글" aria-label="Follow 카메라 추종 토글" aria-pressed="false">
                                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                         <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
                                                         <circle cx="12" cy="10" r="3"/>
                                                     </svg>
                                                 </button>
-                                                <button class="slam-action-btn" id="slam-live-fs-topview-btn"
-                                                        onclick="toggleSlamLiveTopView(!slamLiveViewer._topView)" title="Top View">
+                                                <button class="slam-action-btn ui-icon-btn" id="slam-live-fs-topview-btn"
+                                                        onclick="toggleSlamLiveTopView(!slamLiveViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
                                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                         <circle cx="12" cy="12" r="3"/>
                                                         <line x1="12" y1="2" x2="12" y2="6"/>
@@ -232,15 +233,15 @@
                                                         <line x1="18" y1="12" x2="22" y2="12"/>
                                                     </svg>
                                                 </button>
-                                                <button class="slam-action-btn" id="slam-live-snapshot-btn"
-                                                        onclick="takeSlamLiveSnapshot()" title="스냅샷 저장">
+                                                <button class="slam-action-btn ui-icon-btn" id="slam-live-snapshot-btn"
+                                                        onclick="takeSlamLiveSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
                                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                         <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
                                                         <circle cx="12" cy="13" r="4"/>
                                                     </svg>
                                                 </button>
-                                                <button class="slam-action-btn" id="slam-live-fullscreen-btn"
-                                                        onclick="toggleSlamLiveViewerFullscreen()" title="풀스크린">
+                                                <button class="slam-action-btn ui-icon-btn" id="slam-live-fullscreen-btn"
+                                                        onclick="toggleSlamLiveViewerFullscreen()" title="풀스크린" aria-label="풀스크린">
                                                     <svg id="slam-live-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                                         <polyline points="15 3 21 3 21 9"/>
                                                         <polyline points="9 21 3 21 3 15"/>
@@ -564,22 +565,22 @@
                                 <canvas id="loc-viewer-canvas"></canvas>
                                 <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
                                 <div id="loc-viewer-actions">
-                                    <button class="slam-action-btn" id="loc-reset-btn"
-                                            onclick="resetLocViewer()" title="Reset View">
+                                    <button class="slam-action-btn ui-icon-btn" id="loc-reset-btn"
+                                            onclick="resetLocViewer()" title="Reset View" aria-label="Reset View">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
                                             <polyline points="9 22 9 12 15 12 15 22"/>
                                         </svg>
                                     </button>
-                                    <button class="slam-action-btn" id="loc-follow-btn"
-                                            onclick="locLiveViewer && locLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
+                                    <button class="slam-action-btn ui-icon-btn" id="loc-follow-btn"
+                                            onclick="locLiveViewer && locLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글" aria-label="Follow 카메라 추종 토글" aria-pressed="false">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
                                             <circle cx="12" cy="10" r="3"/>
                                         </svg>
                                     </button>
-                                    <button class="slam-action-btn" id="loc-fs-topview-btn"
-                                            onclick="toggleLocTopView(!locLiveViewer._topView)" title="Top View">
+                                    <button class="slam-action-btn ui-icon-btn" id="loc-fs-topview-btn"
+                                            onclick="toggleLocTopView(!locLiveViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <circle cx="12" cy="12" r="3"/>
                                             <line x1="12" y1="2" x2="12" y2="6"/>
@@ -588,15 +589,15 @@
                                             <line x1="18" y1="12" x2="22" y2="12"/>
                                         </svg>
                                     </button>
-                                    <button class="slam-action-btn" id="loc-snapshot-btn"
-                                            onclick="takeLocSnapshot()" title="스냅샷 저장">
+                                    <button class="slam-action-btn ui-icon-btn" id="loc-snapshot-btn"
+                                            onclick="takeLocSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
                                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
                                             <circle cx="12" cy="13" r="4"/>
                                         </svg>
                                     </button>
-                                    <button class="slam-action-btn" id="loc-fullscreen-btn"
-                                            onclick="toggleLocViewerFullscreen()" title="풀스크린">
+                                    <button class="slam-action-btn ui-icon-btn" id="loc-fullscreen-btn"
+                                            onclick="toggleLocViewerFullscreen()" title="풀스크린" aria-label="풀스크린">
                                         <svg id="loc-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                                             <polyline points="15 3 21 3 21 9"/>
                                             <polyline points="9 21 3 21 3 15"/>

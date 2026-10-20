@@ -430,6 +430,23 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 [data-readonly="true"] p.ui-readonly-only { padding: 6px 12px 0; }
 [data-readonly="true"] :is(input, select, textarea):disabled { opacity: 0.55; cursor: not-allowed; }
 
+/* --- Live 뷰어(SLAM·Localization) 툴바는 오른쪽 위, 범례는 왼쪽 아래 (풀스크린에서도 컨테이너 안) --- */
+#slam-live-viewer-actions, #loc-viewer-actions { top: 12px; right: 12px; bottom: auto; z-index: 10; gap: 8px; }
+:is(#slam-live-viewer-actions, #loc-viewer-actions) .ui-icon-btn {
+    border-color: var(--color-line2); border-radius: var(--radius-sm); background: rgba(11, 14, 17, 0.85); color: var(--color-ink);
+}
+:is(#slam-live-viewer-actions, #loc-viewer-actions) .ui-icon-btn:hover { border-color: var(--color-line2); background: var(--color-raised); color: var(--color-ink); }
+:is(#slam-live-viewer-actions, #loc-viewer-actions) .ui-icon-btn.active {
+    border-color: rgba(108, 182, 255, 0.6); background: rgba(11, 14, 17, 0.85); color: var(--color-info);
+}
+#slam-live-legend {
+    top: auto; bottom: 12px; left: 12px; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 14px;
+    max-width: calc(100% - 24px); padding: 8px 12px;
+    border-color: var(--color-line2); border-radius: var(--radius-sm); background: rgba(11, 14, 17, 0.85);
+}
+#slam-live-legend .slam-live-legend-label { font-size: 12px; letter-spacing: 0; color: var(--color-ink); }
+.slam-live-legend-note { font-family: var(--font-mono); font-size: 11px; color: var(--color-mute); }
+
 /* --- Save Map 결과 뷰어. 오버레이 클래스는 Multi-Session 뷰어와 공용이라 이 뷰어 안에서만 덮는다 --- */
 #savemap-result-viewer { margin: 0; }
 #savemap-result-canvas-container { border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-viewer); }

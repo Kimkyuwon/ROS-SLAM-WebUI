@@ -404,6 +404,67 @@ def check_slam_restore_failed(page, failures):
     page.unroute_all(behavior='wait')
 
 
+def check_live_toolbars(page, failures):
+    """Live 뷰어(SLAM·Localization) 툴바: aria-label, show() 직후 Follow 켜짐 표시, Reset 뒤 Top View 꺼짐, 풀스크린 아이콘."""
+    go_screen(page, 'lidar-slam-subtab')
+    labels = page.evaluate("""() => [...document.querySelectorAll('#slam-live-viewer-actions button, #loc-viewer-actions button')]
+        .map(b => (b.getAttribute('aria-label') || '').trim())""")
+    if len(labels) != 10 or not all(labels):
+        failures.append(f'live toolbar: aria-label missing {labels}')
+    legend = page.locator('#slam-live-legend').text_content()
+    for text in ('LIO (원래 자세)', 'Pose Graph (최적화)', '지도: 최근 50 m'):
+        if text not in legend:
+            failures.append(f'live legend: {text!r} missing')
+    pressed_js = """(id) => { const b = document.getElementById(id);
+        return [b.classList.contains('active'), b.getAttribute('aria-pressed')]; }"""
+    # 미실행이면 상태 폴링이 Live 뷰어를 숨기므로 실행 중을 흉내 낸다.
+    # 구독 연결은 rosbridge 없이 끝나지 않을 수 있어 show()를 기다리지 않는다
+    mock_slam_running(page)
+    page.evaluate('() => { slamLiveViewer.show(); }')
+    page.wait_for_timeout(1000)
+    if page.evaluate(pressed_js, 'slam-live-follow-btn') != [True, 'true']:
+        failures.append(f"slam live: follow not shown ON after show() {page.evaluate(pressed_js, 'slam-live-follow-btn')}")
+    if page.evaluate(pressed_js, 'slam-live-fs-topview-btn') != [True, 'true']:
+        failures.append('slam live: top view not pressed after show()')
+    page.locator('#slam-live-reset-btn').click()
+    if page.evaluate(pressed_js, 'slam-live-fs-topview-btn') != [False, 'false']:
+        failures.append('slam live: top view still pressed after Reset')
+    shot(page, 'p2-slam-live-toolbar')
+    page.locator('#slam-live-fullscreen-btn').click()
+    page.wait_for_timeout(500)
+    icons = page.evaluate("""() => [!!document.fullscreenElement,
+        getComputedStyle(document.getElementById('slam-live-fullscreen-icon-expand')).display,
+        getComputedStyle(document.getElementById('slam-live-fullscreen-icon-collapse')).display]""")
+    if icons[0]:
+        if icons[1] != 'none' or icons[2] == 'none':
+            failures.append(f'slam live: fullscreen icon not switched {icons}')
+        page.evaluate('document.exitFullscreen()')
+        page.wait_for_timeout(300)
+    else:
+        print('INFO: headless fullscreen unavailable — fullscreen icon not checked')
+    page.evaluate('slamLiveViewer.hide()')
+    page.unroute_all(behavior='wait')
+
+    def fulfill_loc_running(route):
+        resp = route.fetch()
+        data = resp.json()
+        data['is_running'] = True
+        route.fulfill(response=resp, body=json.dumps(data))
+
+    page.route('**/api/localization/state', fulfill_loc_running)
+    go_screen(page, 'localization-subtab')
+    page.evaluate('() => { locLiveViewer.show(); }')
+    page.wait_for_timeout(1000)
+    if page.evaluate(pressed_js, 'loc-follow-btn') != [True, 'true']:
+        failures.append('loc live: follow not shown ON after show()')
+    page.locator('#loc-reset-btn').click()
+    if page.evaluate(pressed_js, 'loc-fs-topview-btn') != [False, 'false']:
+        failures.append('loc live: top view still pressed after Reset')
+    shot(page, 'p2-loc-live-toolbar')
+    page.evaluate('locLiveViewer.hide()')
+    page.unroute_all(behavior='wait')
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
@@ -430,6 +491,9 @@ if __name__ == '__main__':
         all_errors += [e for e in errors if e.startswith('pageerror')]
     with open_page() as (page, errors):
         check_slam_config_readonly(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_live_toolbars(page, failures)
         all_errors += errors
     with open_page() as (page, errors):
         check_slam_result_viewer(page, failures)

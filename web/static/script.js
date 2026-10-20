@@ -6603,6 +6603,14 @@ window.togglePlotDisplayPanel = togglePlotDisplayPanel;
 // ==============================================================
 // LocalizationLiveViewer - Localization 실시간 3D 뷰어
 // ==============================================================
+// 토글 버튼의 눌림 표시(active 클래스)와 aria-pressed를 함께 맞춘다
+function _setToggleBtnState(id, on) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+}
+
 class LocalizationLiveViewer {
     constructor() {
         this._scene = null;
@@ -6627,6 +6635,7 @@ class LocalizationLiveViewer {
         this._odomTopic = '/Odometry';
         this._robotPos = null;   // THREE.Vector3 — updated from /Odometry
         this._followMode = true; // camera follow toggle
+        this._followBtnId = 'loc-follow-btn';
         this._lastRobotAxisScale = undefined;
         this._mapMesh = null;
         this._mapTexture = null;
@@ -6881,6 +6890,7 @@ class LocalizationLiveViewer {
         await new Promise(resolve => requestAnimationFrame(resolve));
         this._resizeRenderer();
         this.toggleTopView(true);
+        _setToggleBtnState(this._followBtnId, this._followMode);
         await this._connectAndSubscribe();
     }
 
@@ -7659,6 +7669,7 @@ class LocalizationLiveViewer {
             toggle.checked = false;
             this._topView = false;
             this._savedCameraPos = null;
+            _setToggleBtnState('loc-fs-topview-btn', false);
         }
     }
 
@@ -7679,8 +7690,7 @@ class LocalizationLiveViewer {
 
     toggleFollow(force) {
         this._followMode = (force !== undefined) ? force : !this._followMode;
-        const btn = document.getElementById('loc-follow-btn');
-        if (btn) btn.classList.toggle('active', this._followMode);
+        _setToggleBtnState('loc-follow-btn', this._followMode);
     }
 
     toggleTopView(enable) {
@@ -7762,8 +7772,7 @@ class LocalizationLiveViewer {
         // header 체크박스 + fullscreen 버튼 active 상태 동기화
         const headerToggle = document.getElementById('loc-viewer-topview-toggle');
         if (headerToggle) headerToggle.checked = enable;
-        const fsBtn = document.getElementById('loc-fs-topview-btn');
-        if (fsBtn) fsBtn.classList.toggle('active', enable);
+        _setToggleBtnState('loc-fs-topview-btn', enable);
     }
 
     toggleFullscreen() {
@@ -7912,6 +7921,7 @@ class SlamLiveViewer {
         this._odomTopic = '/Odometry';
         this._robotPos   = null;   // THREE.Vector3 — updated from /Odometry
         this._followMode = true;   // camera follow toggle
+        this._followBtnId = 'slam-live-follow-btn';
         this._knownFrames = new Set();
 
         this._topView = false;
@@ -8192,6 +8202,7 @@ class SlamLiveViewer {
         await new Promise(resolve => requestAnimationFrame(resolve));
         this._resizeRenderer();
         this.toggleTopView(true);
+        _setToggleBtnState(this._followBtnId, this._followMode);
         await this._connectAndSubscribe();
     }
 
@@ -9002,6 +9013,7 @@ class SlamLiveViewer {
             toggle.checked = false;
             this._topView = false;
             this._savedCameraPos = null;
+            _setToggleBtnState('slam-live-fs-topview-btn', false);
         }
     }
 
@@ -9033,8 +9045,7 @@ class SlamLiveViewer {
 
     toggleFollow(force) {
         this._followMode = (force !== undefined) ? force : !this._followMode;
-        const btn = document.getElementById('slam-live-follow-btn');
-        if (btn) btn.classList.toggle('active', this._followMode);
+        _setToggleBtnState('slam-live-follow-btn', this._followMode);
     }
 
     toggleTopView(enable) {
@@ -9110,8 +9121,7 @@ class SlamLiveViewer {
 
         const headerToggle = document.getElementById('slam-live-topview-toggle');
         if (headerToggle) headerToggle.checked = enable;
-        const fsBtn = document.getElementById('slam-live-fs-topview-btn');
-        if (fsBtn) fsBtn.classList.toggle('active', enable);
+        _setToggleBtnState('slam-live-fs-topview-btn', enable);
     }
 
     toggleFullscreen() {
@@ -11080,6 +11090,13 @@ function toggle3DViewerFullscreen() {
     }
 }
 
+function _updateSlamLiveFullscreenIcon(isFullscreen) {
+    const expand = document.getElementById('slam-live-fullscreen-icon-expand');
+    const collapse = document.getElementById('slam-live-fullscreen-icon-collapse');
+    if (expand) expand.style.display = isFullscreen ? 'none' : '';
+    if (collapse) collapse.style.display = isFullscreen ? '' : 'none';
+}
+
 function _updateViewerFullscreenIcon(isFullscreen) {
     const expand = document.getElementById('viewer-fullscreen-icon-expand');
     const collapse = document.getElementById('viewer-fullscreen-icon-collapse');
@@ -11093,10 +11110,12 @@ document.addEventListener('fullscreenchange', () => {
     const isSaveMapFullscreen = isFullscreen && document.fullscreenElement?.id === 'savemap-result-canvas-container';
     const isViewerFullscreen  = isFullscreen && document.fullscreenElement?.id === '3d-viewer-container';
     const isLocFullscreen     = isFullscreen && document.fullscreenElement?.id === 'loc-viewer-canvas-container';
+    const isSlamLiveFullscreen = isFullscreen && document.fullscreenElement?.id === 'slam-live-canvas-container';
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
     _updateLocFullscreenIcon(isLocFullscreen);
+    _updateSlamLiveFullscreenIcon(isSlamLiveFullscreen);
     if (slamResultViewer) {
         slamResultViewer._resizeRenderer();
         slamResultViewer._syncControlStates();
@@ -11115,10 +11134,12 @@ document.addEventListener('webkitfullscreenchange', () => {
     const isSaveMapFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'savemap-result-canvas-container';
     const isViewerFullscreen  = isFullscreen && document.webkitFullscreenElement?.id === '3d-viewer-container';
     const isLocFullscreen     = isFullscreen && document.webkitFullscreenElement?.id === 'loc-viewer-canvas-container';
+    const isSlamLiveFullscreen = isFullscreen && document.webkitFullscreenElement?.id === 'slam-live-canvas-container';
     _updateSlamFullscreenIcon(isSlamFullscreen);
     _updateSaveMapFullscreenIcon(isSaveMapFullscreen);
     _updateViewerFullscreenIcon(isViewerFullscreen);
     _updateLocFullscreenIcon(isLocFullscreen);
+    _updateSlamLiveFullscreenIcon(isSlamLiveFullscreen);
     if (slamResultViewer) {
         slamResultViewer._resizeRenderer();
         slamResultViewer._syncControlStates();
