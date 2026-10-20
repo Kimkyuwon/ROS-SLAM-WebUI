@@ -40,6 +40,10 @@ const uiShell = (() => {
     const ANALYTICS_STALE_MS = 3000;
     const lastAnalyticsAt = { slam: 0, loc: 0 };
     let lastSlamState = null;
+    let lastLocState = null;
+    // 시작 실패 감시는 Task 2.11이 이 값을 바꾼다
+    let locStartFailed = false;
+    let locNotInitSince = 0;
 
     function readNumber(id) {
         const el = document.getElementById(id);
@@ -57,6 +61,11 @@ const uiShell = (() => {
 
     function onSlamState(state) {
         lastSlamState = state;
+        refresh();
+    }
+
+    function onLocState(state) {
+        lastLocState = state;
         refresh();
     }
 
@@ -139,8 +148,8 @@ const uiShell = (() => {
     }
 
     // 새로고침으로 실행 중 화면에 들어온 경우도 잠근다. 입력은 상태가 바뀔 때만 다시 써서 0.5초 폴링 부담을 피한다
-    function renderSlamConfigLock(locked) {
-        const cfgEl = document.getElementById('slam-config-container');
+    function renderConfigLock(containerId, locked) {
+        const cfgEl = document.getElementById(containerId);
         if (!cfgEl) return;
         if (cfgEl.dataset.readonly !== String(locked)) uiKit.setReadonly(cfgEl, locked);
         cfgEl.querySelectorAll('.ui-panel-footer .ui-btn').forEach((btn) => {
@@ -174,7 +183,46 @@ const uiShell = (() => {
         const empty = document.getElementById('lidar-slam-viewer-empty');
         if (empty) renderSlamEmpty(empty, input, liveEl, resultEl);
         if (input.resultVisible) renderSaveMapResultDir();
-        renderSlamConfigLock(input.isRunning || input.starting || input.stopping);
+        renderConfigLock('slam-config-container', input.isRunning || input.starting || input.stopping);
+    }
+
+    // 노드는 원점에서 스스로 초기화를 시도하므로, 이 시간이 지나도 Not Init이면 안내를 보인다 (임의 값)
+    const LOC_INIT_HINT_MS = 10000;
+
+    function renderLoc() {
+        const isRunning = Boolean(lastLocState && lastLocState.is_running);
+        const badge = document.getElementById('loc-header-init-badge');
+        const summaryLoc = lastSummary ? lastSummary.localization.running : null;
+        const input = {
+            isRunning,
+            starting: Boolean(window._locStarting),
+            stopping: Boolean(window._locStopping),
+            initialized: Boolean(badge && badge.classList.contains('ok')),
+            external: isRunning && summaryLoc === false,
+            stale: isAnalyticsStale('loc'),
+            lastStartFailed: locStartFailed,
+        };
+        const v = UiStatusLogic.deriveLocView(input);
+        uiKit.setStatusBadge(document.getElementById('localization-header-badge'), v.tone, v.text);
+        uiKit.renderStepper(document.getElementById('localization-stepper'), UiStatusLogic.LOC_STEPS, v.step);
+        uiKit.setEnabled(document.getElementById('localization-start-button'), v.buttons.start);
+        uiKit.setEnabled(document.getElementById('localization-stop-button'), v.buttons.stop,
+            v.text.includes('외부') ? '웹 UI가 시작하지 않은 Localization입니다' : '');
+        const mapInput = document.querySelector('#localization-config-parameters [data-config-key$="map_file_path"]');
+        const mapPath = document.getElementById('localization-map-path');
+        // map_file_path는 FAST_LIO 소스 폴더 기준 상대 경로 (laserLocalization.cpp:1544)
+        if (mapPath) mapPath.textContent = mapInput ? `FAST_LIO/${mapInput.value}` : '-';
+        const live = document.getElementById('localization-live-viewer');
+        const empty = document.getElementById('localization-viewer-empty');
+        if (empty) empty.hidden = Boolean(live && live.style.display !== 'none');
+        renderConfigLock('localization-config-container', input.isRunning || input.starting || input.stopping);
+
+        const notInit = isRunning && !input.initialized && !input.external && !input.stale
+            && !input.starting && !input.stopping;
+        if (!notInit) locNotInitSince = 0;
+        else if (!locNotInitSince) locNotInitSince = performance.now();
+        const hint = document.getElementById('localization-init-hint');
+        if (hint) hint.hidden = !(notInit && performance.now() - locNotInitSince > LOC_INIT_HINT_MS);
     }
 
     function refresh() {
@@ -183,6 +231,10 @@ const uiShell = (() => {
         if (!screenEl) return;
         if (screenEl.id === 'lidar-slam-subtab') {
             renderSlam();
+            return;
+        }
+        if (screenEl.id === 'localization-subtab') {
+            renderLoc();
             return;
         }
         const badge = screenEl.querySelector('.ui-screen-header .ui-status-badge');
@@ -266,7 +318,7 @@ const uiShell = (() => {
     }
 
     return {
-        SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, noteAnalytics, onSaveMapRestoreFailed,
+        SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, onLocState, noteAnalytics, onSaveMapRestoreFailed,
         onRosbridgeState, onLatency, onDomainId, onBackendWsState,
         get lastSummary() { return lastSummary; },
     };

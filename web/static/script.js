@@ -105,6 +105,7 @@ const heliprState = {
 
 // bag-format select 공통 라벨 (Bag Recorder, File Player 데이터셋 변환 공통 사용)
 const BAG_FORMAT_LABELS = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
+const LOC_RESTORE_HOLDOFF_MS = 3000;  // DDS 퍼블리셔 수 반영 지연 동안 재출현 방지 (실측 필요)
 
 // Cached DOM elements
 const domCache = {
@@ -3493,7 +3494,9 @@ function updateLocalizationStatus(status) {
 }
 
 async function updateLocalizationState() {
+    const reqAt = performance.now();
     const state = await apiCall('/api/localization/state');
+    if (reqAt < (window._locStoppedAt || 0)) return;   // Stop 전에 보낸 요청의 늦은 응답은 버림
     if (state) {
         const localizationStatus = domCache.get('localization-status');
         if (localizationStatus) {
@@ -3517,7 +3520,9 @@ async function updateLocalizationState() {
         }
         // 재진입 복원: locLiveViewer + Analytics Dashboard
         if (typeof locLiveViewer !== 'undefined') {
-            if (state.is_running) {
+            const locHoldoff = window._locStoppedAt
+                && performance.now() - window._locStoppedAt <= LOC_RESTORE_HOLDOFF_MS;
+            if (state.is_running && !window._locStopping && !locHoldoff) {
                 if (!locLiveViewer._visible) locLiveViewer.show();
                 if (typeof locAnalyticsDashboard !== 'undefined') {
                     const dashEl = document.getElementById('loc-analytics-dashboard');
@@ -3530,6 +3535,7 @@ async function updateLocalizationState() {
                 if (locLiveViewer._visible) locLiveViewer.hide();
             }
         }
+        if (window.uiShell) uiShell.onLocState(state);
     }
 }
 
@@ -3537,6 +3543,7 @@ async function updateLocalizationState() {
 // Localization Start/Stop (terminal output removed)
 // ==============================================================
 async function startLocalizationMapping() {
+    window._locStarting = true;
     // Config 패널 숨기기 (Stop 시 복원용으로 상태 저장)
     const _cfgEl = document.getElementById('localization-config-container');
     if (_cfgEl) {
@@ -3545,7 +3552,13 @@ async function startLocalizationMapping() {
     }
     updateLocalizationStatus('Running');
 
-    const result = await apiCall('/api/localization/start_mapping', {});
+    let result;
+    try {
+        result = await apiCall('/api/localization/start_mapping', {});
+    } finally {
+        window._locStarting = false;
+        if (window.uiShell) uiShell.refresh();
+    }
     if (result.success) {
         console.log('Localization mapping started');
         locLiveViewer.show();
@@ -3559,6 +3572,8 @@ async function startLocalizationMapping() {
 }
 
 async function stopLocalizationMapping() {
+    window._locStopping = true;
+    if (window.uiShell) uiShell.refresh();
     // Start 전에 Config 패널이 열려 있었으면 복원
     const _cfgEl = document.getElementById('localization-config-container');
     if (_cfgEl && window._locConfigVisibleBeforeStart) {
@@ -3571,8 +3586,11 @@ async function stopLocalizationMapping() {
     const result = await apiCall('/api/localization/stop_mapping', {});
 
     locLiveViewer.hide();
+    window._locStoppedAt = performance.now();
     locAnalyticsDashboard.hide();
     locAnalyticsDashboard.unsubscribe();
+    window._locStopping = false;
+    if (window.uiShell) uiShell.refresh();
 
     if (result.success) {
         console.log('Localization mapping stopped');
@@ -11901,6 +11919,10 @@ function toggleSlamAnalyticsDetail() {
 // ══════════════════════════════════════════════════════════════════════
 // LocAnalyticsDashboard — Localization Analytics Dashboard
 // ══════════════════════════════════════════════════════════════════════
+const LOC_DETAIL_BTN_TEXT = 'Full Statistics · 31 항목';
+const LOC_RUG_UPDATED_COLOR = 'rgba(63, 208, 122, 0.7)';
+const LOC_RUG_SKIPPED_COLOR = '#323A45';
+
 class LocAnalyticsDashboard {
     constructor() {
         this._ros          = null;
@@ -11916,7 +11938,20 @@ class LocAnalyticsDashboard {
         this._lastUpdateMs = null;
         this._pendingMsg   = null;
         this._rafId        = null;
+        this._MAX_TRACE_POINTS = 400; // Plotly trace 무한 누적 방지 (SLAM과 동일)
+        this._spark        = { match: [], lid: [] };
         this._fetchSysInfo();
+        // 오른쪽 칸 폭이 바뀌면 Plotly와 러그 캔버스는 스스로 따라가지 않는다
+        const dashEl = document.getElementById('loc-analytics-dashboard');
+        if (dashEl && window.ResizeObserver) {
+            new ResizeObserver(() => {
+                ['loc-analytics-chart-proctime', 'loc-analytics-chart-dop'].forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el && el.data) Plotly.Plots.resize(el);
+                });
+                this._initRug();
+            }).observe(dashEl);
+        }
     }
 
     async _fetchSysInfo() {
@@ -11965,6 +12000,7 @@ class LocAnalyticsDashboard {
             queue_length: 1
         });
         this._subscription.subscribe((msg) => {
+            if (window.uiShell) uiShell.noteAnalytics('loc');
             this._pendingMsg = msg;
             if (this._rafId == null) {
                 this._rafId = requestAnimationFrame(() => this._flushPending());
@@ -12029,11 +12065,11 @@ class LocAnalyticsDashboard {
     // ── Plotly 초기화 (SLAM과 동일 스펙) ────────────────────────
     _initProcTimePlot() {
         const layout = {
-            paper_bgcolor: 'transparent', plot_bgcolor: 'rgba(13,13,26,0.5)',
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
             margin: { t: 4, b: 30, l: 42, r: 8 },
-            xaxis: { showgrid:false, color:'#556', tickfont:{size:9,color:'#556'}, nticks:5, type:'date' },
-            yaxis: { gridcolor:'#2d2d4e', color:'#556', tickfont:{size:9,color:'#8899aa'}, title:{text:'ms',font:{size:10,color:'#556'}} },
-            legend: { orientation:'h', y:-0.22, x:0, font:{size:9,color:'#c8d6e5'}, bgcolor:'transparent' },
+            xaxis: { showgrid:false, color:'#5D6773', tickfont:{size:9,color:'#5D6773'}, nticks:5, type:'date' },
+            yaxis: { gridcolor:'#252B33', color:'#5D6773', tickfont:{size:9,color:'#8B95A1'}, title:{text:'ms',font:{size:10,color:'#556'}} },
+            legend: { orientation:'h', y:-0.22, x:0, font:{size:9,color:'#8B95A1'}, bgcolor:'transparent' },
             hovermode: 'x unified',
             hoverlabel: { bgcolor:'#1a1a35', bordercolor:'#4a4a6e', font:{color:'#e8f0fe',size:11}, align:'left' }
         };
@@ -12047,11 +12083,11 @@ class LocAnalyticsDashboard {
 
     _initDopPlot() {
         const layout = {
-            paper_bgcolor: 'transparent', plot_bgcolor: 'rgba(13,13,26,0.5)',
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
             margin: { t: 4, b: 28, l: 36, r: 8 },
-            xaxis: { showgrid:false, color:'#556', tickfont:{size:9,color:'#556'}, nticks:5, type:'date' },
-            yaxis: { gridcolor:'#2d2d4e', color:'#556', tickfont:{size:9,color:'#8899aa'}, title:{text:'DOP',font:{size:10,color:'#556'}}, range:[0,10] },
-            legend: { orientation:'h', y:-0.28, x:0, font:{size:9,color:'#c8d6e5'}, bgcolor:'transparent' },
+            xaxis: { showgrid:false, color:'#5D6773', tickfont:{size:9,color:'#5D6773'}, nticks:5, type:'date' },
+            yaxis: { gridcolor:'#252B33', color:'#5D6773', tickfont:{size:9,color:'#8B95A1'}, title:{text:'DOP',font:{size:10,color:'#556'}}, range:[0,10] },
+            legend: { orientation:'h', y:-0.28, x:0, font:{size:9,color:'#8B95A1'}, bgcolor:'transparent' },
             hovermode: 'x unified',
             hoverlabel: { bgcolor:'#1a1a35', bordercolor:'#4a4a6e', font:{color:'#e8f0fe',size:11}, align:'left' }
         };
@@ -12095,7 +12131,8 @@ class LocAnalyticsDashboard {
         this._rugCanvas = document.getElementById('loc-rug-canvas');
         if (!this._rugCanvas) return;
         const track = this._rugCanvas.parentElement;
-        this._rugCanvas.width  = track.clientWidth  || 400;
+        if (!track.clientWidth) return;   // 숨김 상태: 보일 때 ResizeObserver가 다시 부른다
+        this._rugCanvas.width  = track.clientWidth;
         this._rugCanvas.height = track.clientHeight || 12;
         this._drawRug();
     }
@@ -12109,14 +12146,16 @@ class LocAnalyticsDashboard {
         const cell = W / N;
         ctx.clearRect(0, 0, W, H);
         this._rugHistory.forEach((updated, i) => {
-            ctx.fillStyle = updated ? '#ffd32a' : '#1a1a35';
+            ctx.fillStyle = updated ? LOC_RUG_UPDATED_COLOR : LOC_RUG_SKIPPED_COLOR;
             ctx.fillRect(Math.floor(i * cell), 0, Math.max(Math.ceil(cell), 1), H);
         });
     }
 
     // ── Widget updates ───────────────────────────────────────────
     _updateWidgets(msg) {
+        this._updateMatchCard(msg);
         this._updateHzCard(msg);
+        this._updateWheelCard(msg);
         this._updateTrajCard(msg);
         this._updateCpuCard(msg);
         this._updateRamCard(msg);
@@ -12126,6 +12165,42 @@ class LocAnalyticsDashboard {
         this._updateRug(msg);
         this._updateInitBadge(msg);
         this._updateDetailSection(msg);
+    }
+
+    _pushSpark(key, value, max) {
+        const values = this._spark[key];
+        values.push(value);
+        if (values.length > 60) values.shift();
+        uiKit.renderSparkline(document.getElementById(`loc-analytics-spark-${key}`), values, max);
+    }
+
+    // 0.5 기준은 임의 값 — 실데이터로 조정
+    _updateMatchCard(msg) {
+        const valEl = document.getElementById('loc-analytics-match-ratio');
+        if (!valEl) return;
+        const ratio = Number(msg.match_ratio) || 0;
+        const low = ratio < 0.5;
+        valEl.textContent = ratio.toFixed(2);
+        const kpi = document.getElementById('loc-kpi-match');
+        if (kpi) kpi.dataset.tone = low ? 'warn' : 'go';
+        const hint = document.getElementById('loc-analytics-match-hint');
+        if (hint) hint.textContent = low ? '낮음' : 'OK';
+        this._pushSpark('match', ratio, 1);
+    }
+
+    // odom_mode 0이면 노드가 linear_velo를 채우지 않는다 (laserLocalization.cpp:880-882)
+    _updateWheelCard(msg) {
+        const el = document.getElementById('loc-analytics-wheel-velo');
+        if (!el) return;
+        const odomInput = document.querySelector('#localization-config-parameters [data-config-key$="odom_mode"]');
+        const off = Boolean(odomInput) && odomInput.value !== '' && Number(odomInput.value) === 0;
+        if (off) {
+            el.textContent = '휠 오도메트리 꺼짐 (odom_mode 0)';
+            el.dataset.off = 'true';
+        } else {
+            el.textContent = `${(Number(msg.linear_velo) || 0).toFixed(2)} m/s`;
+            delete el.dataset.off;
+        }
     }
 
     _updateHzCard(msg) {
@@ -12139,6 +12214,7 @@ class LocAnalyticsDashboard {
         };
         setHz(imuEl, msg.imu_freq || 0);
         setHz(lidEl, msg.lid_freq || 0);
+        this._pushSpark('lid', msg.lid_freq || 0);
     }
 
     _updateTrajCard(msg) {
@@ -12215,7 +12291,7 @@ class LocAnalyticsDashboard {
         const total = (msg.total_time || 0) * 1000;
         Plotly.extendTraces('loc-analytics-chart-proctime', {
             x: [[x],[x],[x],[x]], y: [[imu],[state],[map],[total]]
-        }, [0,1,2,3]);
+        }, [0,1,2,3], this._MAX_TRACE_POINTS);
         Plotly.relayout('loc-analytics-chart-proctime', {
             'xaxis.range': [new Date(now - this._WINDOW_SEC * 1000), x]
         });
@@ -12228,7 +12304,7 @@ class LocAnalyticsDashboard {
         const match= msg.matching_dop || 0;
         Plotly.extendTraces('loc-analytics-chart-dop', {
             x: [[x],[x]], y: [[scan],[match]]
-        }, [0,1]);
+        }, [0,1], this._MAX_TRACE_POINTS);
         const dopMax = Math.max(scan, match, 1);
         Plotly.relayout('loc-analytics-chart-dop', {
             'xaxis.range': [new Date(now - this._WINDOW_SEC * 1000), x],
@@ -12296,6 +12372,7 @@ class LocAnalyticsDashboard {
 
         const rugBadge = document.getElementById('loc-init-status-dot');
         if (rugBadge) { rugBadge.textContent = text; rugBadge.className = `loc-init-status-dot ${cls}`; }
+        if (window.uiShell) uiShell.refresh();
     }
 
     _updateDetailSection(msg) {
@@ -12354,6 +12431,25 @@ class LocAnalyticsDashboard {
         if (ramSub) ramSub.textContent = '';
         const ramBar = document.getElementById('loc-analytics-ram-bar-fill');
         if (ramBar) ramBar.style.width = '0%';
+        const matchEl = document.getElementById('loc-analytics-match-ratio');
+        if (matchEl) matchEl.textContent = '—';
+        const wheelEl = document.getElementById('loc-analytics-wheel-velo');
+        if (wheelEl) { wheelEl.textContent = '—'; delete wheelEl.dataset.off; }
+        const matchKpi = document.getElementById('loc-kpi-match');
+        if (matchKpi) delete matchKpi.dataset.tone;
+        const matchHint = document.getElementById('loc-analytics-match-hint');
+        if (matchHint) matchHint.textContent = '';
+        this._spark = { match: [], lid: [] };
+        ['match', 'lid'].forEach((key) => {
+            uiKit.renderSparkline(document.getElementById(`loc-analytics-spark-${key}`), []);
+        });
+        const headerBadge = document.getElementById('loc-header-init-badge');
+        if (headerBadge) { headerBadge.textContent = '— Not Init'; headerBadge.classList.remove('ok', 'bad'); }
+        const rugBadge = document.getElementById('loc-init-status-dot');
+        if (rugBadge) { rugBadge.textContent = '— Not Init'; rugBadge.classList.remove('ok', 'bad'); }
+        document.querySelectorAll('#loc-analytics-detail .analytics-detail-val').forEach((el) => {
+            el.textContent = '—';
+        });
         this._rugHistory.fill(false);
         this._drawRug();
         this._speedBuf = { timestamps: [], traj_dist: [] };
@@ -12364,7 +12460,10 @@ class LocAnalyticsDashboard {
         const section = document.getElementById('loc-analytics-detail');
         const btn     = document.getElementById('loc-analytics-detail-toggle');
         if (section) section.classList.remove('open');
-        if (btn)     btn.classList.remove('open');
+        if (btn) {
+            btn.classList.remove('open');
+            btn.textContent = LOC_DETAIL_BTN_TEXT;
+        }
         this._plotsInit = false;
     }
 }
@@ -12380,5 +12479,5 @@ function toggleLocAnalyticsDetail() {
     btn.classList.toggle('open', isOpen);
     btn.textContent = isOpen
         ? 'Collapse Statistics'
-        : 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · DOP · Loc Status · Odometry …)';
+        : LOC_DETAIL_BTN_TEXT;
 }

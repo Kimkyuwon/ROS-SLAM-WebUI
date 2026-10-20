@@ -529,6 +529,33 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 .ui-analytics .analytics-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ui-analytics .analytics-detail-item { gap: 8px; min-width: 0; background: rgba(11, 14, 17, 0.6); }
 
+/* --- Localization 헤더·Analytics 보강 (KPI·차트 규칙은 위 .ui-analytics 것을 그대로 쓴다) --- */
+.ui-map-path { margin-right: 8px; }
+.ui-map-path .ui-mono { color: var(--color-ink); }
+#localization-init-hint { color: var(--color-warn); }
+.ui-analytics .ui-panel-header .loc-init-badge {
+    padding: 2px 8px; border: 1px solid var(--color-line2); border-radius: var(--radius-xs); background: none;
+    font-family: var(--font-mono); font-size: 11px; font-weight: 500; color: var(--color-mute);
+}
+.ui-analytics .loc-init-badge.ok { border-color: rgba(63, 208, 122, 0.55); color: var(--color-go); background: none; }
+.ui-analytics .loc-init-badge.bad { border-color: rgba(240, 97, 109, 0.55); color: var(--color-stop); background: none; }
+#loc-analytics-wheel-velo[data-off] { font-size: 13px; line-height: 1.7; font-weight: 400; color: var(--color-mute); }
+.ui-analytics-minor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; margin: 0; font-size: 11px; }
+.ui-analytics-minor > div { display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+.ui-analytics-minor dt { color: var(--color-dim); }
+.ui-analytics-minor dd { margin: 0; color: var(--color-ink); font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.ui-analytics-minor .analytics-hz-value, .ui-analytics-minor .analytics-traj-value, .ui-analytics-minor .analytics-traj-derived { font-weight: 400; }
+.ui-loc-rug .loc-map-rug-track { height: 28px; border: 1px solid var(--color-line); border-radius: var(--radius-xs); background: var(--color-bg); }
+.ui-loc-rug-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 8px; font-size: 11px; color: var(--color-mute); }
+.ui-loc-rug-key { display: inline-flex; align-items: center; gap: 6px; cursor: help; }
+.ui-loc-rug-key::before { content: ''; width: 8px; height: 8px; border-radius: 1px; background: var(--ui-rug-color); }
+.ui-loc-rug-key[data-kind="updated"] { --ui-rug-color: rgba(63, 208, 122, 0.7); }
+.ui-loc-rug-key[data-kind="skipped"] { --ui-rug-color: var(--color-line2); }
+.ui-loc-rug .loc-map-update-dot { background: var(--color-line2); }
+.ui-loc-rug .loc-init-status-dot { margin-left: auto; padding: 0; background: none; font-family: var(--font-mono); font-size: 11px; font-weight: 400; color: var(--color-mute); }
+.ui-loc-rug .loc-init-status-dot.ok { color: var(--color-go); background: none; }
+.ui-loc-rug .loc-init-status-dot.bad { color: var(--color-stop); background: none; }
+
 /* --- 포커스 (키보드 조작만 표시) --- */
 [class^="ui-"]:focus-visible, [class*=" ui-"]:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 .ui-input:focus-visible, .ui-select:focus-visible { outline: none; }

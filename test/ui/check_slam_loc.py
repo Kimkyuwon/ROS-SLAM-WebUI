@@ -465,6 +465,211 @@ def check_live_toolbars(page, failures):
     page.unroute_all(behavior='wait')
 
 
+def check_loc_ready(page, failures):
+    """Localization 진입: 단계 Config, Start 활성, 지도 경로(.pcd), 8/4 배치, Config 버튼이 패널 안."""
+    go_screen(page, 'localization-subtab')
+    page.wait_for_selector('#localization-config-parameters [data-config-key]', state='attached')
+    page.wait_for_timeout(800)
+    step = current_step_text(page, 'localization-stepper')
+    if step != 'Config':
+        failures.append(f'loc: current step {step!r} != Config')
+    start = page.locator('#localization-header-actions #localization-start-button')
+    if not start.count() or not start.is_enabled():
+        failures.append('loc: start button missing in header or disabled')
+    map_path = page.evaluate("() => { const el = document.getElementById('localization-map-path'); return el ? el.textContent : ''; }")
+    if '.pcd' not in map_path or not map_path.startswith('FAST_LIO/'):
+        failures.append(f'loc: map path {map_path!r}')
+    if not page.locator('.ui-col-main #localization-viewer-empty').is_visible():
+        failures.append('loc: empty viewer not visible')
+    if not page.locator('.ui-col-side #localization-config-container .ui-btn[onclick*="loadLocalizationConfig"]').is_visible():
+        failures.append('loc: Config Load not visible in config panel')
+    shot(page, 'p2-loc-ready')
+
+
+def check_loc_stop_late_state(page, failures):
+    """Stop 전에 보낸 상태 요청이 늦게 is_running=true로 와도 Live 뷰어가 다시 뜨지 않는다."""
+    go_screen(page, 'localization-subtab')
+    held = []
+
+    def as_running(route):
+        resp = route.fetch()
+        data = resp.json()
+        data['is_running'] = True
+        route.fulfill(response=resp, body=json.dumps(data))
+
+    # 첫 요청은 붙잡아 늦게 돌려주고, 뒤 요청도 running으로 답한다 (Stop 직후 DDS 반영 지연 흉내)
+    def handle(route):
+        if not held:
+            held.append(route)
+        else:
+            as_running(route)
+
+    page.on('dialog', lambda d: d.dismiss())
+    page.route('**/api/localization/state', handle)
+    page.wait_for_timeout(700)
+    page.evaluate('() => { stopLocalizationMapping(); }')
+    page.wait_for_timeout(1500)
+    if held:
+        as_running(held[0])
+    else:
+        failures.append('loc stop: state request not intercepted')
+    # Stop 2초 뒤 (LOC_RESTORE_HOLDOFF_MS 3초 안) 확인
+    page.wait_for_timeout(500)
+    if page.locator('#localization-live-viewer').is_visible():
+        failures.append('loc stop: live viewer reappeared from a late state response')
+    page.evaluate('locLiveViewer.hide()')
+    page.unroute_all(behavior='wait')
+
+
+FAKE_LOC_JS = """(args) => {
+    const [n, init, ratio, updated] = args;
+    for (let i = 0; i < n; i++) {
+        locAnalyticsDashboard._onMessage({
+            imu_freq: 200, lid_freq: 10, cpu_usage: 41, ram_usage: 900, traj_dist: 12 + i * 0.1, run_time: 30 + i,
+            imu_time: 0.002, state_time: 0.008, map_time: 0.004, total_time: 0.02,
+            scan_dop: 0.5, matching_dop: 0.4, dop_ratio: 0.7, match_ratio: ratio, linear_velo: 0.84,
+            is_initialized: init, map_updated: updated && i % 2 === 0,
+            imu_mean: 0.002, imu_max: 0.004, state_mean: 0.008, state_max: 0.012,
+            map_mean: 0.004, map_max: 0.009, total_mean: 0.02, total_max: 0.03,
+            scan_size: 1234, kf_count: 3,
+        });
+    }
+}"""
+
+LOC_STATE_RUNNING = '**/api/localization/state'
+
+
+def loc_config_lock_state(page):
+    return page.evaluate("""() => {
+        const c = document.getElementById('localization-config-container');
+        const inputs = [...c.querySelectorAll('input, select, textarea')];
+        const btns = [...c.querySelectorAll('.ui-panel-footer .ui-btn')];
+        const hint = c.querySelector('p.ui-readonly-only');
+        return {
+            visible: c.offsetParent !== null,
+            inputs: inputs.length,
+            inputsDisabled: inputs.filter(el => el.disabled).length,
+            btnsDisabled: btns.filter(el => el.disabled).length,
+            hintVisible: Boolean(hint && hint.offsetParent !== null),
+        };
+    }""")
+
+
+def check_loc_running(page, failures):
+    """실행 중(상태 API를 가짜로): Not Init 배지·읽기 전용 Config·10초 뒤 안내, 메시지 뒤 Initialized · Tracking, KPI·러그·리셋."""
+    go_screen(page, 'localization-subtab')
+    page.wait_for_selector('#localization-config-parameters [data-config-key]', state='attached')
+
+    def as_running(route):
+        resp = route.fetch()
+        data = resp.json()
+        data['is_running'] = True
+        route.fulfill(response=resp, body=json.dumps(data))
+
+    def summary_running(route):
+        resp = route.fetch()
+        body = resp.json()
+        body['data']['localization']['running'] = True
+        route.fulfill(response=resp, body=json.dumps(body))
+
+    page.route(LOC_STATE_RUNNING, as_running)
+    page.route('**/api/system/status_summary', summary_running)
+    page.wait_for_timeout(3000)  # 요약 폴링 2초 주기
+    try:
+        text = badge_text(page, 'localization-header-badge')
+        if text != 'Running · Not Init':
+            failures.append(f'loc running: badge {text!r} != Running · Not Init')
+        if page.locator('#localization-start-button').is_enabled() or not page.locator('#localization-stop-button').is_enabled():
+            failures.append('loc running: start/stop button state')
+        st = loc_config_lock_state(page)
+        if not st['visible'] or not st['inputs'] or st['inputsDisabled'] != st['inputs']:
+            failures.append(f'loc running: config not read-only {st}')
+        if st['btnsDisabled'] != 2 or not st['hintVisible']:
+            failures.append(f'loc running: footer buttons/hint {st}')
+        if page.locator('#localization-viewer-empty').is_visible():
+            failures.append('loc running: empty viewer still visible with live viewer')
+        if page.locator('#localization-init-hint').is_visible():
+            failures.append('loc running: init hint visible before 10s')
+        page.wait_for_timeout(10500)
+        if not page.locator('#localization-init-hint').is_visible():
+            failures.append('loc running: init hint not visible after 10s Not Init')
+
+        page.evaluate("document.querySelector('#localization-config-parameters [data-config-key$=\"odom_mode\"]').value = '0'")
+        page.evaluate(FAKE_LOC_JS, [450, True, 0.88, True])
+        page.wait_for_timeout(800)
+        text = badge_text(page, 'localization-header-badge')
+        if text != 'Initialized · Tracking':
+            failures.append(f'loc running: badge after init {text!r}')
+        step = current_step_text(page, 'localization-stepper')
+        if step != 'Tracking':
+            failures.append(f'loc running: step {step!r} != Tracking')
+        if page.locator('#localization-init-hint').is_visible():
+            failures.append('loc running: init hint visible after Initialized')
+        if page.locator('#loc-analytics-match-ratio').inner_text().strip() != '0.88':
+            failures.append('loc analytics: match ratio not 0.88')
+        wheel = page.locator('#loc-analytics-wheel-velo').inner_text().strip()
+        if wheel != '휠 오도메트리 꺼짐 (odom_mode 0)':
+            failures.append(f'loc analytics: wheel text {wheel!r} with odom_mode 0')
+        shot(page, 'p2-loc-running')
+        page.evaluate("document.querySelector('#localization-config-parameters [data-config-key$=\"odom_mode\"]').value = '1'")
+        page.evaluate(FAKE_LOC_JS, [1, True, 0.3, False])
+        wheel = page.locator('#loc-analytics-wheel-velo').inner_text().strip()
+        if wheel != '0.84 m/s':
+            failures.append(f'loc analytics: wheel text {wheel!r} with odom_mode 1')
+        if page.locator('#loc-kpi-match').get_attribute('data-tone') != 'warn' \
+                or page.locator('#loc-analytics-match-hint').inner_text().strip() != '낮음':
+            failures.append('loc analytics: low match ratio not warn/낮음')
+        counts = page.evaluate("""() => ['loc-analytics-chart-proctime', 'loc-analytics-chart-dop']
+            .map(id => Math.max(...document.getElementById(id).data.map(t => t.x.length)))""")
+        if max(counts) > 400:
+            failures.append(f'loc analytics: trace points {counts} exceed 400')
+        spark = page.evaluate("""() => {
+            const line = document.querySelector('#loc-analytics-spark-match polyline');
+            return line ? line.getAttribute('points').split(' ').length : 0;
+        }""")
+        if spark < 30:
+            failures.append(f'loc analytics: match sparkline has {spark} points')
+        rug = page.locator('#loc-analytics-dashboard .ui-loc-rug').inner_text()
+        if 'Map update' not in rug or '업데이트됨' not in rug or '건너뜀' not in rug:
+            failures.append(f'loc analytics: rug title/legend {rug!r}')
+        tip = page.locator('.ui-loc-rug-key[data-kind="skipped"]').get_attribute('title') or ''
+        if 'dop_ratio < 0.6' not in tip:
+            failures.append(f'loc analytics: rug tooltip {tip!r}')
+        if '31 항목' not in page.locator('#loc-analytics-detail-toggle').inner_text():
+            failures.append('loc analytics: detail toggle lacks 31 항목')
+        widths = page.evaluate("""() => {
+            const svg = document.querySelector('#loc-analytics-chart-proctime .main-svg');
+            const side = document.querySelector('#localization-subtab .ui-col-side');
+            return svg && side ? [svg.getBoundingClientRect().width, side.getBoundingClientRect().width] : null;
+        }""")
+        if not widths or widths[0] > widths[1]:
+            failures.append(f'loc analytics: chart width {widths} exceeds side column')
+        before = page.evaluate("document.getElementById('loc-rug-canvas').width")
+        page.set_viewport_size({'width': 1280, 'height': 900})
+        page.wait_for_timeout(600)
+        after = page.evaluate("document.getElementById('loc-rug-canvas').width")
+        if before == after:
+            failures.append(f'loc analytics: rug canvas width unchanged on resize ({before})')
+        page.set_viewport_size({'width': 1440, 'height': 900})
+    finally:
+        page.unroute_all(behavior='wait')
+        page.evaluate('locAnalyticsDashboard.unsubscribe(); locAnalyticsDashboard.hide(); locLiveViewer.hide();')
+    reset = page.evaluate("""() => ({
+        header: document.getElementById('loc-header-init-badge').textContent,
+        headerCls: document.getElementById('loc-header-init-badge').className,
+        rug: document.getElementById('loc-init-status-dot').textContent,
+        rugCls: document.getElementById('loc-init-status-dot').className,
+        detail: document.getElementById('lad-scan_size').textContent,
+        match: document.getElementById('loc-analytics-match-ratio').textContent,
+    })""")
+    if reset['header'] != '— Not Init' or 'ok' in reset['headerCls'].split() or 'bad' in reset['headerCls'].split():
+        failures.append(f'loc reset: header badge {reset}')
+    if reset['rug'] != '— Not Init' or 'ok' in reset['rugCls'].split() or 'bad' in reset['rugCls'].split():
+        failures.append(f'loc reset: rug badge {reset}')
+    if reset['detail'] != '—' or reset['match'] != '—':
+        failures.append(f'loc reset: values not cleared {reset}')
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
@@ -491,6 +696,13 @@ if __name__ == '__main__':
         all_errors += [e for e in errors if e.startswith('pageerror')]
     with open_page() as (page, errors):
         check_slam_config_readonly(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_loc_ready(page, failures)
+        check_loc_stop_late_state(page, failures)
+        all_errors += [e for e in errors if 'Failed to stop Localization' not in e]
+    with open_page() as (page, errors):
+        check_loc_running(page, failures)
         all_errors += errors
     with open_page() as (page, errors):
         check_live_toolbars(page, failures)
