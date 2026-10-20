@@ -88,10 +88,12 @@ with open_page() as (page, errors):
     expect(failures, 'kpi value font', 'Fira Code' in style(page, '#sc-kpi-value', 'fontFamily'), True)
     expect(failures, 'kpi value size', style(page, '#sc-kpi-value', 'fontSize'), '20px')
     expect(failures, 'kpi value tone', style(page, '#sc-kpi-value', 'color'), 'rgb(63, 208, 122)')
-    expect(failures, 'badge height', style(page, '.ui-status-badge', 'height'), '28px')
-    expect(failures, 'dot size', style(page, '.ui-status-badge .ui-dot', 'width'), '8px')
-    expect(failures, 'dot color', style(page, '.ui-status-badge .ui-dot', 'backgroundColor'), 'rgb(63, 208, 122)')
-    expect(failures, 'dot pulse', style(page, '.ui-status-badge[data-tone=go] .ui-dot', 'animationName'), 'ui-pulse')
+    expect(failures, 'badge height', style(page, '#ui-sample .ui-status-badge', 'height'), '28px')
+    expect(failures, 'dot size', style(page, '#ui-sample .ui-status-badge .ui-dot', 'width'), '8px')
+    expect(failures, 'dot color', style(page, '#ui-sample .ui-status-badge .ui-dot', 'backgroundColor'),
+           'rgb(63, 208, 122)')
+    expect(failures, 'dot pulse', style(page, '#ui-sample .ui-status-badge[data-tone=go] .ui-dot', 'animationName'),
+           'ui-pulse')
     expect(failures, 'stepper current color', style(page, '#sc-stepper [data-state=current]', 'color'), 'rgb(108, 182, 255)')
     expect(failures, 'stepper item height', style(page, '#sc-stepper [data-state=current]', 'height'), '28px')
     expect(failures, 'stepper done mark bg', style(page, '#sc-stepper [data-state=done] .ui-stepper-mark', 'backgroundColor'),

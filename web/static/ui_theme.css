@@ -383,6 +383,16 @@ body.ui-has-sidebar { padding: 0; }
 .ui-screen-header .ui-stepper { flex-basis: 100%; padding-top: 8px; border-top: 1px solid rgba(37, 43, 51, 0.7); }
 .ui-screen-group { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--color-dim); }
 .ui-screen-title { margin: 2px 0 0; font-size: 20px; font-weight: 600; }
+.ui-screen-heading { min-width: 0; }
+.ui-screen-group { margin: 0; }
+.ui-screen-title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 2px; }
+.ui-screen-title-row .ui-screen-title { margin: 0; color: var(--color-ink); }
+.ui-screen-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ui-screen-header .ui-stepper:empty { display: none; }
+body:not(.ui-has-sidebar) .ui-screen-header { display: none; }
+.ui-has-sidebar .subtab-content > .section > h2 { display: none; }
+/* 3D 카드 우상단 절대 위치 Snapshot/Reset이 Views 접기 버튼을 덮지 않게 h2 줄 높이를 남긴다 (헤더로 옮기면 삭제) */
+.ui-has-sidebar [id="3d-viewer-subtab"] > .section > h2 { display: block; visibility: hidden; }
 .ui-screen-grid { display: grid; grid-template-columns: minmax(0, 8fr) minmax(320px, 4fr); gap: 16px; padding: 16px 20px; }
 .ui-col-main { position: relative; min-width: 0; }
 .ui-col-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }

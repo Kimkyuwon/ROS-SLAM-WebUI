@@ -31,8 +31,19 @@ const uiShell = (() => {
         openTab(screen.tab);
     }
 
+    // 사이드바 표시 → 헤더 배지 글자 (P2·P3가 화면별 정밀 렌더로 교체)
+    const HEADER_BADGE_TEXT = {
+        RUN: 'Running', REC: 'Recording', PLAY: 'Playing', PAUSE: 'Paused', SAVE: 'Saving', OPT: 'Optimizing',
+    };
+
     function refresh() {
-        // Task 1.8 이후 화면별 헤더 렌더를 여기서 부른다
+        const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
+        if (!screenEl) return;
+        const badge = screenEl.querySelector('.ui-screen-header .ui-status-badge');
+        const markers = lastSummary ? UiStatusLogic.deriveSidebarMarkers(lastSummary) : {};
+        const marker = markers[screenEl.id];
+        if (marker) uiKit.setStatusBadge(badge, marker.tone, HEADER_BADGE_TEXT[marker.text] || marker.text);
+        else uiKit.setStatusBadge(badge, 'idle', 'Ready');
     }
 
     const ROSBRIDGE_TEXT = {

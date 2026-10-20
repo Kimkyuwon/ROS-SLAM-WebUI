@@ -14,6 +14,12 @@ with open_page() as (page, errors):
         cur = page.locator('.ui-sidebar-item[aria-current="page"]').get_attribute('data-screen')
         if cur != subtab_id:
             failures.append(f'aria-current {cur} != {subtab_id}')
+        title = page.evaluate(f"uiShell.SCREENS['{subtab_id}'].title")
+        heading = page.locator('.subtab-content.active .ui-screen-header h1')
+        if not heading.count() or heading.first.inner_text().strip() != title:
+            failures.append(f'{subtab_id} header title != {title}')
+        if page.locator('.tab-content h2:visible').count():
+            failures.append(f'{subtab_id} old h2 visible')
     if page.locator('#ui-conn-rosbridge[data-tone]').count() != 1:
         failures.append('conn rosbridge badge missing')
     web_port = page.locator('#ui-conn-port-web')
