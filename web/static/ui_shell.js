@@ -68,8 +68,20 @@ const uiShell = (() => {
         return '데이터 수신이 멈춰 저장할 수 없습니다';
     }
 
-    const SLAM_EMPTY_TITLE_STARTING = 'rosbridge 연결 대기 중…';
-    let slamEmptyTitleDefault = null;
+    const SLAM_EMPTY_PARTS = {
+        eyebrow: '.ui-viewer-empty-eyebrow', title: '.ui-viewer-empty-title', body: '.ui-viewer-empty-body',
+    };
+    const SLAM_EMPTY_TEXT = {
+        starting: { title: 'rosbridge 연결 대기 중…' },
+        'restore-failed': {
+            eyebrow: 'SAVED RESULT',
+            title: '서버가 다시 시작되어 이전 결과를 열 수 없습니다',
+            body: '새로고침 뒤 저장된 지도를 복원하려 했지만 서버가 마지막 저장 폴더를 기억하지 못합니다. '
+                + '오른쪽 위 Start SLAM으로 새로 시작할 수 있습니다.',
+        },
+    };
+    let slamEmptyDefault = null;
+    let slamRestoreFailed = false;
     let saveStartedAt = 0;
     let saveElapsedTimer = null;
 
@@ -91,15 +103,39 @@ const uiShell = (() => {
         }
     }
 
+    function onSaveMapRestoreFailed() {
+        slamRestoreFailed = true;
+        refresh();
+    }
+
     function renderSlamEmpty(empty, input, liveEl, resultEl) {
-        empty.hidden = (liveEl && liveEl.style.display !== 'none')
-            || (resultEl && resultEl.style.display !== 'none');
+        const resultShown = Boolean(resultEl && resultEl.style.display !== 'none');
+        empty.hidden = (liveEl && liveEl.style.display !== 'none') || resultShown;
+        if (input.starting || input.isRunning || resultShown) slamRestoreFailed = false;
         // 저장 중에는 같은 자리의 저장 카드가 글자를 덮으므로 격자만 남긴다
-        empty.dataset.state = input.saving ? 'saving' : '';
-        const title = empty.querySelector('.ui-viewer-empty-title');
-        if (!title) return;
-        if (slamEmptyTitleDefault === null) slamEmptyTitleDefault = title.textContent;
-        title.textContent = input.starting ? SLAM_EMPTY_TITLE_STARTING : slamEmptyTitleDefault;
+        let state = '';
+        if (input.saving) state = 'saving';
+        else if (input.starting) state = 'starting';
+        else if (slamRestoreFailed) state = 'restore-failed';
+        empty.dataset.state = state;
+        if (!slamEmptyDefault) {
+            slamEmptyDefault = {};
+            Object.entries(SLAM_EMPTY_PARTS).forEach(([key, sel]) => {
+                const el = empty.querySelector(sel);
+                slamEmptyDefault[key] = el ? el.textContent : '';
+            });
+        }
+        const text = { ...slamEmptyDefault, ...(SLAM_EMPTY_TEXT[state] || {}) };
+        Object.entries(SLAM_EMPTY_PARTS).forEach(([key, sel]) => {
+            const el = empty.querySelector(sel);
+            if (el) el.textContent = text[key];
+        });
+    }
+
+    function renderSaveMapResultDir() {
+        const el = document.getElementById('savemap-result-dir');
+        if (!el || typeof saveMapResultViewer === 'undefined' || !saveMapResultViewer._directory) return;
+        el.textContent = `pose_graph_optimization/${saveMapResultViewer._directory}/`;
     }
 
     // 새로고침으로 실행 중 화면에 들어온 경우도 잠근다. 입력은 상태가 바뀔 때만 다시 써서 0.5초 폴링 부담을 피한다
@@ -137,6 +173,7 @@ const uiShell = (() => {
         uiKit.setEnabled(document.getElementById('slam-save-map-button'), v.buttons.saveMap, saveMapLockReason(input));
         const empty = document.getElementById('lidar-slam-viewer-empty');
         if (empty) renderSlamEmpty(empty, input, liveEl, resultEl);
+        if (input.resultVisible) renderSaveMapResultDir();
         renderSlamConfigLock(input.isRunning || input.starting || input.stopping);
     }
 
@@ -229,7 +266,7 @@ const uiShell = (() => {
     }
 
     return {
-        SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, noteAnalytics,
+        SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, noteAnalytics, onSaveMapRestoreFailed,
         onRosbridgeState, onLatency, onDomainId, onBackendWsState,
         get lastSummary() { return lastSummary; },
     };

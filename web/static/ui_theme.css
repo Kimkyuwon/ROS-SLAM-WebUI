@@ -430,6 +430,51 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 [data-readonly="true"] p.ui-readonly-only { padding: 6px 12px 0; }
 [data-readonly="true"] :is(input, select, textarea):disabled { opacity: 0.55; cursor: not-allowed; }
 
+/* --- Save Map 결과 뷰어. 오버레이 클래스는 Multi-Session 뷰어와 공용이라 이 뷰어 안에서만 덮는다 --- */
+#savemap-result-viewer { margin: 0; }
+#savemap-result-canvas-container { border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-viewer); }
+.ui-viewer-tag { position: absolute; top: 12px; left: 12px; z-index: 10; gap: 6px; background: rgba(11, 14, 17, 0.85); }
+.ui-viewer-tag::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+#savemap-point-size-overlay {
+    top: 48px; bottom: auto; left: 12px; padding: 6px 10px;
+    border: 1px solid var(--color-line2); border-radius: var(--radius-sm); background: rgba(11, 14, 17, 0.85);
+}
+#savemap-point-size-overlay .slam-ps-label-text { color: var(--color-mute); }
+#savemap-point-size-slider { width: 110px; accent-color: var(--color-info); }
+#savemap-point-size-label { color: var(--color-ink); font-family: var(--font-mono); }
+#savemap-height-clip-overlay { left: 12px; }
+#savemap-result-viewer .height-clip-value, #savemap-result-viewer .height-clip-current { font-family: var(--font-mono); color: var(--color-mute); }
+#savemap-result-viewer .height-clip-current { background: rgba(11, 14, 17, 0.85); font-weight: 500; }
+#savemap-result-viewer .height-clip-track { border-color: var(--color-line2); background: var(--color-line2); }
+#savemap-result-viewer .height-clip-fill { background: rgba(108, 182, 255, 0.35); }
+#savemap-result-viewer .height-clip-handle { border-color: var(--color-viewer); }
+#savemap-result-viewer .height-clip-handle-max { background: var(--color-info); }
+#savemap-result-viewer .height-clip-handle-min { background: var(--color-warn); }
+#savemap-viewer-actions { top: 12px; right: 12px; bottom: auto; gap: 8px; }
+#savemap-viewer-actions .ui-icon-btn { border-color: var(--color-line2); border-radius: var(--radius-sm); background: rgba(11, 14, 17, 0.85); color: var(--color-ink); }
+#savemap-viewer-actions .ui-icon-btn:hover { border-color: var(--color-line2); background: var(--color-raised); }
+#savemap-viewer-actions .ui-icon-btn.active { border-color: rgba(108, 182, 255, 0.6); background: rgba(11, 14, 17, 0.85); color: var(--color-info); }
+/* 범례는 뷰어 안 왼쪽 아래 칩 두 줄 — 풀스크린에서도 함께 보인다 */
+#savemap-pcd-legend, #savemap-result-legend {
+    top: auto; right: auto; left: 12px; flex-direction: row; flex-wrap: wrap; gap: 6px;
+    max-width: calc(100% - 24px); padding: 0; border-radius: 0; background: none;
+}
+#savemap-pcd-legend { bottom: 52px; }
+#savemap-result-legend { bottom: 12px; }
+#savemap-result-viewer .slam-legend-row {
+    height: 32px; padding: 0 10px; border: 1px solid var(--color-line2); border-radius: var(--radius-sm);
+    background: rgba(11, 14, 17, 0.85); font-size: 12px; color: var(--color-ink);
+}
+#savemap-result-viewer .slam-legend-row:hover { background: var(--color-raised); }
+#savemap-result-viewer .slam-legend-row[data-active="false"] { opacity: 0.45; }
+#savemap-result-viewer .slam-legend-separator { display: none; }
+.ui-viewer-caption { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--color-line); border-radius: var(--radius-md); background: var(--color-surface); }
+.ui-viewer-caption p { margin: 0; font-size: 13px; color: var(--color-mute); }
+.ui-viewer-caption p + p { margin-top: 4px; }
+.ui-viewer-caption .ui-mono { color: var(--color-ink); }
+.ui-viewer-empty[data-state="restore-failed"] { border-color: rgba(240, 97, 109, 0.55); }
+.ui-viewer-empty[data-state="restore-failed"] .ui-viewer-empty-eyebrow { color: var(--color-stop); }
+
 /* --- SLAM Analytics (오른쪽 칸). style.css의 analytics-* 규칙(일부 !important)은 Localization도 쓰므로 이 패널 안에서만 덮는다 --- */
 .ui-contents { display: contents; }
 .ui-analytics .ui-panel-body { display: flex; flex-direction: column; gap: 14px; }

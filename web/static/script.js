@@ -3306,11 +3306,17 @@ async function _maybeRestoreSaveMapViewer() {
         if (status && status.done && status.success) {
             const directory = _saveMapDirectory || _parseSaveMapDirectory(status.message);
             if (directory) {
-                saveMapResultViewer.show({ directory: directory });
+                await saveMapResultViewer.show({ directory: directory });
+                // 서버가 다시 시작되면 결과 경로 허용 목록이 비어 파일을 하나도 못 읽는다
+                if (!saveMapResultViewer._allObjects.length) {
+                    saveMapResultViewer.hideAndReset();
+                    if (window.uiShell) uiShell.onSaveMapRestoreFailed();
+                }
             }
         }
     } catch (e) {
         console.error('Failed to restore save map viewer:', e);
+        if (window.uiShell) uiShell.onSaveMapRestoreFailed();
     }
 }
 
@@ -9258,6 +9264,9 @@ class SlamResultViewer {
         this._renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
         this._renderer.setPixelRatio(window.devicePixelRatio);
         this._renderer.setSize(w, h);
+        // show()·풀스크린 밖의 크기 변화(창·사이드바)용. 숨김 중 0 크기는 _resizeRenderer가 거른다
+        this._resizeObserver = new ResizeObserver(() => this._resizeRenderer());
+        this._resizeObserver.observe(container);
 
         this._scene = new THREE.Scene();
         this._scene.background = new THREE.Color(0x1a1a2e);
@@ -9687,6 +9696,18 @@ class SlamResultViewer {
 
         const fsDiffBtn = document.getElementById(this._ids.fsDiffBtn);
         if (fsDiffBtn) fsDiffBtn.classList.toggle('active', this._diffEnabled);
+        this._syncPressed();
+    }
+
+    // 범례 칩(data-active)과 토글 버튼(active 클래스)의 상태를 aria-pressed로 알린다
+    _syncPressed() {
+        this._allLegendRows().forEach((row) => {
+            row.setAttribute('aria-pressed', String(row.dataset.active !== 'false'));
+        });
+        [this._ids.fsTopViewBtn, this._ids.fsEdlBtn, this._ids.fsDiffBtn].forEach((id) => {
+            const btn = id ? document.getElementById(id) : null;
+            if (btn) btn.setAttribute('aria-pressed', String(btn.classList.contains('active')));
+        });
     }
 
     /**
@@ -10604,6 +10625,7 @@ class SlamResultViewer {
         const newVisible = !nowVisible;
         for (const obj of objs) { obj.visible = newVisible; }
         if (row) row.dataset.active = String(newVisible);
+        this._syncPressed();
     }
 
     setPointSize(size) {
@@ -10732,6 +10754,7 @@ class SlamResultViewer {
         this._allLegendRows().forEach(row => {
             row.dataset.active = 'true';
         });
+        this._syncPressed();
     }
 
     takeSnapshot(scale = 2) {

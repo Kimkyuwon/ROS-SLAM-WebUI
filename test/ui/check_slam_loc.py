@@ -340,6 +340,70 @@ def check_slam_config_readonly(page, failures):
     shot(page, 'p2-slam-config-reopened')
 
 
+def fulfill_json(data):
+    return lambda route: route.fulfill(status=200, content_type='application/json', body=json.dumps(data))
+
+
+def check_slam_result_viewer(page, failures):
+    """Save Map 결과 뷰어: 툴바 aria, 범례 칩 aria-pressed, 창 크기 변경 시 캔버스 크기 맞춤 (지도 파일 없이)."""
+    go_screen(page, 'lidar-slam-subtab')
+    labels = page.evaluate("""() => [...document.querySelectorAll('#savemap-viewer-actions button')]
+        .map(b => (b.getAttribute('aria-label') || '').trim())""")
+    if not labels or not all(labels):
+        failures.append(f'slam result: toolbar aria-label missing {labels}')
+    rows = page.evaluate("""() => [...document.querySelectorAll('#savemap-result-viewer .slam-legend-row')]
+        .map(r => r.getAttribute('aria-pressed'))""")
+    if not rows or None in rows:
+        failures.append(f'slam result: legend aria-pressed missing {rows}')
+    static_title = page.locator('#savemap-result-viewer .slam-legend-row[data-layer="static"]').get_attribute('title')
+    if static_title != '동적 객체·이상치 제거(지면 포함)':
+        failures.append(f'slam result: static chip title {static_title!r}')
+    page.route('**/api/slam/save_map_result*', fulfill_json({}))
+    page.evaluate("saveMapResultViewer.show({ directory: 'mock_map' })")
+    page.wait_for_selector('#savemap-result-viewer', state='visible')
+    page.wait_for_timeout(1000)
+    size_js = """() => {
+        const c = document.getElementById('savemap-result-canvas-container');
+        const cv = document.getElementById('savemap-result-canvas');
+        return [c.clientWidth, cv.clientWidth, cv.clientHeight];
+    }"""
+    before = page.evaluate(size_js)
+    dir_text = page.evaluate("() => { const el = document.getElementById('savemap-result-dir'); return el ? el.textContent.trim() : null; }")
+    if dir_text != 'pose_graph_optimization/mock_map/':
+        failures.append('slam result: save location caption not filled')
+    page.locator('#savemap-fs-topview-btn').click()
+    page.wait_for_timeout(300)
+    if page.locator('#savemap-fs-topview-btn').get_attribute('aria-pressed') != 'true':
+        failures.append('slam result: top view aria-pressed not synced')
+    shot(page, 'p2-slam-result-viewer')
+    vp = page.viewport_size
+    page.set_viewport_size({'width': 1280, 'height': vp['height']})
+    page.wait_for_timeout(600)
+    after = page.evaluate(size_js)
+    page.set_viewport_size(vp)
+    if not before[1] or after[0] >= before[0] or abs(after[1] - after[0]) > 2:
+        failures.append(f'slam result: canvas did not follow container resize {before} -> {after}')
+    page.evaluate('saveMapResultViewer.hideAndReset()')
+    page.unroute_all(behavior='wait')
+
+
+def check_slam_restore_failed(page, failures):
+    """새로고침 뒤 복원했는데 파일을 하나도 못 읽으면 빈 지도 칸에 복원 실패 글자."""
+    go_screen(page, 'lidar-slam-subtab')
+    page.route('**/api/slam/save_map_status', fulfill_json(
+        {'saving': False, 'done': True, 'success': True, 'message': 'Map saved successfully to directory: old_map'}))
+    page.route('**/api/slam/save_map_result*', fulfill_json({'success': False, 'message': 'not allowed'}))
+    page.evaluate('async () => { _saveMapRestoreChecked = false; await _maybeRestoreSaveMapViewer(); }')
+    page.wait_for_timeout(500)
+    title = page.locator('#lidar-slam-viewer-empty .ui-viewer-empty-title').inner_text().strip()
+    if not page.locator('#lidar-slam-viewer-empty').is_visible() or title != '서버가 다시 시작되어 이전 결과를 열 수 없습니다':
+        failures.append(f'slam restore failed: empty slot title {title!r}')
+    if page.locator('#savemap-result-viewer').is_visible():
+        failures.append('slam restore failed: empty result viewer left visible')
+    shot(page, 'p2-slam-restore-failed')
+    page.unroute_all(behavior='wait')
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
@@ -366,6 +430,10 @@ if __name__ == '__main__':
         all_errors += [e for e in errors if e.startswith('pageerror')]
     with open_page() as (page, errors):
         check_slam_config_readonly(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_slam_result_viewer(page, failures)
+        check_slam_restore_failed(page, failures)
         all_errors += errors
     # 흉내 낸 Start 실패가 남기는 기존 console.error
     finish(failures, [e for e in all_errors if e != 'Failed to start SLAM mapping'])

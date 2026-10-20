@@ -270,6 +270,7 @@
                                 <div id="savemap-result-canvas-container">
                                     <canvas id="savemap-result-canvas"></canvas>
                                     <div id="savemap-result-loading">Loading...</div>
+                                    <span class="ui-tag ui-viewer-tag" data-tone="info">RESULT</span>
                                     <!-- Height Clip: 왼쪽 세로 바(핸들 2개)로 Z 높이 기준 단면(cross-section) 표시 -->
                                     <div id="savemap-height-clip-overlay" style="display:none;" title="드래그하여 높이 단면 조절 (더블클릭: 전체 표시)">
                                         <span class="height-clip-value" id="savemap-height-clip-max-label">-</span>
@@ -282,15 +283,15 @@
                                         <span class="height-clip-current" id="savemap-height-clip-current-label">Z: -</span>
                                     </div>
                                     <div id="savemap-pcd-legend">
-                                        <div class="slam-legend-row" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="background:#ffdd00;"></span><span>LIO Map</span></div>
-                                        <div class="slam-legend-row" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
-                                        <div class="slam-legend-row" data-layer="static" data-active="true" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="background:#ffdd00;"></span><span>LIO Map</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="static" data-active="true" title="동적 객체·이상치 제거(지면 포함)" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
                                     </div>
                                     <div id="savemap-result-legend">
-                                        <div class="slam-legend-row" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="background:#ff8800;"></span><span>LIO</span></div>
-                                        <div class="slam-legend-row" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="background:#ffffff;"></span><span>PGO</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="background:#ff8800;"></span><span>LIO</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="background:#ffffff;"></span><span>PGO</span></div>
                                         <div class="slam-legend-separator"></div>
-                                        <div class="slam-legend-row" data-layer="loopclosure" data-active="true" onclick="toggleSaveMapLayer('loopclosure')"><span class="slam-legend-line" style="background:#2288ff;"></span><span>Loop Closure</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="loopclosure" data-active="true" onclick="toggleSaveMapLayer('loopclosure')"><span class="slam-legend-line" style="background:#2288ff;"></span><span>Loop Closure</span></div>
                                     </div>
                                     <div id="savemap-point-size-overlay">
                                         <span class="slam-ps-label-text">Pt Size</span>
@@ -300,23 +301,27 @@
                                         <span id="savemap-point-size-label">0.05 m</span>
                                     </div>
                                     <div id="savemap-viewer-actions">
-                                        <button class="slam-action-btn" id="savemap-reset-btn" onclick="resetSaveMapResultView()" title="Reset View">
+                                        <button class="slam-action-btn ui-icon-btn" id="savemap-reset-btn" onclick="resetSaveMapResultView()" title="Reset View" aria-label="Reset View">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
                                         </button>
-                                        <button class="slam-action-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View">
+                                        <button class="slam-action-btn ui-icon-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
                                         </button>
-                                        <button class="slam-action-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter">
+                                        <button class="slam-action-btn ui-icon-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter" aria-label="Depth Filter" aria-pressed="false">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
                                         </button>
-                                        <button class="slam-action-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장">
+                                        <button class="slam-action-btn ui-icon-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
                                             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
                                         </button>
-                                        <button class="slam-action-btn" id="savemap-fullscreen-btn" onclick="toggleSaveMapResultFullscreen()" title="풀스크린">
+                                        <button class="slam-action-btn ui-icon-btn" id="savemap-fullscreen-btn" onclick="toggleSaveMapResultFullscreen()" title="풀스크린" aria-label="풀스크린">
                                             <svg id="savemap-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
                                             <svg id="savemap-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
                                         </button>
                                     </div>
+                                </div>
+                                <div class="ui-viewer-caption">
+                                    <p>저장 위치 <span class="ui-mono" id="savemap-result-dir">-</span></p>
+                                    <p class="ui-hint">Localization에 쓰려면 StaticMap.pcd를 FAST_LIO Map/ 폴더로 복사하고 map_file_path를 바꾸세요</p>
                                 </div>
                             </div>
 
