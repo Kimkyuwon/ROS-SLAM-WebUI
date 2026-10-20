@@ -4157,22 +4157,6 @@ button[onclick*="collapseAllPlotTree"]:hover {
     color: #b0a8ff !important;
 }
 
-/* Zero / resetViewCamera 버튼 */
-button[onclick*="resetViewCamera"] {
-    background: #0e1020 !important;
-    border: 1px solid rgba(29,233,182,0.3) !important;
-    color: #1de9b6 !important;
-    border-radius: 4px !important;
-    font-size: 11px !important;
-    padding: 2px 8px !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-    transition: all 0.15s !important;
-}
-button[onclick*="resetViewCamera"]:hover {
-    border-color: rgba(29,233,182,0.7) !important;
-    box-shadow: 0 0 8px rgba(29,233,182,0.15) !important;
-}
-
 /* Collapse/Expand 화살표 버튼 */
 .views-collapse-btn {
     background: transparent !important;

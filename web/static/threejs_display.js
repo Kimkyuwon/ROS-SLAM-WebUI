@@ -544,6 +544,7 @@ function initThreeJSDisplay() {
 
     // Views 패널 초기 렌더링 (orbit 기본값에 맞는 파라미터 UI 표시)
     renderViewsPanel();
+    updateFixedFrameBadge();
 
     // Image 패널 리사이즈 핸들 설정
     setupImagePanelResize();
@@ -769,20 +770,21 @@ function renderViewsPanel() {
     const settings = viewer3DState.viewSettings[type] || {};
     let html = '';
 
+    // 카메라에 반영되지 않는 항목은 숨김 (미구현)
     if (type === 'orbit') {
         const invertZChecked = settings.invertZ ? ' checked' : '';
         html = `
-            <div class="views-row">
+            <div class="views-row" hidden style="display: none">
                 <label>Distance:</label>
                 <input type="number" value="${settings.distance || 10}" step="0.5" min="0.1"
                        onchange="onViewParamChange('orbit','distance', parseFloat(this.value))">
             </div>
-            <div class="views-row">
+            <div class="views-row" hidden style="display: none">
                 <label>Yaw:</label>
                 <input type="number" value="${settings.yaw || 0.785}" step="0.05"
                        onchange="onViewParamChange('orbit','yaw', parseFloat(this.value))">
             </div>
-            <div class="views-row">
+            <div class="views-row" hidden style="display: none">
                 <label>Pitch:</label>
                 <input type="number" value="${settings.pitch || 0.785}" step="0.05"
                        onchange="onViewParamChange('orbit','pitch', parseFloat(this.value))">
@@ -796,7 +798,7 @@ function renderViewsPanel() {
             </div>`;
     } else if (type === 'topdown') {
         html = `
-            <div class="views-row">
+            <div class="views-row" hidden style="display: none">
                 <label>Scale:</label>
                 <input type="number" value="${settings.scale || 1.0}" step="0.1" min="0.01"
                        onchange="onViewParamChange('topdown','scale', parseFloat(this.value))">
@@ -3287,6 +3289,8 @@ function renderDisplayPanel() {
             checkbox.type = 'checkbox';
             checkbox.checked = visible;
             checkbox.title = '표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 toggleTopicVisible(topicName, this.checked);
             });
@@ -3532,6 +3536,8 @@ function renderDisplayPanel() {
             checkbox.type = 'checkbox';
             checkbox.checked = visible;
             checkbox.title = '경로 표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 togglePathVisible(topicName, this.checked);
             });
@@ -3668,6 +3674,8 @@ function renderDisplayPanel() {
             checkbox.type = 'checkbox';
             checkbox.checked = visible;
             checkbox.title = '로봇 마커 표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 toggleOdomVisible(topicName, this.checked);
             });
@@ -3809,6 +3817,8 @@ function renderDisplayPanel() {
             checkbox.type = 'checkbox';
             checkbox.checked = visible;
             checkbox.title = 'LaserScan 표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 toggleLaserScanVisible(topicName, this.checked);
             });
@@ -4002,6 +4012,8 @@ function renderDisplayPanel() {
             checkbox.type    = 'checkbox';
             checkbox.checked = visible;
             checkbox.title   = 'TF 표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 toggleTFVisible(topicName, this.checked);
             });
@@ -4158,6 +4170,8 @@ function renderDisplayPanel() {
             checkbox.type = 'checkbox';
             checkbox.checked = visible;
             checkbox.title = '표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 toggleTopicVisible(topicName, this.checked);
             });
@@ -4445,6 +4459,8 @@ function renderDisplayPanel() {
             checkbox.type    = 'checkbox';
             checkbox.checked = visible;
             checkbox.title   = '표시/숨기기';
+            checkbox.className = 'ui-eye-toggle';
+            checkbox.setAttribute('aria-label', `${topicName} 표시`);
             checkbox.addEventListener('change', function() {
                 const c = document.getElementById(cellId);
                 if (c) c.style.display = this.checked ? '' : 'none';
@@ -6038,6 +6054,7 @@ function _handleBackgroundTfMessage(message, sourceTopicName) {
             }
         }
         updateViewTargetFrameOptions();
+        updateFixedFrameBadge();
     }
 }
 
@@ -6435,6 +6452,8 @@ function onFixedFrameBlur(event) {
  * 드롭다운이 열려 있으면 실시간 갱신.
  */
 function updateFixedFrameOptions() {
+    updateFixedFrameBadge();
+
     // 드롭다운이 열려 있을 때만 갱신
     const dropdown = document.getElementById('fixed-frame-dropdown');
     if (!dropdown || dropdown.style.display === 'none') return;
@@ -6528,6 +6547,7 @@ function resetFixedFrameAndViewTargetsToDefault() {
         }
     });
     reapplyAllFrameTransforms();
+    updateFixedFrameBadge();
     console.log('[Viewer] Fixed frame →', DEFAULT_FIXED_FRAME, '| Target frame → <Fixed Frame>');
 }
 
@@ -6555,7 +6575,52 @@ function setFixedFrame(newFrame) {
 
     // PointCloud2 / Path / Odometry 오브젝트 frame transform 재적용
     reapplyAllFrameTransforms();
+    updateFixedFrameBadge();
 }
+
+let _fixedFrameBadgeBound = false;
+
+/**
+ * 헤더 배지에 현재 Fixed Frame 표시.
+ * 수집된 프레임에 현재 Fixed Frame이 없고 odom이 있으면 경고 배지 — 클릭하면 odom으로 전환.
+ */
+function updateFixedFrameBadge() {
+    const badge = document.getElementById('viewer3d-header-badge');
+    if (!badge || !window.uiKit) return;
+
+    if (!_fixedFrameBadgeBound) {
+        _fixedFrameBadgeBound = true;
+        badge.addEventListener('click', function() {
+            if (badge.dataset.tone === 'warn') setFixedFrame('odom');
+        });
+        badge.addEventListener('keydown', function(event) {
+            if (badge.dataset.tone === 'warn' && (event.key === 'Enter' || event.key === ' ')) {
+                event.preventDefault();
+                setFixedFrame('odom');
+            }
+        });
+    }
+
+    const frame = viewer3DState.fixedFrame;
+    const frames = getAvailableFrames();
+    const isKnown = frames.includes(frame);
+    const needsOdom = !isKnown && frames.includes('odom');
+
+    if (needsOdom) {
+        uiKit.setStatusBadge(badge, 'warn', `Fixed Frame · ${frame} (TF에 없음 — odom 권장)`);
+        badge.title = 'odom으로 Fixed Frame 변경';
+        badge.setAttribute('role', 'button');
+        badge.tabIndex = 0;
+        badge.style.cursor = 'pointer';
+    } else {
+        uiKit.setStatusBadge(badge, isKnown ? 'info' : 'idle', `Fixed Frame · ${frame}`);
+        badge.removeAttribute('title');
+        badge.setAttribute('role', 'status');
+        badge.removeAttribute('tabindex');
+        badge.style.cursor = '';
+    }
+}
+window.updateFixedFrameBadge = updateFixedFrameBadge;
 
 /**
  * TF 가시성 토글 (그룹 show/hide)
