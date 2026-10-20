@@ -4022,6 +4022,39 @@ class WebGUINode(Node):
             'is_running': is_running
         }
 
+    def get_status_summary(self):
+        """사이드바 실행 표시용 전역 상태 요약. 메모리 속성만 읽는다 (DDS 조회 없음)."""
+        ros1_status = 'stopped'
+        if self.ros1_player_thread and self.ros1_player_thread.is_alive():
+            ros1_status = self.ros1_player_thread.get_status().get('status', 'stopped')
+        bag_playing = bool(self.bag_playing) or ros1_status == 'playing'
+        bag_paused = bool(self.bag_paused) or ros1_status == 'paused'
+        fp_bag_mode = bool(self.player_is_ros2_bag or self.player_is_ros1_bag)
+        converting = any((self.kitti_converter_running, self.kaist_converter_running,
+                          self.mulran_converter_running, self.helipr_converter_running))
+        return {
+            'success': True,
+            'data': {
+                'slam': {'running': self._is_alive(self.slam_process),
+                         'saving_map': bool(self.slam_map_saving)},
+                'localization': {'running': self._is_alive(self.localization_process)},
+                'optimization': {'running': bool(self.slam_opt_running)},
+                'bag_player': {'loaded': bool(self.bag_path), 'playing': bag_playing, 'paused': bag_paused},
+                'recorder': {'recording': bool(self.recorder_recording), 'mode': self.recorder_mode},
+                'file_player': {
+                    'loaded': bool(self.player_data_loaded),
+                    'playing': bool(self.player_playing) or (fp_bag_mode and bag_playing),
+                    'paused': bool(self.player_paused) or (fp_bag_mode and bag_paused),
+                    'converting': converting,
+                    'saving_bag': bool(self.save_bag_saving),
+                },
+            },
+        }
+
+    @staticmethod
+    def _is_alive(process):
+        return bool(process) and process.poll() is None
+
     # Bag Recorder Functions
     def set_recorder_bag_name(self, bag_name):
         """Set the bag name for recording"""
@@ -8558,6 +8591,8 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 except Exception:
                     pass
             self.send_json_response({'total_ram_mb': total_ram_mb, 'cpu_cores': cpu_cores})
+        elif parsed_path.path == '/api/system/status_summary':
+            self.send_json_response(self.node.get_status_summary())
         elif parsed_path.path == '/api/slam/state':
             self.send_json_response(self.node.get_slam_state())
         elif parsed_path.path == '/api/slam/save_map_status':
