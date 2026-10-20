@@ -290,6 +290,56 @@ def check_slam_kf_reset(page, failures):
     page.unroute_all(behavior='wait')
 
 
+def fulfill_ok(route):
+    route.fulfill(status=200, content_type='application/json', body=json.dumps({'success': True, 'message': 'mock'}))
+
+
+def config_lock_state(page):
+    return page.evaluate("""() => {
+        const c = document.getElementById('slam-config-container');
+        const inputs = [...c.querySelectorAll('input, select, textarea')];
+        const btns = [...c.querySelectorAll('.ui-panel-footer .ui-btn')];
+        const hint = c.querySelector('p.ui-readonly-only');
+        return {
+            visible: c.offsetParent !== null,
+            inputs: inputs.length,
+            inputsDisabled: inputs.filter(el => el.disabled).length,
+            btnsDisabled: btns.filter(el => el.disabled).length,
+            hintVisible: Boolean(hint && hint.offsetParent !== null),
+        };
+    }""")
+
+
+def check_slam_config_readonly(page, failures):
+    """Start 성공 → Config 패널이 숨지 않고 읽기 전용, Stop 뒤 다시 열림."""
+    go_screen(page, 'lidar-slam-subtab')
+    page.wait_for_selector('#slam-config-parameters [data-config-key]', state='attached')
+    page.on('dialog', lambda d: d.accept())
+    page.route('**/api/slam/start_mapping', fulfill_ok)
+    mock_slam_running(page)
+    page.locator('#slam-start-button').click()
+    page.wait_for_timeout(1500)
+    st = config_lock_state(page)
+    if not st['visible']:
+        failures.append('slam config readonly: panel hidden while running')
+    if not st['inputs'] or st['inputsDisabled'] != st['inputs']:
+        failures.append(f'slam config readonly: inputs not all disabled {st}')
+    if st['btnsDisabled'] != 2 or not st['hintVisible']:
+        failures.append(f'slam config readonly: footer buttons/hint {st}')
+    if st['visible']:
+        page.locator('#slam-config-container').scroll_into_view_if_needed()
+    shot(page, 'p2-slam-config-readonly')
+    page.unroute_all(behavior='wait')
+    page.route('**/api/slam/stop_mapping', fulfill_ok)
+    page.locator('#slam-stop-button').click()
+    page.wait_for_timeout(1500)
+    st = config_lock_state(page)
+    if st['inputsDisabled'] or st['btnsDisabled'] or st['hintVisible']:
+        failures.append(f'slam config readonly: not reopened after stop {st}')
+    page.unroute_all(behavior='wait')
+    shot(page, 'p2-slam-config-reopened')
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
@@ -314,5 +364,8 @@ if __name__ == '__main__':
         check_slam_config_load_failed(page, failures)
         # 일부러 끊은 요청이 남기는 콘솔 에러는 빼고 JS 예외만 본다
         all_errors += [e for e in errors if e.startswith('pageerror')]
+    with open_page() as (page, errors):
+        check_slam_config_readonly(page, failures)
+        all_errors += errors
     # 흉내 낸 Start 실패가 남기는 기존 console.error
     finish(failures, [e for e in all_errors if e != 'Failed to start SLAM mapping'])

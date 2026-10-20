@@ -420,6 +420,13 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 #slam-save-map-elapsed { margin: 0; font-size: 13px; color: var(--color-ink); }
 #slam-save-map-elapsed::before { content: '경과 '; color: var(--color-mute); }
 
+/* 실행 중 Config 읽기 전용 표시: data-readonly="true"일 때만 보인다 (속성이 없을 때도 숨김) */
+.ui-readonly-only { display: none; }
+[data-readonly="true"] .ui-readonly-only { display: block; }
+[data-readonly="true"] svg.ui-readonly-only { display: inline-block; vertical-align: middle; color: var(--color-mute); }
+[data-readonly="true"] p.ui-readonly-only { padding: 6px 12px 0; }
+[data-readonly="true"] :is(input, select, textarea):disabled { opacity: 0.55; cursor: not-allowed; }
+
 /* --- SLAM Analytics (오른쪽 칸). style.css의 analytics-* 규칙(일부 !important)은 Localization도 쓰므로 이 패널 안에서만 덮는다 --- */
 .ui-contents { display: contents; }
 .ui-analytics .ui-panel-body { display: flex; flex-direction: column; gap: 14px; }

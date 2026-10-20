@@ -3383,7 +3383,7 @@ async function startSlamMapping() {
     const _cfgEl = document.getElementById('slam-config-container');
     if (_cfgEl) {
         window._slamConfigVisibleBeforeStart = (_cfgEl.style.display !== 'none');
-        _cfgEl.style.display = 'none';
+        uiKit.setReadonly(_cfgEl, true);
     }
     // Immediately update status to Running
     updateLidarSlamStatus('Running');
@@ -3436,7 +3436,7 @@ async function stopSlamMapping() {
     // Start 전에 Config 패널이 열려 있었으면 복원
     const _cfgEl = document.getElementById('slam-config-container');
     if (_cfgEl && window._slamConfigVisibleBeforeStart) {
-        _cfgEl.style.display = '';
+        uiKit.setReadonly(_cfgEl, false);
         window._slamConfigVisibleBeforeStart = false;
     }
     // Immediately update status to Stopping
@@ -3535,7 +3535,7 @@ async function startLocalizationMapping() {
     const _cfgEl = document.getElementById('localization-config-container');
     if (_cfgEl) {
         window._locConfigVisibleBeforeStart = (_cfgEl.style.display !== 'none');
-        _cfgEl.style.display = 'none';
+        uiKit.setReadonly(_cfgEl, true);
     }
     updateLocalizationStatus('Running');
 
@@ -3556,7 +3556,7 @@ async function stopLocalizationMapping() {
     // Start 전에 Config 패널이 열려 있었으면 복원
     const _cfgEl = document.getElementById('localization-config-container');
     if (_cfgEl && window._locConfigVisibleBeforeStart) {
-        _cfgEl.style.display = '';
+        uiKit.setReadonly(_cfgEl, false);
         window._locConfigVisibleBeforeStart = false;
     }
     updateLocalizationStatus('Stopping...');

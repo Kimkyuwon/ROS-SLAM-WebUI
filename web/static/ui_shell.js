@@ -102,6 +102,16 @@ const uiShell = (() => {
         title.textContent = input.starting ? SLAM_EMPTY_TITLE_STARTING : slamEmptyTitleDefault;
     }
 
+    // 새로고침으로 실행 중 화면에 들어온 경우도 잠근다. 입력은 상태가 바뀔 때만 다시 써서 0.5초 폴링 부담을 피한다
+    function renderSlamConfigLock(locked) {
+        const cfgEl = document.getElementById('slam-config-container');
+        if (!cfgEl) return;
+        if (cfgEl.dataset.readonly !== String(locked)) uiKit.setReadonly(cfgEl, locked);
+        cfgEl.querySelectorAll('.ui-panel-footer .ui-btn').forEach((btn) => {
+            uiKit.setEnabled(btn, !locked, '실행 중에는 바꿀 수 없습니다');
+        });
+    }
+
     function renderSlam() {
         const resultEl = document.getElementById('savemap-result-viewer');
         const liveEl = document.getElementById('slam-live-viewer');
@@ -127,6 +137,7 @@ const uiShell = (() => {
         uiKit.setEnabled(document.getElementById('slam-save-map-button'), v.buttons.saveMap, saveMapLockReason(input));
         const empty = document.getElementById('lidar-slam-viewer-empty');
         if (empty) renderSlamEmpty(empty, input, liveEl, resultEl);
+        renderSlamConfigLock(input.isRunning || input.starting || input.stopping);
     }
 
     function refresh() {
