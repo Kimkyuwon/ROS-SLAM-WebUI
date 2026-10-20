@@ -3769,6 +3769,7 @@ const LIVE_LASER_MAP_UPDATE_MS = 2000;
 const LIVE_KF_NODE_UPDATE_MS = 500;
 const LIVE_PATH_REBUILD_MS = 400;
 const LIVE_PATH_MAX_CTRL_POINTS = 250;
+const VIEWER_BG_COLOR = 0x07090c;  // ui_theme.css --color-viewer
 const LIVE_PATH_MAX_TUBE_SEGMENTS = 200;
 
 /** Path 바이너리 스냅샷을 버퍼에 병합 (증분 append 또는 reset) 후 FIFO trim */
@@ -6690,7 +6691,7 @@ class LocalizationLiveViewer {
         this._renderer.setSize(w, h);
 
         this._scene = new THREE.Scene();
-        this._scene.background = new THREE.Color(0x0a0a18);
+        this._scene.background = new THREE.Color(VIEWER_BG_COLOR);
 
         this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
         this._camera.position.set(0, 0, 20);
@@ -7969,7 +7970,7 @@ class SlamLiveViewer {
         this._renderer.setSize(w, h);
 
         this._scene = new THREE.Scene();
-        this._scene.background = new THREE.Color(0x0a0a18);
+        this._scene.background = new THREE.Color(VIEWER_BG_COLOR);
 
         this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
         this._camera.position.set(0, 0, 20);
@@ -9279,7 +9280,7 @@ class SlamResultViewer {
         this._resizeObserver.observe(container);
 
         this._scene = new THREE.Scene();
-        this._scene.background = new THREE.Color(0x1a1a2e);
+        this._scene.background = new THREE.Color(VIEWER_BG_COLOR);
 
         this._camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 10000);
         this._camera.position.set(0, -100, 80);

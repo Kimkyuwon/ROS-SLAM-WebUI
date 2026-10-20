@@ -459,7 +459,7 @@ function initThreeJSDisplay() {
 
     // Create scene
     viewer3DState.scene = new THREE.Scene();
-    viewer3DState.scene.background = new THREE.Color(0x2a2a2a);
+    viewer3DState.scene.background = new THREE.Color(0x07090c);
 
     // Get container dimensions
     const containerWidth = container.clientWidth || 800;
