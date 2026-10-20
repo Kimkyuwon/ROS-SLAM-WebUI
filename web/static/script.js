@@ -140,8 +140,11 @@ function openTab(tabId) {
     // Show selected tab
     domCache.get(tabId).classList.add('active');
 
-    // Activate corresponding button
-    event.target.classList.add('active');
+    // Activate corresponding button (event 없이도 동작 — 사이드바·프로그램 호출 대응)
+    const tabButton = Array.from(buttons).find(btn =>
+        (btn.getAttribute('onclick') || '').includes(`'${tabId}'`)
+    );
+    if (tabButton) tabButton.classList.add('active');
 
     // Scroll to top
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -176,7 +179,7 @@ function openSubTab(subtabId, skipEvent = false) {
     }
 
     // Activate corresponding button
-    if (!skipEvent && event && event.target) {
+    if (!skipEvent && typeof event !== 'undefined' && event && event.target) {
         event.target.classList.add('active');
     } else {
         // Find and activate corresponding button
@@ -211,6 +214,8 @@ function openSubTab(subtabId, skipEvent = false) {
             }
         }, 300);
     }
+
+    if (window.uiShell) uiShell.onScreenChanged(subtabId);
 }
 
 /** Plot 영역 크기 변경 시 rAF로 한 번만 Plotly 리사이즈 (ResizeObserver 콜백 폭주 완화) */
