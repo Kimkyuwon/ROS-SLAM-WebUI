@@ -3227,7 +3227,7 @@ function _showSaveMapStatus(message, saving) {
     spinner.style.display = saving ? 'inline-block' : 'none';
     cancelBtn.style.display = saving ? 'inline-block' : 'none';
     cancelBtn.disabled = false;
-    cancelBtn.textContent = 'Cancel';
+    cancelBtn.textContent = '기다리기 중단';
     area.style.display = 'block';
     area.style.opacity = '1';
     _setSaveMapAreaState(null);
@@ -3363,7 +3363,7 @@ async function cancelSaveMap() {
         _showSaveMapError('Cancelled by user');
     } else {
         cancelBtn.disabled = false;
-        cancelBtn.textContent = 'Cancel';
+        cancelBtn.textContent = '기다리기 중단';
         console.warn('Cancel failed:', result.message);
     }
 }

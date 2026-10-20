@@ -68,6 +68,40 @@ const uiShell = (() => {
         return '데이터 수신이 멈춰 저장할 수 없습니다';
     }
 
+    const SLAM_EMPTY_TITLE_STARTING = 'rosbridge 연결 대기 중…';
+    let slamEmptyTitleDefault = null;
+    let saveStartedAt = 0;
+    let saveElapsedTimer = null;
+
+    function renderSaveElapsed() {
+        const el = document.getElementById('slam-save-map-elapsed');
+        if (el) el.textContent = UiStatusLogic.formatElapsed((performance.now() - saveStartedAt) / 1000);
+    }
+
+    // 화면과 상관없이 돈다 — 저장 중 다른 화면에 갔다 와도 경과 시간이 이어지게
+    function syncSaveElapsed() {
+        const saving = Boolean(window._slamSaving);
+        if (saving && !saveElapsedTimer) {
+            saveStartedAt = performance.now();
+            renderSaveElapsed();
+            saveElapsedTimer = setInterval(renderSaveElapsed, 1000);
+        } else if (!saving && saveElapsedTimer) {
+            clearInterval(saveElapsedTimer);
+            saveElapsedTimer = null;
+        }
+    }
+
+    function renderSlamEmpty(empty, input, liveEl, resultEl) {
+        empty.hidden = (liveEl && liveEl.style.display !== 'none')
+            || (resultEl && resultEl.style.display !== 'none');
+        // 저장 중에는 같은 자리의 저장 카드가 글자를 덮으므로 격자만 남긴다
+        empty.dataset.state = input.saving ? 'saving' : '';
+        const title = empty.querySelector('.ui-viewer-empty-title');
+        if (!title) return;
+        if (slamEmptyTitleDefault === null) slamEmptyTitleDefault = title.textContent;
+        title.textContent = input.starting ? SLAM_EMPTY_TITLE_STARTING : slamEmptyTitleDefault;
+    }
+
     function renderSlam() {
         const resultEl = document.getElementById('savemap-result-viewer');
         const liveEl = document.getElementById('slam-live-viewer');
@@ -92,14 +126,12 @@ const uiShell = (() => {
         uiKit.setEnabled(document.getElementById('slam-stop-button'), v.buttons.stop);
         uiKit.setEnabled(document.getElementById('slam-save-map-button'), v.buttons.saveMap, saveMapLockReason(input));
         const empty = document.getElementById('lidar-slam-viewer-empty');
-        if (empty) {
-            empty.hidden = (liveEl && liveEl.style.display !== 'none')
-                || (resultEl && resultEl.style.display !== 'none');
-        }
+        if (empty) renderSlamEmpty(empty, input, liveEl, resultEl);
     }
 
     function refresh() {
         const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
+        syncSaveElapsed();
         if (!screenEl) return;
         if (screenEl.id === 'lidar-slam-subtab') {
             renderSlam();

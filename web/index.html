@@ -177,345 +177,358 @@
                 <div class="section card">
                     <h2>LiDAR SLAM</h2>
 
-                    <div class="bag-control-buttons" style="margin-bottom: 15px;">
-                        <button onclick="loadSlamConfig()">Config Load</button>
-                        <button id="slam-save-button" onclick="saveSlamConfig()">Set Config File</button>
-                    </div>
-
-                    <!-- Config Parameters Display -->
-                    <div id="slam-config-container" class="cfg-panel" style="display: none;">
-                        <div class="cfg-header" onclick="toggleSlamConfig()">
-                            <div class="cfg-header-left">
-                                <span class="cfg-header-title">SLAM Configuration Parameters</span>
-                                <span class="cfg-header-badge" id="slam-cfg-file-badge"></span>
+                    <div class="ui-screen-grid">
+                        <div class="ui-col-main">
+                            <div class="ui-viewer-empty" id="lidar-slam-viewer-empty">
+                                <p class="ui-viewer-empty-eyebrow">LIVE VIEWER</p>
+                                <p class="ui-viewer-empty-title">Start SLAM을 누르면 실시간 지도가 여기에 그려집니다</p>
+                                <p class="ui-viewer-empty-body">Configuration 패널에서 값을 확인하고 시작하세요. rosbridge 구독은 Start 이후에만 연결됩니다. 지도는 최신 키프레임 주변 50 m만 보입니다.</p>
                             </div>
-                            <span id="slam-config-toggle-btn" class="cfg-toggle-arrow">▼</span>
-                        </div>
-                        <div id="slam-config-parameters" class="cfg-body">
-                            <!-- Parameters will be dynamically loaded here -->
-                        </div>
-                    </div>
 
-                    <!-- SLAM Live Viewer -->
-                    <div id="slam-live-viewer" style="display:none; margin-bottom: 12px;">
-                        <input type="checkbox" id="slam-live-topview-toggle"
-                               onchange="toggleSlamLiveTopView(this.checked)" style="display:none;" />
-                        <div class="loc-live-viewer-layout">
-                            <div class="loc-viewer-canvas-panel">
-                                <div id="slam-live-canvas-container">
-                                    <canvas id="slam-live-canvas"></canvas>
-                                    <div id="slam-live-viewer-loading">rosbridge 연결 대기중...</div>
-                                    <!-- 우측 상단 범례 -->
-                                    <div id="slam-live-legend">
-                                        <div class="slam-live-legend-item">
-                                            <span class="slam-live-legend-line" style="background:#00ff44;"></span>
-                                            <span class="slam-live-legend-label">LIO</span>
+                            <!-- SLAM Live Viewer -->
+                            <div id="slam-live-viewer" style="display:none; margin-bottom: 12px;">
+                                <input type="checkbox" id="slam-live-topview-toggle"
+                                       onchange="toggleSlamLiveTopView(this.checked)" style="display:none;" />
+                                <div class="loc-live-viewer-layout">
+                                    <div class="loc-viewer-canvas-panel">
+                                        <div id="slam-live-canvas-container">
+                                            <canvas id="slam-live-canvas"></canvas>
+                                            <div id="slam-live-viewer-loading">rosbridge 연결 대기중...</div>
+                                            <!-- 우측 상단 범례 -->
+                                            <div id="slam-live-legend">
+                                                <div class="slam-live-legend-item">
+                                                    <span class="slam-live-legend-line" style="background:#00ff44;"></span>
+                                                    <span class="slam-live-legend-label">LIO</span>
+                                                </div>
+                                                <div class="slam-live-legend-item">
+                                                    <span class="slam-live-legend-line" style="background:#ffffff;"></span>
+                                                    <span class="slam-live-legend-label">Pose Graph</span>
+                                                </div>
+                                            </div>
+
+                                            <div id="slam-live-viewer-actions">
+                                                <button class="slam-action-btn" id="slam-live-reset-btn"
+                                                        onclick="resetSlamLiveViewer()" title="Reset View">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                                                        <polyline points="9 22 9 12 15 12 15 22"/>
+                                                    </svg>
+                                                </button>
+                                                <button class="slam-action-btn" id="slam-live-follow-btn"
+                                                        onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                                                        <circle cx="12" cy="10" r="3"/>
+                                                    </svg>
+                                                </button>
+                                                <button class="slam-action-btn" id="slam-live-fs-topview-btn"
+                                                        onclick="toggleSlamLiveTopView(!slamLiveViewer._topView)" title="Top View">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <circle cx="12" cy="12" r="3"/>
+                                                        <line x1="12" y1="2" x2="12" y2="6"/>
+                                                        <line x1="12" y1="18" x2="12" y2="22"/>
+                                                        <line x1="2" y1="12" x2="6" y2="12"/>
+                                                        <line x1="18" y1="12" x2="22" y2="12"/>
+                                                    </svg>
+                                                </button>
+                                                <button class="slam-action-btn" id="slam-live-snapshot-btn"
+                                                        onclick="takeSlamLiveSnapshot()" title="스냅샷 저장">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                                                        <circle cx="12" cy="13" r="4"/>
+                                                    </svg>
+                                                </button>
+                                                <button class="slam-action-btn" id="slam-live-fullscreen-btn"
+                                                        onclick="toggleSlamLiveViewerFullscreen()" title="풀스크린">
+                                                    <svg id="slam-live-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                                        <polyline points="15 3 21 3 21 9"/>
+                                                        <polyline points="9 21 3 21 3 15"/>
+                                                        <line x1="21" y1="3" x2="14" y2="10"/>
+                                                        <line x1="3" y1="21" x2="10" y2="14"/>
+                                                    </svg>
+                                                    <svg id="slam-live-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
+                                                        <polyline points="4 14 10 14 10 20"/>
+                                                        <polyline points="20 10 14 10 14 4"/>
+                                                        <line x1="10" y1="14" x2="3" y2="21"/>
+                                                        <line x1="21" y1="3" x2="14" y2="10"/>
+                                                    </svg>
+                                                </button>
+                                            </div><!-- /slam-live-viewer-actions -->
+                                        </div><!-- /slam-live-canvas-container -->
+                                    </div><!-- /loc-viewer-canvas-panel -->
+                                </div><!-- /loc-live-viewer-layout -->
+                            </div><!-- /slam-live-viewer -->
+
+                            <!-- Save Map Result Viewer -->
+                            <div id="savemap-result-viewer" style="display:none;">
+                                <!-- 상태 동기화용 hidden 체크박스 (라이브 뷰어와 동일) -->
+                                <input type="checkbox" id="savemap-viewer-topview-toggle"
+                                       onchange="toggleSaveMapTopView(this.checked)" style="display:none;" />
+                                <input type="checkbox" id="savemap-viewer-edl-toggle"
+                                       onchange="toggleSaveMapEDL(this.checked)" style="display:none;" />
+                                <div id="savemap-result-canvas-container">
+                                    <canvas id="savemap-result-canvas"></canvas>
+                                    <div id="savemap-result-loading">Loading...</div>
+                                    <!-- Height Clip: 왼쪽 세로 바(핸들 2개)로 Z 높이 기준 단면(cross-section) 표시 -->
+                                    <div id="savemap-height-clip-overlay" style="display:none;" title="드래그하여 높이 단면 조절 (더블클릭: 전체 표시)">
+                                        <span class="height-clip-value" id="savemap-height-clip-max-label">-</span>
+                                        <div class="height-clip-track" id="savemap-height-clip-track">
+                                            <div class="height-clip-fill" id="savemap-height-clip-fill"></div>
+                                            <div class="height-clip-handle height-clip-handle-max" id="savemap-height-clip-handle-max"></div>
+                                            <div class="height-clip-handle height-clip-handle-min" id="savemap-height-clip-handle-min"></div>
                                         </div>
-                                        <div class="slam-live-legend-item">
-                                            <span class="slam-live-legend-line" style="background:#ffffff;"></span>
-                                            <span class="slam-live-legend-label">Pose Graph</span>
+                                        <span class="height-clip-value" id="savemap-height-clip-min-label">-</span>
+                                        <span class="height-clip-current" id="savemap-height-clip-current-label">Z: -</span>
+                                    </div>
+                                    <div id="savemap-pcd-legend">
+                                        <div class="slam-legend-row" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="background:#ffdd00;"></span><span>LIO Map</span></div>
+                                        <div class="slam-legend-row" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
+                                        <div class="slam-legend-row" data-layer="static" data-active="true" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
+                                    </div>
+                                    <div id="savemap-result-legend">
+                                        <div class="slam-legend-row" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="background:#ff8800;"></span><span>LIO</span></div>
+                                        <div class="slam-legend-row" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="background:#ffffff;"></span><span>PGO</span></div>
+                                        <div class="slam-legend-separator"></div>
+                                        <div class="slam-legend-row" data-layer="loopclosure" data-active="true" onclick="toggleSaveMapLayer('loopclosure')"><span class="slam-legend-line" style="background:#2288ff;"></span><span>Loop Closure</span></div>
+                                    </div>
+                                    <div id="savemap-point-size-overlay">
+                                        <span class="slam-ps-label-text">Pt Size</span>
+                                        <input type="range" id="savemap-point-size-slider"
+                                            min="0.01" max="0.5" step="0.01" value="0.05"
+                                            oninput="setSaveMapPointSize(parseFloat(this.value))" />
+                                        <span id="savemap-point-size-label">0.05 m</span>
+                                    </div>
+                                    <div id="savemap-viewer-actions">
+                                        <button class="slam-action-btn" id="savemap-reset-btn" onclick="resetSaveMapResultView()" title="Reset View">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                                        </button>
+                                        <button class="slam-action-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+                                        </button>
+                                        <button class="slam-action-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                                        </button>
+                                        <button class="slam-action-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장">
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                                        </button>
+                                        <button class="slam-action-btn" id="savemap-fullscreen-btn" onclick="toggleSaveMapResultFullscreen()" title="풀스크린">
+                                            <svg id="savemap-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                                            <svg id="savemap-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div id="slam-save-map-status-area" class="status-banner ui-viewer-overlay" style="display:none;">
+                                <div class="ui-viewer-overlay-title">
+                                    <span id="slam-save-map-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>
+                                    <span id="slam-save-map-msg"></span>
+                                </div>
+                                <div class="ui-progress ui-progress-indeterminate" aria-label="저장 진행 중"></div>
+                                <p class="ui-mono" id="slam-save-map-elapsed">0:00</p>
+                                <p class="ui-hint">저장 중에는 새 키프레임이 그래프에 추가되지 않습니다. 로봇을 멈추고 기다리세요.</p>
+                                <button class="ui-btn ui-btn-ghost" id="slam-save-map-cancel-btn" onclick="cancelSaveMap()" style="display:none;"
+                                        title="노드의 저장은 끝까지 진행됩니다">기다리기 중단</button>
+                            </div>
+                        </div>
+                        <aside class="ui-col-side">
+                            <!-- SLAM Analytics Dashboard (Phase 4.10) -->
+                            <div id="slam-analytics-dashboard" style="display:none; margin-bottom: 12px;">
+                                <!-- 대쉬보드 헤더 -->
+                                <div class="analytics-dashboard-header">
+                                    <h3 class="analytics-dashboard-title">SLAM Analytics Dashboard</h3>
+                                    <span class="analytics-live-badge">● LIVE</span>
+                                </div>
+
+                                <!-- 상단 행: 4열 (Hz / Traj / CPU / RAM) -->
+                                <div class="analytics-grid analytics-row-top">
+                                    <div class="analytics-card" id="widget-sensor-hz">
+                                        <div class="analytics-card-title">Sensor Frequency</div>
+                                        <div class="analytics-hz-grid">
+                                            <div class="analytics-hz-item">
+                                                <div class="analytics-hz-label">IMU</div>
+                                                <div class="analytics-hz-value analytics-hz-ok" id="analytics-imu-hz">—</div>
+                                                <div class="analytics-hz-unit">Hz</div>
+                                            </div>
+                                            <div class="analytics-hz-item">
+                                                <div class="analytics-hz-label">LiDAR</div>
+                                                <div class="analytics-hz-value analytics-hz-ok" id="analytics-lid-hz">—</div>
+                                                <div class="analytics-hz-unit">Hz</div>
+                                            </div>
                                         </div>
                                     </div>
 
-                                    <div id="slam-live-viewer-actions">
-                                        <button class="slam-action-btn" id="slam-live-reset-btn"
-                                                onclick="resetSlamLiveViewer()" title="Reset View">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                                                <polyline points="9 22 9 12 15 12 15 22"/>
-                                            </svg>
-                                        </button>
-                                        <button class="slam-action-btn" id="slam-live-follow-btn"
-                                                onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-                                                <circle cx="12" cy="10" r="3"/>
-                                            </svg>
-                                        </button>
-                                        <button class="slam-action-btn" id="slam-live-fs-topview-btn"
-                                                onclick="toggleSlamLiveTopView(!slamLiveViewer._topView)" title="Top View">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <circle cx="12" cy="12" r="3"/>
-                                                <line x1="12" y1="2" x2="12" y2="6"/>
-                                                <line x1="12" y1="18" x2="12" y2="22"/>
-                                                <line x1="2" y1="12" x2="6" y2="12"/>
-                                                <line x1="18" y1="12" x2="22" y2="12"/>
-                                            </svg>
-                                        </button>
-                                        <button class="slam-action-btn" id="slam-live-snapshot-btn"
-                                                onclick="takeSlamLiveSnapshot()" title="스냅샷 저장">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                                                <circle cx="12" cy="13" r="4"/>
-                                            </svg>
-                                        </button>
-                                        <button class="slam-action-btn" id="slam-live-fullscreen-btn"
-                                                onclick="toggleSlamLiveViewerFullscreen()" title="풀스크린">
-                                            <svg id="slam-live-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                <polyline points="15 3 21 3 21 9"/>
-                                                <polyline points="9 21 3 21 3 15"/>
-                                                <line x1="21" y1="3" x2="14" y2="10"/>
-                                                <line x1="3" y1="21" x2="10" y2="14"/>
-                                            </svg>
-                                            <svg id="slam-live-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
-                                                <polyline points="4 14 10 14 10 20"/>
-                                                <polyline points="20 10 14 10 14 4"/>
-                                                <line x1="10" y1="14" x2="3" y2="21"/>
-                                                <line x1="21" y1="3" x2="14" y2="10"/>
-                                            </svg>
-                                        </button>
-                                    </div><!-- /slam-live-viewer-actions -->
-                                </div><!-- /slam-live-canvas-container -->
-                            </div><!-- /loc-viewer-canvas-panel -->
-                        </div><!-- /loc-live-viewer-layout -->
-                    </div><!-- /slam-live-viewer -->
-
-                    <!-- SLAM Analytics Dashboard (Phase 4.10) -->
-                    <div id="slam-analytics-dashboard" style="display:none; margin-bottom: 12px;">
-                        <!-- 대쉬보드 헤더 -->
-                        <div class="analytics-dashboard-header">
-                            <h3 class="analytics-dashboard-title">SLAM Analytics Dashboard</h3>
-                            <span class="analytics-live-badge">● LIVE</span>
-                        </div>
-
-                        <!-- 상단 행: 4열 (Hz / Traj / CPU / RAM) -->
-                        <div class="analytics-grid analytics-row-top">
-                            <div class="analytics-card" id="widget-sensor-hz">
-                                <div class="analytics-card-title">Sensor Frequency</div>
-                                <div class="analytics-hz-grid">
-                                    <div class="analytics-hz-item">
-                                        <div class="analytics-hz-label">IMU</div>
-                                        <div class="analytics-hz-value analytics-hz-ok" id="analytics-imu-hz">—</div>
-                                        <div class="analytics-hz-unit">Hz</div>
+                                    <div class="analytics-card" id="widget-traj">
+                                        <div class="analytics-card-title">Trajectory</div>
+                                        <div class="analytics-traj-grid">
+                                            <div class="analytics-traj-item">
+                                                <span class="analytics-traj-label">Distance</span>
+                                                <span><span class="analytics-traj-value" id="analytics-traj-dist">—</span><span class="analytics-traj-unit">m</span></span>
+                                            </div>
+                                            <div class="analytics-traj-item">
+                                                <span class="analytics-traj-label">Uptime</span>
+                                                <span class="analytics-traj-time" id="analytics-run-time">—</span>
+                                            </div>
+                                            <div class="analytics-traj-item">
+                                                <span class="analytics-traj-label">Avg Speed</span>
+                                                <span><span class="analytics-traj-derived" id="analytics-avg-speed">—</span><span class="analytics-traj-unit">m/s</span></span>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="analytics-hz-item">
-                                        <div class="analytics-hz-label">LiDAR</div>
-                                        <div class="analytics-hz-value analytics-hz-ok" id="analytics-lid-hz">—</div>
-                                        <div class="analytics-hz-unit">Hz</div>
+
+                                    <div class="analytics-card" id="widget-cpu">
+                                        <div class="analytics-card-title">CPU Usage</div>
+                                        <div class="analytics-cpu-wrap">
+                                            <div class="analytics-cpu-top-row">
+                                                <span class="analytics-cpu-percent" id="analytics-cpu-percent">—<span class="analytics-cpu-pct-sym">%</span></span>
+                                                <span class="analytics-cpu-cores-equiv" id="analytics-cpu-cores-equiv"></span>
+                                            </div>
+                                            <div class="analytics-cpu-bar-bg">
+                                                <div class="analytics-cpu-bar-fill" id="analytics-cpu-bar-fill" style="width:0%"></div>
+                                            </div>
+                                            <div class="analytics-cpu-ticks">
+                                                <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="analytics-card" id="widget-ram">
+                                        <div class="analytics-card-title">RAM Usage</div>
+                                        <div class="analytics-cpu-wrap analytics-ram-wrap">
+                                            <div class="analytics-cpu-top-row">
+                                                <span class="analytics-cpu-percent" id="analytics-ram-value">—<span class="analytics-cpu-pct-sym"> MB</span></span>
+                                                <span class="analytics-cpu-cores-equiv" id="analytics-ram-sub"></span>
+                                            </div>
+                                            <div class="analytics-cpu-bar-bg">
+                                                <div class="analytics-cpu-bar-fill" id="analytics-ram-bar-fill" style="width:0%"></div>
+                                            </div>
+                                            <div class="analytics-cpu-ticks">
+                                                <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- 중간 행: 2열 (Processing Time / Geometry Quality) -->
+                                <div class="analytics-grid analytics-row-middle">
+                                    <div class="analytics-card" id="widget-proc-time">
+                                        <div class="analytics-card-title">Per-frame Processing Time
+                                            <span class="analytics-card-subtitle">last 10s — stacked area</span>
+                                        </div>
+                                        <div id="analytics-chart-proctime" class="analytics-plot-container"></div>
+                                    </div>
+
+                                    <div class="analytics-card" id="widget-geometry">
+                                        <div class="analytics-card-title">Geometry Quality (DOP)
+                                            <span class="analytics-card-subtitle">lower is better — last 10s</span>
+                                        </div>
+                                        <div id="analytics-chart-dop" class="analytics-plot-container"></div>
+                                    </div>
+                                </div>
+
+                                <!-- 하단 행: 전체 너비 (Cumulative Timing) -->
+                                <div class="analytics-grid analytics-row-bottom">
+                                    <div class="analytics-card" id="widget-cumul-timing">
+                                        <div class="analytics-card-title">Cumulative Timing Statistics
+                                            <span class="analytics-card-subtitle">Mean / Max comparison + inline bar</span>
+                                        </div>
+                                        <table class="analytics-cumul-table">
+                                            <thead>
+                                                <tr>
+                                                    <th style="width:140px;">Component</th>
+                                                    <th class="analytics-right">Mean (ms)</th>
+                                                    <th class="analytics-right">Max (ms)</th>
+                                                    <th>Mean / Max Ratio</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="analytics-cumul-tbody"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                <!-- 상세정보 토글 -->
+                                <div class="analytics-detail-toggle-bar">
+                                    <button class="analytics-detail-toggle-btn" id="slam-analytics-detail-toggle" onclick="toggleSlamAnalyticsDetail()">
+                                        Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)
+                                    </button>
+                                    <div class="analytics-detail-section" id="slam-analytics-detail">
+                                        <div class="analytics-detail-cat-title">Scan / Map Statistics</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">scan_size</span><span class="analytics-detail-val" id="ad-scan_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">down_size</span><span class="analytics-detail-val" id="ad-down_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">map_size</span><span class="analytics-detail-val" id="ad-map_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">map_valid_size</span><span class="analytics-detail-val" id="ad-map_valid_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">new_idxs</span><span class="analytics-detail-val" id="ad-new_idxs">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">map_delete_size</span><span class="analytics-detail-val" id="ad-map_delete_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">buffer_size</span><span class="analytics-detail-val" id="ad-buffer_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">imu_buffer_size</span><span class="analytics-detail-val" id="ad-imu_buffer_size">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">scan_time</span><span class="analytics-detail-val" id="ad-scan_time">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">Adaptive Downsampling Parameters</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">filter_size_surf_ad</span><span class="analytics-detail-val" id="ad-filter_size_surf_ad">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">point_filter_num_ad</span><span class="analytics-detail-val" id="ad-point_filter_num_ad">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">Feature Matching</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">num_feats</span><span class="analytics-detail-val" id="ad-num_feats">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">num_reject</span><span class="analytics-detail-val" id="ad-num_reject">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">match_ratio</span><span class="analytics-detail-val" id="ad-match_ratio">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">Residual Statistics</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">res_mean</span><span class="analytics-detail-val" id="ad-res_mean">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">res_std</span><span class="analytics-detail-val" id="ad-res_std">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">IESEKF Optimization</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">kf_iterations</span><span class="analytics-detail-val" id="ad-kf_iterations">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">pos_cov</span><span class="analytics-detail-val" id="ad-pos_cov">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">rot_cov</span><span class="analytics-detail-val" id="ad-rot_cov">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">lidar_meas_cov</span><span class="analytics-detail-val" id="ad-lidar_meas_cov">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">IMU State Estimates</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">vel_norm</span><span class="analytics-detail-val" id="ad-vel_norm">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">acc_bias_norm</span><span class="analytics-detail-val" id="ad-acc_bias_norm">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">gyr_bias_norm</span><span class="analytics-detail-val" id="ad-gyr_bias_norm">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">Timing Breakdown</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">search_time</span><span class="analytics-detail-val" id="ad-search_time">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">delete_time</span><span class="analytics-detail-val" id="ad-delete_time">—</span></div>
+                                        </div>
+                                        <div class="analytics-detail-cat-title">Keyframe Info</div>
+                                        <div class="analytics-detail-grid">
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">kf_count</span><span class="analytics-detail-val" id="ad-kf_count">—</span></div>
+                                            <div class="analytics-detail-item"><span class="analytics-detail-field">kf_dist_last</span><span class="analytics-detail-val" id="ad-kf_dist_last">—</span></div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
 
-                            <div class="analytics-card" id="widget-traj">
-                                <div class="analytics-card-title">Trajectory</div>
-                                <div class="analytics-traj-grid">
-                                    <div class="analytics-traj-item">
-                                        <span class="analytics-traj-label">Distance</span>
-                                        <span><span class="analytics-traj-value" id="analytics-traj-dist">—</span><span class="analytics-traj-unit">m</span></span>
+                            <!-- Config Parameters Display -->
+                            <div id="slam-config-container" class="cfg-panel">
+                                <div class="cfg-header" onclick="toggleSlamConfig()">
+                                    <div class="cfg-header-left">
+                                        <span class="cfg-header-title">SLAM Configuration Parameters</span>
+                                        <span class="cfg-header-badge" id="slam-cfg-file-badge"></span>
                                     </div>
-                                    <div class="analytics-traj-item">
-                                        <span class="analytics-traj-label">Uptime</span>
-                                        <span class="analytics-traj-time" id="analytics-run-time">—</span>
-                                    </div>
-                                    <div class="analytics-traj-item">
-                                        <span class="analytics-traj-label">Avg Speed</span>
-                                        <span><span class="analytics-traj-derived" id="analytics-avg-speed">—</span><span class="analytics-traj-unit">m/s</span></span>
-                                    </div>
+                                    <span id="slam-config-toggle-btn" class="cfg-toggle-arrow">▼</span>
+                                </div>
+                                <div id="slam-config-parameters" class="cfg-body">
+                                    <!-- Parameters will be dynamically loaded here -->
+                                </div>
+                                <div class="ui-panel-footer">
+                                    <button class="ui-btn" onclick="loadSlamConfig()">Config Load</button>
+                                    <button class="ui-btn" id="slam-save-button" onclick="saveSlamConfig()">Set Config File</button>
+                                    <p class="ui-hint">mapping_config.yaml에 적용됩니다</p>
                                 </div>
                             </div>
-
-                            <div class="analytics-card" id="widget-cpu">
-                                <div class="analytics-card-title">CPU Usage</div>
-                                <div class="analytics-cpu-wrap">
-                                    <div class="analytics-cpu-top-row">
-                                        <span class="analytics-cpu-percent" id="analytics-cpu-percent">—<span class="analytics-cpu-pct-sym">%</span></span>
-                                        <span class="analytics-cpu-cores-equiv" id="analytics-cpu-cores-equiv"></span>
-                                    </div>
-                                    <div class="analytics-cpu-bar-bg">
-                                        <div class="analytics-cpu-bar-fill" id="analytics-cpu-bar-fill" style="width:0%"></div>
-                                    </div>
-                                    <div class="analytics-cpu-ticks">
-                                        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="analytics-card" id="widget-ram">
-                                <div class="analytics-card-title">RAM Usage</div>
-                                <div class="analytics-cpu-wrap analytics-ram-wrap">
-                                    <div class="analytics-cpu-top-row">
-                                        <span class="analytics-cpu-percent" id="analytics-ram-value">—<span class="analytics-cpu-pct-sym"> MB</span></span>
-                                        <span class="analytics-cpu-cores-equiv" id="analytics-ram-sub"></span>
-                                    </div>
-                                    <div class="analytics-cpu-bar-bg">
-                                        <div class="analytics-cpu-bar-fill" id="analytics-ram-bar-fill" style="width:0%"></div>
-                                    </div>
-                                    <div class="analytics-cpu-ticks">
-                                        <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- 중간 행: 2열 (Processing Time / Geometry Quality) -->
-                        <div class="analytics-grid analytics-row-middle">
-                            <div class="analytics-card" id="widget-proc-time">
-                                <div class="analytics-card-title">Per-frame Processing Time
-                                    <span class="analytics-card-subtitle">last 10s — stacked area</span>
-                                </div>
-                                <div id="analytics-chart-proctime" class="analytics-plot-container"></div>
-                            </div>
-
-                            <div class="analytics-card" id="widget-geometry">
-                                <div class="analytics-card-title">Geometry Quality (DOP)
-                                    <span class="analytics-card-subtitle">lower is better — last 10s</span>
-                                </div>
-                                <div id="analytics-chart-dop" class="analytics-plot-container"></div>
-                            </div>
-                        </div>
-
-                        <!-- 하단 행: 전체 너비 (Cumulative Timing) -->
-                        <div class="analytics-grid analytics-row-bottom">
-                            <div class="analytics-card" id="widget-cumul-timing">
-                                <div class="analytics-card-title">Cumulative Timing Statistics
-                                    <span class="analytics-card-subtitle">Mean / Max comparison + inline bar</span>
-                                </div>
-                                <table class="analytics-cumul-table">
-                                    <thead>
-                                        <tr>
-                                            <th style="width:140px;">Component</th>
-                                            <th class="analytics-right">Mean (ms)</th>
-                                            <th class="analytics-right">Max (ms)</th>
-                                            <th>Mean / Max Ratio</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="analytics-cumul-tbody"></tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <!-- 상세정보 토글 -->
-                        <div class="analytics-detail-toggle-bar">
-                            <button class="analytics-detail-toggle-btn" id="slam-analytics-detail-toggle" onclick="toggleSlamAnalyticsDetail()">
-                                Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)
-                            </button>
-                            <div class="analytics-detail-section" id="slam-analytics-detail">
-                                <div class="analytics-detail-cat-title">Scan / Map Statistics</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_size</span><span class="analytics-detail-val" id="ad-scan_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">down_size</span><span class="analytics-detail-val" id="ad-down_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_size</span><span class="analytics-detail-val" id="ad-map_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_valid_size</span><span class="analytics-detail-val" id="ad-map_valid_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">new_idxs</span><span class="analytics-detail-val" id="ad-new_idxs">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">map_delete_size</span><span class="analytics-detail-val" id="ad-map_delete_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">buffer_size</span><span class="analytics-detail-val" id="ad-buffer_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">imu_buffer_size</span><span class="analytics-detail-val" id="ad-imu_buffer_size">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">scan_time</span><span class="analytics-detail-val" id="ad-scan_time">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">Adaptive Downsampling Parameters</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">filter_size_surf_ad</span><span class="analytics-detail-val" id="ad-filter_size_surf_ad">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">point_filter_num_ad</span><span class="analytics-detail-val" id="ad-point_filter_num_ad">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">Feature Matching</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">num_feats</span><span class="analytics-detail-val" id="ad-num_feats">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">num_reject</span><span class="analytics-detail-val" id="ad-num_reject">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">match_ratio</span><span class="analytics-detail-val" id="ad-match_ratio">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">Residual Statistics</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">res_mean</span><span class="analytics-detail-val" id="ad-res_mean">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">res_std</span><span class="analytics-detail-val" id="ad-res_std">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">IESEKF Optimization</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_iterations</span><span class="analytics-detail-val" id="ad-kf_iterations">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">pos_cov</span><span class="analytics-detail-val" id="ad-pos_cov">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">rot_cov</span><span class="analytics-detail-val" id="ad-rot_cov">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">lidar_meas_cov</span><span class="analytics-detail-val" id="ad-lidar_meas_cov">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">IMU State Estimates</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">vel_norm</span><span class="analytics-detail-val" id="ad-vel_norm">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">acc_bias_norm</span><span class="analytics-detail-val" id="ad-acc_bias_norm">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">gyr_bias_norm</span><span class="analytics-detail-val" id="ad-gyr_bias_norm">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">Timing Breakdown</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">search_time</span><span class="analytics-detail-val" id="ad-search_time">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">delete_time</span><span class="analytics-detail-val" id="ad-delete_time">—</span></div>
-                                </div>
-                                <div class="analytics-detail-cat-title">Keyframe Info</div>
-                                <div class="analytics-detail-grid">
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_count</span><span class="analytics-detail-val" id="ad-kf_count">—</span></div>
-                                    <div class="analytics-detail-item"><span class="analytics-detail-field">kf_dist_last</span><span class="analytics-detail-val" id="ad-kf_dist_last">—</span></div>
-                                </div>
-                            </div>
-                        </div>
+                        </aside>
                     </div>
 
-                    <div id="slam-save-map-status-area" class="status-banner" style="display:none; margin-bottom: 12px;">
-                        <div style="display:flex; align-items:center; gap:10px;">
-                            <span id="slam-save-map-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>
-                            <span id="slam-save-map-msg" style="flex:1; font-size:13px; color:var(--text);"></span>
-                            <button id="slam-save-map-cancel-btn" onclick="cancelSaveMap()" style="display:none; padding:6px 14px; min-width:auto; background:rgba(255,95,109,0.15); border:1px solid rgba(255,95,109,0.5); color:var(--danger); border-radius:8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.2s;">Cancel</button>
-                        </div>
-                    </div>
-
-                    <!-- Save Map Result Viewer -->
-                    <div id="savemap-result-viewer" style="display:none;">
-                        <!-- 상태 동기화용 hidden 체크박스 (라이브 뷰어와 동일) -->
-                        <input type="checkbox" id="savemap-viewer-topview-toggle"
-                               onchange="toggleSaveMapTopView(this.checked)" style="display:none;" />
-                        <input type="checkbox" id="savemap-viewer-edl-toggle"
-                               onchange="toggleSaveMapEDL(this.checked)" style="display:none;" />
-                        <div id="savemap-result-canvas-container">
-                            <canvas id="savemap-result-canvas"></canvas>
-                            <div id="savemap-result-loading">Loading...</div>
-                            <!-- Height Clip: 왼쪽 세로 바(핸들 2개)로 Z 높이 기준 단면(cross-section) 표시 -->
-                            <div id="savemap-height-clip-overlay" style="display:none;" title="드래그하여 높이 단면 조절 (더블클릭: 전체 표시)">
-                                <span class="height-clip-value" id="savemap-height-clip-max-label">-</span>
-                                <div class="height-clip-track" id="savemap-height-clip-track">
-                                    <div class="height-clip-fill" id="savemap-height-clip-fill"></div>
-                                    <div class="height-clip-handle height-clip-handle-max" id="savemap-height-clip-handle-max"></div>
-                                    <div class="height-clip-handle height-clip-handle-min" id="savemap-height-clip-handle-min"></div>
-                                </div>
-                                <span class="height-clip-value" id="savemap-height-clip-min-label">-</span>
-                                <span class="height-clip-current" id="savemap-height-clip-current-label">Z: -</span>
-                            </div>
-                            <div id="savemap-pcd-legend">
-                                <div class="slam-legend-row" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="background:#ffdd00;"></span><span>LIO Map</span></div>
-                                <div class="slam-legend-row" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
-                                <div class="slam-legend-row" data-layer="static" data-active="true" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
-                            </div>
-                            <div id="savemap-result-legend">
-                                <div class="slam-legend-row" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="background:#ff8800;"></span><span>LIO</span></div>
-                                <div class="slam-legend-row" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="background:#ffffff;"></span><span>PGO</span></div>
-                                <div class="slam-legend-separator"></div>
-                                <div class="slam-legend-row" data-layer="loopclosure" data-active="true" onclick="toggleSaveMapLayer('loopclosure')"><span class="slam-legend-line" style="background:#2288ff;"></span><span>Loop Closure</span></div>
-                            </div>
-                            <div id="savemap-point-size-overlay">
-                                <span class="slam-ps-label-text">Pt Size</span>
-                                <input type="range" id="savemap-point-size-slider"
-                                    min="0.01" max="0.5" step="0.01" value="0.05"
-                                    oninput="setSaveMapPointSize(parseFloat(this.value))" />
-                                <span id="savemap-point-size-label">0.05 m</span>
-                            </div>
-                            <div id="savemap-viewer-actions">
-                                <button class="slam-action-btn" id="savemap-reset-btn" onclick="resetSaveMapResultView()" title="Reset View">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                                </button>
-                                <button class="slam-action-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
-                                </button>
-                                <button class="slam-action-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                                </button>
-                                <button class="slam-action-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                                </button>
-                                <button class="slam-action-btn" id="savemap-fullscreen-btn" onclick="toggleSaveMapResultFullscreen()" title="풀스크린">
-                                    <svg id="savemap-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-                                    <svg id="savemap-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="separator"></div>
-
-                    <div class="status">
+                    <div class="status" hidden>
                         <label id="lidar-slam-status">Status: Ready</label>
                     </div>
 

@@ -60,6 +60,9 @@ def check_slam_start_fail(page, failures):
         failures.append(f'slam: badge after Start {text!r} != Starting…')
     if page.locator('#slam-start-button').is_enabled():
         failures.append('slam: start enabled while Starting')
+    empty_title = page.locator('#lidar-slam-viewer-empty .ui-viewer-empty-title').text_content().strip()
+    if empty_title != 'rosbridge 연결 대기 중…':
+        failures.append(f'slam: empty title while Starting {empty_title!r}')
     shot(page, 'p2-slam-starting')
     if not held:
         failures.append('slam: start_mapping request not intercepted')
@@ -130,13 +133,106 @@ def check_slam_legacy_nav(page, failures):
         page.evaluate("localStorage.removeItem('webui.legacyNav')")
 
 
+def check_slam_layout(page, failures, width=1440):
+    """지도 8 / 정보 4 배치, 빈 지도 칸, Config 패널 아래 버튼 (SLAM 미실행)."""
+    if not page.locator('.ui-screen-grid .ui-col-main #lidar-slam-viewer-empty').is_visible():
+        failures.append('slam layout: empty viewer not visible in main column')
+    if not page.locator('.ui-col-side #slam-config-container').count():
+        failures.append('slam layout: config container not in side column')
+    if not page.locator('#slam-config-container .ui-btn[onclick*="loadSlamConfig"]').count():
+        failures.append('slam layout: Config Load .ui-btn not in config container')
+    if width == 1440:
+        sizes = page.evaluate("""() => {
+            const m = document.querySelector('#lidar-slam-subtab .ui-col-main');
+            const s = document.querySelector('#lidar-slam-subtab .ui-col-side');
+            return m && s ? [m.getBoundingClientRect().width, s.getBoundingClientRect().width] : null;
+        }""")
+        if not sizes or not sizes[1] or abs(sizes[0] / sizes[1] - 2) > 0.3:
+            failures.append(f'slam layout: main/side width {sizes} not ~2:1')
+    shot(page, f'p2-slam-layout-{width}')
+
+
+def mock_slam_running(page):
+    def fulfill_state(route):
+        resp = route.fetch()
+        data = resp.json()
+        data['is_running'] = True
+        route.fulfill(response=resp, body=json.dumps(data))
+    page.route('**/api/slam/state', fulfill_state)
+
+
+def check_slam_save_overlay(page, failures):
+    """save_map 성공 + save_map_status 진행 중 흉내 → 지도 칸 안 오버레이·진행 바·경과 시간."""
+    status = {'saving': True, 'done': False, 'success': False, 'message': 'Saving map... (10 s elapsed)'}
+    mock_slam_running(page)
+    page.route('**/api/slam/save_map', lambda route: route.fulfill(
+        status=200, content_type='application/json', body=json.dumps({'success': True, 'message': 'started'})))
+    page.route('**/api/slam/save_map_status', lambda route: route.fulfill(
+        status=200, content_type='application/json', body=json.dumps(status)))
+    page.wait_for_timeout(2500)
+    page.evaluate("""() => {
+        document.getElementById('save-map-directory').value = 'mock_map';
+        confirmSaveMap();
+    }""")
+    page.wait_for_timeout(500)
+    overlay = page.locator('.ui-col-main #slam-save-map-status-area.ui-viewer-overlay')
+    if not overlay.is_visible():
+        failures.append('slam save: overlay not visible in main column')
+    if not page.locator('#slam-save-map-status-area .ui-progress').is_visible():
+        failures.append('slam save: progress bar not visible while saving')
+    cancel = page.locator('#slam-save-map-cancel-btn')
+    if cancel.inner_text().strip() != '기다리기 중단' or cancel.get_attribute('title') != '노드의 저장은 끝까지 진행됩니다':
+        failures.append(f'slam save: cancel text/title {cancel.inner_text()!r}')
+    first = page.locator('#slam-save-map-elapsed').inner_text().strip()
+    page.wait_for_timeout(2200)
+    second = page.locator('#slam-save-map-elapsed').inner_text().strip()
+    if first == second or not second.startswith('0:0'):
+        failures.append(f'slam save: elapsed not ticking {first!r} -> {second!r}')
+    if badge_text(page, 'lidar-slam-header-badge') != 'Saving Map…':
+        failures.append('slam save: badge not Saving Map…')
+    shot(page, 'p2-slam-saving')
+    status.update({'saving': False, 'done': True, 'success': True, 'message': 'Map saved successfully to directory: mock_map'})
+    page.wait_for_timeout(2500)
+    if page.locator('#slam-save-map-status-area .ui-progress').is_visible():
+        failures.append('slam save: progress bar visible after success')
+    shot(page, 'p2-slam-saved')
+    for url in ('**/api/slam/state', '**/api/slam/save_map', '**/api/slam/save_map_status'):
+        page.unroute(url)
+
+
+def check_slam_config_load_failed(page, failures):
+    """기본 설정 읽기가 실패해도 Config Load 버튼이 보여야 한다 (버튼이 Config 패널 안에 있으므로)."""
+    page.route('**/api/slam/load_config_file', lambda route: route.abort())
+    page.reload(wait_until='load')
+    page.wait_for_selector('#slam-tab')
+    go_screen(page, 'lidar-slam-subtab')
+    page.wait_for_timeout(1500)
+    if not page.locator('#slam-config-container .ui-btn[onclick*="loadSlamConfig"]').is_visible():
+        failures.append('slam config: Config Load not visible after config load failure')
+    shot(page, 'p2-slam-config-load-failed')
+    page.unroute('**/api/slam/load_config_file')
+
+
 if __name__ == '__main__':
     failures = []
+    all_errors = []
     with open_page() as (page, errors):
         check_slam_ready(page, failures)
+        check_slam_layout(page, failures)
         if not failures:
             check_slam_start_fail(page, failures)
             check_slam_running(page, failures)
+            check_slam_save_overlay(page, failures)
             check_slam_legacy_nav(page, failures)
-        # 흉내 낸 Start 실패가 남기는 기존 console.error
-        finish(failures, [e for e in errors if e != 'Failed to start SLAM mapping'])
+        all_errors += errors
+    with open_page(width=1280) as (page, errors):
+        go_screen(page, 'lidar-slam-subtab')
+        page.wait_for_timeout(500)
+        check_slam_layout(page, failures, width=1280)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_slam_config_load_failed(page, failures)
+        # 일부러 끊은 요청이 남기는 콘솔 에러는 빼고 JS 예외만 본다
+        all_errors += [e for e in errors if e.startswith('pageerror')]
+    # 흉내 낸 Start 실패가 남기는 기존 console.error
+    finish(failures, [e for e in all_errors if e != 'Failed to start SLAM mapping'])

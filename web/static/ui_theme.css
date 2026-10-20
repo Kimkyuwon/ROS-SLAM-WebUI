@@ -399,6 +399,26 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 .ui-screen-grid { display: grid; grid-template-columns: minmax(0, 8fr) minmax(320px, 4fr); gap: 16px; padding: 16px 20px; }
 .ui-col-main { position: relative; min-width: 0; }
 .ui-col-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+/* 8/4 격자를 품은 옛 카드는 테두리·안쪽 여백을 걷어 격자가 화면 바탕에 바로 놓이게 한다 */
+.ui-has-sidebar .section.card:has(> .ui-screen-grid) { margin: 0; padding: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
+.ui-col-main .ui-viewer-empty, .ui-col-main .loc-live-viewer-layout, .ui-col-main #savemap-result-canvas-container { min-height: 420px; height: calc(100vh - 220px); }
+/* 오른쪽 칸이 길어도 지도 칸이 늘어나지 않게 — 저장 카드가 지도 칸 바닥에 붙는다 */
+.ui-screen-grid { align-items: start; }
+.ui-viewer-empty[hidden] { display: none; }
+.ui-viewer-empty[data-state="saving"] > * { visibility: hidden; }
+.ui-col-side .ui-panel-footer .ui-btn { flex: 1; }
+.ui-panel-footer > .ui-hint { flex-basis: 100%; text-align: right; }
+
+/* 지도 칸 안 저장 진행 카드 (.status-banner의 상태 클래스는 기존 JS가 붙인다) */
+.ui-viewer-overlay.status-banner { margin: 0; font-weight: 400; }
+.ui-viewer-overlay.status-banner.success { background: var(--color-raised); border-color: rgba(63, 208, 122, 0.55); }
+.ui-viewer-overlay.status-banner.error { background: var(--color-raised); border-color: rgba(240, 97, 109, 0.55); }
+.ui-viewer-overlay-title { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.status-banner.success .ui-progress, .status-banner.error .ui-progress { display: none; }
+.status-banner.success .ui-hint, .status-banner.error .ui-hint { display: none; }
+#slam-save-map-status-area .ui-hint { color: var(--color-warn); }
+#slam-save-map-elapsed { margin: 0; font-size: 13px; color: var(--color-ink); }
+#slam-save-map-elapsed::before { content: '경과 '; color: var(--color-mute); }
 
 /* --- 포커스 (키보드 조작만 표시) --- */
 [class^="ui-"]:focus-visible, [class*=" ui-"]:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
