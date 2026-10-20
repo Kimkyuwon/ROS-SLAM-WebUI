@@ -30,4 +30,22 @@ with open_page() as (page, errors):
     if not latency.count() or not latency.inner_text().strip().endswith('ms'):
         failures.append('conn latency not ms')
     shot(page, 'p1-shell')
+
+    # 맨 아래로 스크롤해도 사이드바는 화면 높이 그대로 왼쪽에 붙어 있어야 한다
+    page.locator('.ui-sidebar-item[data-screen="lidar-slam-subtab"]').click()
+    page.wait_for_selector('#slam-config-parameters [data-config-key]', state='attached')
+    vh = page.viewport_size['height']
+    cases = (
+        ('analytics', 'slamAnalyticsDashboard.show()'),  # Plotly 내부 div가 칸 밖으로 넘치는 경우
+        ('config-open', 'slamAnalyticsDashboard.hide(); toggleSlamConfig()'),  # 본문이 길어진 경우
+    )
+    for name, setup in cases:
+        page.evaluate(setup)
+        page.wait_for_timeout(500)
+        page.evaluate('window.scrollTo(0, document.documentElement.scrollHeight)')
+        page.wait_for_timeout(200)
+        box = page.locator('.ui-sidebar').bounding_box()
+        if abs(box['y']) > 2 or abs(box['y'] + box['height'] - vh) > 2:
+            failures.append(f'sidebar moved after scroll to bottom ({name}): {box}')
+        shot(page, f'p1-shell-scrolled-{name}')
     finish(failures, errors)

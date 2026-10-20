@@ -352,6 +352,9 @@ body {
 body.ui-has-sidebar { padding: 0; }
 .ui-has-sidebar .page-shell { max-width: none; margin: 0; padding: 0; }
 .ui-main { min-width: 0; }
+/* 본문 자식이 칸 밖으로 넘친 만큼(예: Plotly 내부 .plot-container에 새는 style.css 700px 규칙) 문서가 셸보다 길어지면
+   sticky 사이드바가 셸 바닥에 걸려 위로 밀린다. clip은 스크롤 컨테이너를 만들지 않아 sticky 헤더는 그대로 */
+.ui-has-sidebar .ui-main { overflow-y: clip; }
 .ui-sidebar-brand { display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 16px; border-bottom: 1px solid var(--color-line); }
 .ui-brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--color-line2); border-radius: var(--radius-sm); font: 500 11px var(--font-mono); color: var(--color-info); }
 .ui-brand-title { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.01em; color: var(--color-ink); }
