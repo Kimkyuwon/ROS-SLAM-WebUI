@@ -6407,38 +6407,16 @@ class WebGUINode(Node):
                 self.get_logger().error(f'Failed to get bag info: {result.stderr}')
                 return {'topics': [], 'duration': 0.0, 'bag_type': 'ros2'}
 
-            # Parse output to extract topics and duration
-            topics = []
-            duration = 0.0
-            lines = result.stdout.split('\n')
-
             self.get_logger().info('Parsing bag info output:')
-
-            for line in lines:
+            for line in result.stdout.split('\n'):
                 self.get_logger().info(f'  Line: {line.strip()}')
 
-                # Parse duration (e.g., "Duration: 123.456s")
-                if 'Duration' in line and 's' in line:
-                    try:
-                        # Extract duration value
-                        duration_str = line.split(':')[1].strip()
-                        # Remove 's' and convert to float
-                        duration = float(duration_str.replace('s', '').strip())
-                        self.get_logger().info(f'  Found duration: {duration}s')
-                    except:
-                        pass
-
-                # Parse topics - looking for lines with "Topic: /topic_name | Count: X | Connection: Y"
-                if 'Topic:' in line and '|' in line:
-                    try:
-                        # Extract topic name between "Topic:" and first "|"
-                        parts = line.split('|')
-                        topic_part = parts[0]
-                        topic_name = topic_part.split('Topic:')[1].strip()
-                        topics.append(topic_name)
-                        self.get_logger().info(f'  Found topic: {topic_name}')
-                    except:
-                        pass
+            parsed = parse_ros2_bag_info(result.stdout)
+            topics = parsed['topics']
+            duration = parsed['duration']
+            self.get_logger().info(f'  Found duration: {duration}s')
+            for detail in parsed['topic_details']:
+                self.get_logger().info(f'  Found topic: {detail["name"]}')
 
             self.bag_topics = topics
             self.bag_duration = duration
@@ -6446,7 +6424,8 @@ class WebGUINode(Node):
             self.get_logger().info(f'Topics: {topics}')
 
             bag_format = self._detect_bag_format(self.bag_path)
-            return {'topics': topics, 'duration': duration, 'bag_type': 'ros2', 'bag_format': bag_format}
+            return {'topics': topics, 'topic_details': parsed['topic_details'], 'duration': duration,
+                    'bag_type': 'ros2', 'bag_format': bag_format}
 
         except subprocess.TimeoutExpired:
             self.get_logger().error('Timeout while getting bag info')
@@ -6513,6 +6492,7 @@ class WebGUINode(Node):
 
             # publishable 여부 포함 딕셔너리 목록 생성
             topic_dicts = []
+            topic_details = []
             topic_names = []  # 기존 bag_topics 호환용
             for topic_name, topic_info in raw_topics.items():
                 ros1_type = topic_info.msgtype
@@ -6521,6 +6501,11 @@ class WebGUINode(Node):
                     'name': topic_name,
                     'type': ros1_type,
                     'publishable': publishable,
+                })
+                topic_details.append({
+                    'name': topic_name,
+                    'type': ros1_type,
+                    'count': getattr(topic_info, 'msgcount', None),
                 })
                 topic_names.append(topic_name)
 
@@ -6537,7 +6522,8 @@ class WebGUINode(Node):
                 flag = '✓' if t['publishable'] else '✗'
                 self.get_logger().info(f'  [{flag}] {t["name"]} ({t["type"]})')
 
-            return {'topics': topic_dicts, 'duration': duration, 'bag_type': 'ros1', 'bag_format': 'ros1'}
+            return {'topics': topic_dicts, 'topic_details': topic_details, 'duration': duration,
+                    'bag_type': 'ros1', 'bag_format': 'ros1'}
 
         except ImportError:
             self.get_logger().error(
@@ -8373,6 +8359,37 @@ def get_process_log(name, lines_raw):
     return {'success': True, 'data': {'lines': tail_text_file(path, clamp_log_lines(lines_raw))}}
 
 
+def _parse_bag_info_topic_line(line):
+    """'Topic: /x | Type: T | Count: N | ...' 한 줄을 {'name', 'type', 'count'}로."""
+    parts = line.split('|')
+    name = parts[0].split('Topic:', 1)[1].strip()
+    fields = {}
+    for part in parts[1:]:
+        key, sep, value = part.partition(':')
+        if sep:
+            fields[key.strip()] = value.strip()
+    try:
+        count = int(fields.get('Count', ''))
+    except ValueError:
+        count = None
+    return {'name': name, 'type': fields.get('Type', ''), 'count': count}
+
+
+def parse_ros2_bag_info(stdout):
+    """`ros2 bag info` 출력에서 토픽 이름·Type·Count와 duration(초)을 뽑는다."""
+    topic_details = []
+    duration = 0.0
+    for line in stdout.split('\n'):
+        if 'Duration' in line and 's' in line:
+            try:
+                duration = float(line.split(':')[1].strip().replace('s', '').strip())
+            except (IndexError, ValueError):
+                pass
+        if 'Topic:' in line and '|' in line:
+            topic_details.append(_parse_bag_info_topic_line(line))
+    return {'topics': [t['name'] for t in topic_details], 'topic_details': topic_details, 'duration': duration}
+
+
 # ── Map1/Map2 점군 서버사이드 누적/복셀화 (뷰어 로딩 속도 최적화) ─────────────
 # pcl::io::savePCDFileBinary가 생성하는 uncompressed binary PointXYZI(x y z [intensity],
 # 모두 4바이트 float, 패딩 없음) 포맷만 지원한다. ascii/binary_compressed나 그 외 포맷은
@@ -8701,6 +8718,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response({
                 'success': True,
                 'topics': info['topics'],
+                'topic_details': info.get('topic_details', []),
                 'duration': info['duration'],
                 'bag_type': info.get('bag_type', 'ros2'),
                 'bag_format': info.get('bag_format'),
@@ -8846,6 +8864,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
                 'message': 'Bag path set',
                 'path': self.node.bag_path,
                 'topics': info['topics'],
+                'topic_details': info.get('topic_details', []),
                 'duration': info['duration'],
                 'bag_type': info.get('bag_type', 'ros2'),
                 'bag_format': info.get('bag_format'),
