@@ -623,6 +623,7 @@ The following JavaScript libraries are bundled locally under `web/static/vendor/
 | [Three.js](https://github.com/mrdoob/three.js) | 0.128.0 | MIT | 3D rendering |
 | [Plotly.js](https://github.com/plotly/plotly.js) | 2.27.0 | MIT | Interactive plots |
 | [roslibjs](https://github.com/RobotWebTools/roslibjs) | 1.1.0 | BSD-3-Clause | ROS WebSocket bridge |
+| Fira Sans / [Fira Code](https://github.com/tonsky/FiraCode) | 4.203 / 5.002 | SIL OFL 1.1 (`web/static/vendor/fonts/OFL.txt`) | UI fonts |
 
 The following is a separate ROS2 package dependency (not bundled):
 
