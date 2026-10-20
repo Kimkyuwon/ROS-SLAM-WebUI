@@ -670,6 +670,177 @@ def check_loc_running(page, failures):
         failures.append(f'loc reset: values not cleared {reset}')
 
 
+WARN_COLOR = 'rgb(232, 176, 75)'
+STOP_COLOR = 'rgb(240, 97, 109)'
+LOG_LINES = [
+    '[laserMapping]: IMU Initial Done',
+    '[laserMapping]: No point, skip this scan!',
+    '[laserLocalization]: Map file cannot open: /x.pcd',
+    '[laserMapping]: lidar loop back, clear buffer',
+]
+
+
+def check_save_map_name(page, failures):
+    """Save Map 이름 검증(300ms 디바운스)·덮어쓰기 확인. save_map_check·save_map은 page.route로 흉내."""
+    checks = []
+    posts = []
+
+    def on_check(route):
+        name = route.request.url.split('name=', 1)[1] if 'name=' in route.request.url else ''
+        checks.append(name)
+        body = {'valid': True, 'reason': '', 'exists': name == 'ok_name'}
+        if name == 'Map':
+            body = {'valid': False, 'reason': '"Map"은(는) 예약된 이름입니다', 'exists': False}
+        route.fulfill(status=200, content_type='application/json', body=json.dumps({'success': True, 'data': body}))
+
+    def on_save(route):
+        posts.append(route.request.post_data)
+        route.fulfill(status=200, content_type='application/json',
+                      body=json.dumps({'success': False, 'message': 'mock'}))
+
+    page.route('**/api/slam/save_map_check*', on_check)
+    page.route('**/api/slam/save_map', on_save)
+    page.on('dialog', lambda d: d.dismiss())
+    go_screen(page, 'lidar-slam-subtab')
+    page.evaluate('() => { saveSlamMap(); }')
+    confirm = page.locator('#save-map-confirm-btn')
+    error = page.locator('#save-map-name-error')
+    if not confirm.is_disabled():
+        failures.append('save-map: confirm not locked with empty name')
+    if error.is_visible():
+        failures.append('save-map: error shown for empty name')
+    if checks:
+        failures.append(f'save-map: empty name asked the server {checks}')
+    hint = page.locator('#save-map-location-hint').inner_text()
+    if 'pose_graph_optimization/<이름>/' not in hint:
+        failures.append(f'save-map: location hint {hint!r}')
+    if '영문·숫자·_·- 만, 1~64자, Map 사용 불가' not in page.locator('#save-map-modal').inner_text():
+        failures.append('save-map: rule text missing')
+
+    inp = page.locator('#save-map-directory')
+    inp.fill('Map')
+    page.wait_for_timeout(100)
+    if checks:
+        failures.append(f'save-map: check called before debounce {checks}')
+    page.wait_for_timeout(500)
+    if checks != ['Map']:
+        failures.append(f'save-map: debounced check calls {checks}')
+    if not confirm.is_disabled():
+        failures.append('save-map: confirm not locked for Map')
+    if '예약된 이름' not in error.inner_text() or not error.is_visible():
+        failures.append(f'save-map: error text {error.inner_text()!r}')
+    if error.evaluate('el => getComputedStyle(el).color') != STOP_COLOR:
+        failures.append('save-map: error not stop color')
+    shot(page, 'p2-save-map-name-error')
+    inp.press('Enter')
+    page.wait_for_timeout(200)
+    if posts:
+        failures.append('save-map: Enter on locked confirm sent a save request')
+
+    inp.fill('ok_name')
+    page.wait_for_timeout(700)
+    if confirm.is_disabled():
+        failures.append('save-map: confirm locked for valid name')
+    if not page.locator('#save-map-exists-note').is_visible():
+        failures.append('save-map: exists note hidden')
+    if 'pose_graph_optimization/ok_name/' not in page.locator('#save-map-location-hint').inner_text():
+        failures.append('save-map: location hint not live-updated')
+    shot(page, 'p2-save-map-name-exists')
+    confirm.click()
+    page.wait_for_selector('.ui-dialog', timeout=2000)
+    dialog_text = page.locator('.ui-dialog').inner_text()
+    if '덮어쓰기' not in dialog_text or '같은 이름의 지도가 있습니다' not in dialog_text:
+        failures.append(f'save-map: overwrite dialog text {dialog_text!r}')
+    if page.locator('.ui-dialog .ui-btn').first.inner_text() != '취소':
+        failures.append('save-map: dialog cancel button missing')
+    shot(page, 'p2-save-map-overwrite-confirm')
+    page.locator('.ui-dialog .ui-btn').first.click()
+    page.wait_for_timeout(300)
+    if posts:
+        failures.append(f'save-map: save_map sent after overwrite cancel {posts}')
+    if not page.locator('#save-map-modal').is_visible():
+        failures.append('save-map: modal closed after overwrite cancel')
+
+    inp.press('Enter')
+    page.wait_for_selector('.ui-dialog', timeout=2000)
+    page.locator('.ui-dialog .ui-btn').last.click()
+    page.wait_for_timeout(500)
+    if len(posts) != 1 or 'ok_name' not in posts[0]:
+        failures.append(f'save-map: save_map after overwrite ok {posts}')
+    page.unroute_all(behavior='wait')
+
+
+def check_node_log(page, failures, kind, screen):
+    """노드 로그 패널: 열기·줄 색·3초 폴링·닫으면 폴링 중단 (process_log는 page.route로 흉내)."""
+    calls = []
+    name = 'slam' if kind == 'slam' else 'localization'
+
+    def on_log(route):
+        if f'name={name}&' in route.request.url:
+            calls.append(route.request.url)
+        route.fulfill(status=200, content_type='application/json',
+                      body=json.dumps({'success': True, 'data': {'lines': LOG_LINES}}))
+
+    page.route('**/api/system/process_log*', on_log)
+    go_screen(page, screen)
+    page.wait_for_timeout(300)
+    btn = page.locator(f'#{kind}-log-btn')
+    panel = page.locator(f'#{kind}-log-panel')
+    if not btn.count() or btn.get_attribute('aria-label') != '노드 로그':
+        failures.append(f'{kind} log: button missing or aria-label wrong')
+        return
+    first = page.evaluate(
+        f"document.querySelector('#{screen} .ui-screen-actions').firstElementChild.id")
+    if first != f'{kind}-log-btn':
+        failures.append(f'{kind} log: button not first in header actions ({first})')
+    if panel.is_visible() or calls:
+        failures.append(f'{kind} log: panel visible or polled while closed')
+    side_first = page.evaluate(f"document.querySelector('#{screen} .ui-col-side').firstElementChild.id")
+    if side_first != f'{kind}-log-panel':
+        failures.append(f'{kind} log: panel not first in side column ({side_first})')
+    btn.click()
+    page.wait_for_selector(f'#{kind}-log-pre > div', timeout=3000)
+    if not panel.is_visible():
+        failures.append(f'{kind} log: panel not visible after click')
+    if f'name={name}&lines=50' not in calls[0]:
+        failures.append(f'{kind} log: request url {calls[0]}')
+    rows = page.eval_on_selector_all(
+        f'#{kind}-log-pre > div',
+        "els => els.map(e => [e.textContent, getComputedStyle(e).color])")
+    if [r[0] for r in rows] != LOG_LINES:
+        failures.append(f'{kind} log: rows {rows}')
+    else:
+        colors = [r[1] for r in rows]
+        if colors[1] != WARN_COLOR or colors[3] != WARN_COLOR or colors[2] != STOP_COLOR or colors[0] in (
+                WARN_COLOR, STOP_COLOR):
+            failures.append(f'{kind} log: line colors {colors}')
+    if '50줄' not in panel.inner_text() or 'stdout(cout)' not in panel.inner_text():
+        failures.append(f'{kind} log: title/hint text missing')
+    shot(page, f'p2-{kind}-node-log')
+    n = len(calls)
+    page.wait_for_timeout(3600)
+    if len(calls) <= n:
+        failures.append(f'{kind} log: no 3s polling while open ({n} -> {len(calls)})')
+    btn.click()
+    page.wait_for_timeout(300)
+    n = len(calls)
+    page.wait_for_timeout(3600)
+    if panel.is_visible() or len(calls) != n:
+        failures.append(f'{kind} log: still visible/polling after close')
+    page.evaluate(f"uiShell.openNodeLog('{kind}')")
+    page.wait_for_timeout(300)
+    if not panel.is_visible():
+        failures.append(f'{kind} log: uiShell.openNodeLog did not open')
+    other = 'localization-subtab' if kind == 'slam' else 'lidar-slam-subtab'
+    go_screen(page, other)
+    page.wait_for_timeout(2500)
+    n = len(calls)
+    page.wait_for_timeout(3600)
+    if len(calls) != n:
+        failures.append(f'{kind} log: polling continues while screen hidden')
+    page.unroute_all(behavior='wait')
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
@@ -710,6 +881,13 @@ if __name__ == '__main__':
     with open_page() as (page, errors):
         check_slam_result_viewer(page, failures)
         check_slam_restore_failed(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_save_map_name(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_node_log(page, failures, 'slam', 'lidar-slam-subtab')
+        check_node_log(page, failures, 'loc', 'localization-subtab')
         all_errors += errors
     # 흉내 낸 Start 실패가 남기는 기존 console.error
     finish(failures, [e for e in all_errors if e != 'Failed to start SLAM mapping'])

@@ -228,6 +228,7 @@ const uiShell = (() => {
     function refresh() {
         const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
         syncSaveElapsed();
+        syncNodeLogPolling();
         if (!screenEl) return;
         if (screenEl.id === 'lidar-slam-subtab') {
             renderSlam();
@@ -281,6 +282,84 @@ const uiShell = (() => {
         set('ui-conn-port-rosbridge', ports.rosbridgePort);
     }
 
+    const NODE_LOG_POLL_MS = 3000;
+    const NODE_LOG_LINES = 50;
+    const NODE_LOGS = {
+        slam: { process: 'slam', screen: 'lidar-slam-subtab', timer: null },
+        loc: { process: 'localization', screen: 'localization-subtab', timer: null },
+    };
+    const NODE_LOG_TONES = [
+        ['stop', ['Map file cannot open']],
+        ['warn', ['No point, skip this scan', 'lidar loop back']],
+    ];
+
+    function nodeLogTone(line) {
+        const hit = NODE_LOG_TONES.find(([, keys]) => keys.some(key => line.includes(key)));
+        return hit ? hit[0] : '';
+    }
+
+    async function pollNodeLog(kind) {
+        const conf = NODE_LOGS[kind];
+        const pre = document.getElementById(`${kind}-log-pre`);
+        const result = await apiCall(`/api/system/process_log?name=${conf.process}&lines=${NODE_LOG_LINES}`);
+        if (!pre || !result || !result.success || !result.data) return;
+        const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 8;
+        pre.replaceChildren(...result.data.lines.map((line) => {
+            const row = document.createElement('div');
+            row.textContent = line;
+            const tone = nodeLogTone(line);
+            if (tone) row.dataset.tone = tone;
+            return row;
+        }));
+        if (atBottom) pre.scrollTop = pre.scrollHeight;
+    }
+
+    function isNodeLogOpen(kind) {
+        const panel = document.getElementById(`${kind}-log-panel`);
+        return Boolean(panel && !panel.hidden);
+    }
+
+    function isScreenVisible(kind) {
+        const el = document.getElementById(NODE_LOGS[kind].screen);
+        return Boolean(el && el.offsetParent !== null);
+    }
+
+    // 패널이 열려 있고 그 화면이 보일 때만 3초 폴링
+    function syncNodeLogPolling() {
+        Object.entries(NODE_LOGS).forEach(([kind, conf]) => {
+            const shouldPoll = isNodeLogOpen(kind) && isScreenVisible(kind);
+            if (shouldPoll && !conf.timer) {
+                pollNodeLog(kind);
+                conf.timer = setInterval(() => pollNodeLog(kind), NODE_LOG_POLL_MS);
+            } else if (!shouldPoll && conf.timer) {
+                clearInterval(conf.timer);
+                conf.timer = null;
+            }
+        });
+    }
+
+    function setNodeLogOpen(kind, open) {
+        const panel = document.getElementById(`${kind}-log-panel`);
+        const btn = document.getElementById(`${kind}-log-btn`);
+        if (!panel) return;
+        panel.hidden = !open;
+        if (btn) btn.setAttribute('aria-pressed', String(open));
+        syncNodeLogPolling();
+    }
+
+    function openNodeLog(kind) {
+        if (NODE_LOGS[kind]) setNodeLogOpen(kind, true);
+    }
+
+    function initNodeLog() {
+        Object.keys(NODE_LOGS).forEach((kind) => {
+            const btn = document.getElementById(`${kind}-log-btn`);
+            const close = document.querySelector(`#${kind}-log-panel .ui-log-close`);
+            if (btn) btn.addEventListener('click', () => setNodeLogOpen(kind, !isNodeLogOpen(kind)));
+            if (close) close.addEventListener('click', () => setNodeLogOpen(kind, false));
+        });
+    }
+
     const SUMMARY_POLL_MS = 2000;
     let lastSummary = null;
 
@@ -305,6 +384,7 @@ const uiShell = (() => {
     }
 
     function init() {
+        initNodeLog();
         if (isLegacyNav()) return;
         document.body.classList.add('ui-has-sidebar');
         // 초기 HTML은 메인 탭마다 서브탭 하나씩 active라 보이는 탭 안의 것을 고른다
@@ -319,7 +399,7 @@ const uiShell = (() => {
 
     return {
         SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, onLocState, noteAnalytics, onSaveMapRestoreFailed,
-        onRosbridgeState, onLatency, onDomainId, onBackendWsState,
+        onRosbridgeState, onLatency, onDomainId, onBackendWsState, openNodeLog,
         get lastSummary() { return lastSummary; },
     };
 })();

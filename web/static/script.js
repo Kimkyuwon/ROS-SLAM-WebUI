@@ -3156,7 +3156,60 @@ async function saveSlamMap() {
     domCache.get('save-map-modal').style.display = 'block';
     domCache.get('save-map-directory').value = '';
     domCache.get('save-map-directory').focus();
+    onSaveMapNameInput();
 }
+
+const SAVE_MAP_NAME_DEBOUNCE_MS = 300;
+let _saveMapNameTimer = null;
+let _saveMapNameSeq = 0;
+
+// 서버 규칙(validate_map_dir_name)의 결과만 따른다. 빈 이름은 서버에 묻지 않고 잠근다
+async function checkSaveMapName(name) {
+    if (!name) return { valid: false, reason: '', exists: false };
+    const result = await apiCall('/api/slam/save_map_check?name=' + encodeURIComponent(name));
+    if (!result || !result.success || !result.data) {
+        return { valid: false, reason: '이름을 확인할 수 없습니다', exists: false };
+    }
+    return result.data;
+}
+
+function renderSaveMapNameCheck(name, check) {
+    const errorEl = domCache.get('save-map-name-error');
+    errorEl.textContent = check.valid ? '' : check.reason;
+    errorEl.hidden = check.valid || !check.reason;
+    domCache.get('save-map-exists-note').hidden = !(check.valid && check.exists);
+    domCache.get('save-map-location-hint').querySelector('.ui-mono').textContent =
+        'pose_graph_optimization/' + (name || '<이름>') + '/';
+    domCache.get('save-map-directory').setAttribute('aria-invalid', check.valid || !check.reason ? 'false' : 'true');
+    uiKit.setEnabled(domCache.get('save-map-confirm-btn'), check.valid, check.reason || '지도 이름을 입력하세요');
+}
+
+function onSaveMapNameInput() {
+    const name = domCache.get('save-map-directory').value.trim();
+    const seq = ++_saveMapNameSeq;
+    clearTimeout(_saveMapNameTimer);
+    // 입력이 바뀌는 즉시 잠가 두고, 확인이 끝나야 푼다
+    uiKit.setEnabled(domCache.get('save-map-confirm-btn'), false, '이름을 확인하는 중입니다');
+    domCache.get('save-map-location-hint').querySelector('.ui-mono').textContent =
+        'pose_graph_optimization/' + (name || '<이름>') + '/';
+    const run = async () => {
+        const check = await checkSaveMapName(name);
+        if (seq === _saveMapNameSeq) renderSaveMapNameCheck(name, check);
+    };
+    if (name) _saveMapNameTimer = setTimeout(run, SAVE_MAP_NAME_DEBOUNCE_MS);
+    else run();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('save-map-directory');
+    if (!input) return;
+    input.addEventListener('input', onSaveMapNameInput);
+    input.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        if (!domCache.get('save-map-confirm-btn').disabled) confirmSaveMap();
+    });
+});
 
 function closeSaveMapModal(skipRestore = false) {
     domCache.get('save-map-modal').style.display = 'none';
@@ -3183,6 +3236,21 @@ async function confirmSaveMap() {
     if (!directoryName) {
         alert('Please enter a directory name');
         return;
+    }
+
+    const check = await checkSaveMapName(directoryName);
+    if (!check.valid) {
+        renderSaveMapNameCheck(directoryName, check);
+        return;
+    }
+    if (check.exists) {
+        const overwrite = await uiKit.confirmDialog({
+            title: '같은 이름의 지도가 있습니다',
+            message: '덮어쓰면 이전 지도가 지워집니다.',
+            okText: '덮어쓰기',
+            tone: 'stop',
+        });
+        if (!overwrite) return;
     }
 
     closeSaveMapModal(true); // 저장 확정 시 복원 생략

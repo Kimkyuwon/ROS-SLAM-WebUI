@@ -103,6 +103,69 @@ const uiKit = (() => {
         return toast;
     }
 
-    return { setStatusBadge, renderStepper, setEnabled, setBtnLabel, setReadonly, showToast, renderSparkline };
+    let dialogSeq = 0;
+
+    function confirmDialog({ title, message, okText = '확인', cancelText = '취소', tone = 'warn' }) {
+        return new Promise((resolve) => {
+            const seq = ++dialogSeq;
+            const prevFocus = document.activeElement;
+            const backdrop = document.createElement('div');
+            backdrop.className = 'ui-dialog-backdrop';
+            const dialog = document.createElement('div');
+            dialog.className = 'ui-dialog';
+            dialog.dataset.tone = tone;
+            dialog.setAttribute('role', 'alertdialog');
+            dialog.setAttribute('aria-modal', 'true');
+            dialog.setAttribute('aria-labelledby', `ui-dialog-title-${seq}`);
+            dialog.setAttribute('aria-describedby', `ui-dialog-msg-${seq}`);
+            const heading = document.createElement('h3');
+            heading.id = `ui-dialog-title-${seq}`;
+            heading.className = 'ui-dialog-title';
+            heading.textContent = title;
+            const body = document.createElement('p');
+            body.id = `ui-dialog-msg-${seq}`;
+            body.className = 'ui-hint ui-dialog-message';
+            body.textContent = message;
+            const actions = document.createElement('div');
+            actions.className = 'ui-dialog-actions';
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = 'ui-btn ui-btn-ghost';
+            cancel.textContent = cancelText;
+            const ok = document.createElement('button');
+            ok.type = 'button';
+            ok.className = 'ui-btn';
+            ok.dataset.tone = tone;
+            ok.textContent = okText;
+            actions.append(cancel, ok);
+            dialog.append(heading, body, actions);
+            backdrop.appendChild(dialog);
+
+            const close = (value) => {
+                document.removeEventListener('keydown', onKey, true);
+                backdrop.remove();
+                if (prevFocus && prevFocus.focus) prevFocus.focus();
+                resolve(value);
+            };
+            const onKey = (e) => {
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    close(false);
+                } else if (e.key === 'Tab') {
+                    e.preventDefault();
+                    (document.activeElement === cancel ? ok : cancel).focus();
+                }
+            };
+            cancel.onclick = () => close(false);
+            ok.onclick = () => close(true);
+            document.addEventListener('keydown', onKey, true);
+            document.body.appendChild(backdrop);
+            cancel.focus();
+        });
+    }
+
+    return { setStatusBadge, renderStepper, setEnabled, setBtnLabel, setReadonly, showToast, renderSparkline,
+        confirmDialog };
 })();
 window.uiKit = uiKit;

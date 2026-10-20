@@ -142,6 +142,25 @@ body {
 .ui-panel-body { padding: 12px; }
 .ui-panel-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-top: 1px solid var(--color-line); }
 
+/* --- 노드 로그 패널 --- */
+.ui-error, .ui-hint.ui-error { color: var(--color-stop); }
+.ui-log-panel[hidden] { display: none; }
+.ui-log-close {
+    display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0;
+    border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-mute);
+    font-size: 18px; line-height: 1; cursor: pointer;
+}
+.ui-log-close:hover { background: var(--color-line); color: var(--color-ink); }
+.ui-log-pre {
+    margin: 0 0 8px; max-height: 240px; overflow: auto; font-size: 11px; line-height: 1.5;
+    white-space: pre-wrap; word-break: break-word; color: var(--color-mute);
+}
+.ui-log-pre > div[data-tone="warn"] { color: var(--color-warn); }
+.ui-log-pre > div[data-tone="stop"] { color: var(--color-stop); }
+.ui-save-map-hints { margin-top: 10px; }
+.ui-save-map-hints .ui-hint { margin-top: 4px; }
+#save-map-exists-note { color: var(--color-warn); }
+
 /* --- KPI --- */
 .ui-kpi-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .ui-kpi { position: relative; min-width: 0; padding: 10px 12px; border: 1px solid var(--color-line); border-radius: var(--radius-sm); background: rgba(11, 14, 17, 0.6); }
@@ -276,6 +295,13 @@ body {
     width: 100%; max-width: 480px; padding: 20px; border: 1px solid var(--color-line2); border-radius: var(--radius-md);
     background: var(--color-raised); box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); color: var(--color-ink);
 }
+.ui-dialog-title { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.ui-dialog-message { font-size: 13px; color: var(--color-mute); }
+.ui-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.ui-dialog-actions .ui-btn[data-tone="warn"] { border-color: rgba(232, 176, 75, 0.55); color: var(--color-warn); }
+.ui-dialog-actions .ui-btn[data-tone="warn"]:hover { background: rgba(232, 176, 75, 0.1); }
+.ui-dialog-actions .ui-btn[data-tone="stop"] { border-color: rgba(240, 97, 109, 0.55); color: var(--color-stop); }
+.ui-dialog-actions .ui-btn[data-tone="stop"]:hover { background: rgba(240, 97, 109, 0.1); }
 
 /* --- 뷰어 칸 --- */
 .ui-viewer-empty {

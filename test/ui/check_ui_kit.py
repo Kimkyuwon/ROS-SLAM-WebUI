@@ -75,4 +75,47 @@ with open_page() as (page, errors):
     if result != expected:
         failures.append(f'helpers = {result}')
 
+    page.evaluate("document.getElementById('kit-stepper').remove()")
+    page.evaluate("""(() => {
+        const trigger = document.createElement('button');
+        trigger.id = 'kit-dialog-trigger';
+        document.body.appendChild(trigger);
+        trigger.focus();
+        window._dlgResult = undefined;
+        uiKit.confirmDialog({ title: '제목', message: '내용', okText: '덮어쓰기' }).then(v => { window._dlgResult = v; });
+    })()""")
+    dlg = page.locator('.ui-dialog-backdrop .ui-dialog[role="alertdialog"]')
+    if dlg.count() != 1:
+        failures.append('confirmDialog did not open')
+    else:
+        if dlg.get_attribute('aria-modal') != 'true':
+            failures.append('confirmDialog aria-modal')
+        labelled = dlg.get_attribute('aria-labelledby')
+        described = dlg.get_attribute('aria-describedby')
+        if page.locator(f'#{labelled}').inner_text() != '제목' or page.locator(f'#{described}').inner_text() != '내용':
+            failures.append('confirmDialog aria-labelledby/describedby targets')
+        if page.evaluate("document.activeElement.textContent") != '취소':
+            failures.append('confirmDialog should focus cancel')
+        if dlg.locator('.ui-btn').last.inner_text() != '덮어쓰기':
+            failures.append('confirmDialog okText')
+    page.keyboard.press('Escape')
+    page.wait_for_function('window._dlgResult !== undefined', timeout=2000)
+    if page.evaluate('window._dlgResult') is not False:
+        failures.append('confirmDialog ESC should resolve false')
+    if page.locator('.ui-dialog-backdrop').count() != 0:
+        failures.append('confirmDialog backdrop not removed after ESC')
+    if page.evaluate("document.activeElement.id") != 'kit-dialog-trigger':
+        failures.append('confirmDialog did not restore focus')
+
+    page.evaluate("""(() => {
+        window._dlgResult = undefined;
+        uiKit.confirmDialog({ title: 'a', message: 'b' }).then(v => { window._dlgResult = v; });
+    })()""")
+    page.locator('.ui-dialog .ui-btn').last.click()
+    page.wait_for_function('window._dlgResult !== undefined', timeout=2000)
+    if page.evaluate('window._dlgResult') is not True:
+        failures.append('confirmDialog ok should resolve true')
+    if page.locator('.ui-dialog-backdrop').count() != 0:
+        failures.append('confirmDialog backdrop not removed after ok')
+
 finish(failures, errors)
