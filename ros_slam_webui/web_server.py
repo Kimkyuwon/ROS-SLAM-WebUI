@@ -3451,24 +3451,38 @@ class WebGUINode(Node):
 
     # SLAM Functions
     def set_slam_map1(self, path):
+        """Map 1 경로 저장. 없는 필수 항목 목록을 반환 (경로는 항상 저장)."""
         self.slam_map1 = path
         self.slam_status = f"Map 1 loaded - {path}"
         self.get_logger().info(f'Map 1 set to: {path}')
+        return check_session_dir(path)
 
     def set_slam_map2(self, path):
+        """Map 2 경로 저장. 없는 필수 항목 목록을 반환 (경로는 항상 저장)."""
         self.slam_map2 = path
         self.slam_status = f"Map 2 loaded - {path}"
         self.get_logger().info(f'Map 2 set to: {path}')
+        return check_session_dir(path)
 
     def set_slam_output(self, directory_name):
-        """Set output directory name (not full path, just directory name)"""
+        """Set output directory name (not full path, just directory name).
+
+        Returns:
+            str | None: 이름이 잘못되면 사용자용 사유(저장 안 함), 정상이면 None.
+        """
         # Extract just the directory name if a full path is provided
         if '/' in directory_name:
             directory_name = os.path.basename(directory_name.rstrip('/'))
 
+        reason = validate_output_name(directory_name, self.slam_map1, self.slam_map2)
+        if reason:
+            self.get_logger().warn(f'Rejected output directory name: {directory_name!r}')
+            return reason
+
         self.slam_output = directory_name
         self.slam_status = f"Output directory set to - {directory_name}"
         self.get_logger().info(f'Output directory name set to: {directory_name}')
+        return None
 
     def start_slam_mapping(self):
         """Start FAST_LIO mapping"""
@@ -3708,6 +3722,11 @@ class WebGUINode(Node):
             self.slam_status = "Error: Please set output directory"
             return False, self.slam_status
 
+        name_error = validate_output_name(self.slam_output, self.slam_map1, self.slam_map2)
+        if name_error:
+            self.slam_status = f"Error: {name_error}"
+            return False, name_error
+
         if self.slam_opt_running:
             return False, 'Optimization already in progress'
 
@@ -3767,13 +3786,14 @@ class WebGUINode(Node):
             return True, 'Optimization started'
 
         except Exception as e:
-            self.slam_status = f"Error: Failed to start optimization - {str(e)}"
+            self.slam_status = "Error: Failed to start optimization"
             self.slam_opt_running = False
-            self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
+            self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                    'message': 'Failed to start optimization'}
             self.get_logger().error(f'Failed to start optimization: {str(e)}')
             import traceback
             traceback.print_exc()
-            return False, str(e)
+            return False, 'Failed to start optimization'
 
     # 메인 터미널 및 UI 상태에 표시할 LTmapping 메시지 화이트리스트
     _OPT_MSG_WHITELIST = (
@@ -3787,15 +3807,27 @@ class WebGUINode(Node):
         'Long Term SLAM Complete.',
     )
 
-    def _set_opt_success(self, process):
-        """LTmapping 노드 완료 확정 (중복 호출 방지)"""
+    def _set_opt_success(self, process, last_error=''):
+        """LTmapping 노드 완료 확정 (중복 호출 방지). 결과 파일이 없으면 실패로 판정."""
         if self.slam_optimization_process is not process:
             return
         if self.slam_opt_status.get('done'):
             return
+        loop_count = self.slam_opt_status.get('loop_count')
+        missing = check_multi_outputs(multi_output_dir(self.slam_output))
+        if missing:
+            message = '결과 파일 없음: ' + ', '.join(missing)
+            if last_error:
+                message += f' ({last_error})'
+            self.slam_status = "Optimization failed (missing outputs)"
+            self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                    'message': message, 'loop_count': loop_count}
+            self.slam_opt_running = False
+            self.get_logger().error(f'Long-term mapping finished without outputs: {message}')
+            return
         self.slam_status = "Optimization complete!"
         self.slam_opt_status = {'running': False, 'done': True, 'success': True,
-                                'message': 'Long Term SLAM Complete.'}
+                                'message': 'Long Term SLAM Complete.', 'loop_count': loop_count}
         self.slam_opt_running = False
         self.get_logger().info('=== Long-term mapping completed successfully ===')
 
@@ -3807,17 +3839,39 @@ class WebGUINode(Node):
         2. "[LTmapping]: Long Term SLAM Complete." 메시지 감지 (메시지 방식 fallback)
         3. process.wait() returncode=0 (전체 launch 프로세스 종료)
         """
+        last_error = ''
         try:
             for line in iter(process.stdout.readline, ''):
                 line = line.rstrip('\n')
                 if not line:
                     continue
 
+                # LTmapping이 stderr로 남기는 입력 파일 오류는 실패 메시지에 붙이려고 기억만 한다.
+                error_text = extract_ltmapping_error(line)
+                if error_text:
+                    last_error = error_text
+                    self.get_logger().warn(f'[LTmapping] {error_text}')
+                    continue
+
+                # ros2 launch: "[ERROR] [launch]: process[LTmapping-1]: process has died [pid ..., exit code 1 ...]"
+                if 'LTmapping' in line and 'process has died' in line:
+                    self.get_logger().error(f'[launch] LTmapping node died: {line.strip()}')
+                    if self.slam_optimization_process is process and not self.slam_opt_status.get('done'):
+                        message = 'LTmapping 노드가 비정상 종료했습니다'
+                        if last_error:
+                            message += f': {last_error}'
+                        self.slam_status = "Optimization failed (node died)"
+                        self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                               'message': message,
+                                               'loop_count': self.slam_opt_status.get('loop_count')}
+                        self.slam_opt_running = False
+                    continue
+
                 # ── 우선순위 1: LTmapping 노드 종료 이벤트 감지 ────────────────────────
                 # ros2 launch가 출력하는 형태: "[launch]: process[LTmapping-1]: process has finished cleanly"
                 if 'LTmapping' in line and 'finished cleanly' in line:
                     self.get_logger().info(f'[launch] LTmapping node finished: {line.strip()}')
-                    self._set_opt_success(process)
+                    self._set_opt_success(process, last_error)
                     continue
 
                 # ── 우선순위 2: [LTmapping]: 메시지 파싱 ────────────────────────────────
@@ -3829,10 +3883,13 @@ class WebGUINode(Node):
                         if self.slam_optimization_process is process \
                                 and not self.slam_opt_status.get('done'):
                             self.slam_opt_status['message'] = msg_part
+                            loop_count = extract_loop_count(msg_part)
+                            if loop_count is not None:
+                                self.slam_opt_status['loop_count'] = loop_count
 
                         # "Long Term SLAM Complete." 메시지 fallback 감지
                         if msg_part.startswith('Long Term SLAM Complete.'):
-                            self._set_opt_success(process)
+                            self._set_opt_success(process, last_error)
 
             # ── 우선순위 3: 전체 launch 프로세스 종료 시 ────────────────────────────────
             process.wait()
@@ -3841,9 +3898,11 @@ class WebGUINode(Node):
             if self.slam_opt_status.get('done'):
                 return
             if process.returncode == 0:
-                self._set_opt_success(process)
+                self._set_opt_success(process, last_error)
             else:
                 msg = f'Process exited with code {process.returncode}'
+                if last_error:
+                    msg += f': {last_error}'
                 self.slam_status = f"Optimization failed (exit: {process.returncode})"
                 self.slam_opt_status = {'running': False, 'done': True, 'success': False,
                                         'message': msg}
@@ -3851,7 +3910,8 @@ class WebGUINode(Node):
         except Exception as e:
             if self.slam_optimization_process is process:
                 self.get_logger().error(f'Error reading optimization output: {str(e)}')
-                self.slam_opt_status = {'running': False, 'done': True, 'success': False, 'message': str(e)}
+                self.slam_opt_status = {'running': False, 'done': True, 'success': False,
+                                        'message': 'Failed to read optimization output'}
         finally:
             self.slam_opt_running = False
             if self.slam_optimization_process is process:
@@ -3896,8 +3956,12 @@ class WebGUINode(Node):
         return True, 'Cancelled'
 
     def get_optimization_status(self):
-        """현재 optimization 상태 반환"""
-        return dict(self.slam_opt_status)
+        """현재 optimization 상태 반환 (outputs_ok: 성공 확정 + 결과 파일 3개 확인, loop_count: 없으면 None)"""
+        status = dict(self.slam_opt_status)
+        status['loop_count'] = status.get('loop_count')
+        status['outputs_ok'] = bool(status.get('success')) and not check_multi_outputs(
+            multi_output_dir(self.slam_output))
+        return status
 
     def update_slam_parameters(self):
         lt_dir = _find_sibling_package_dir('long_term_mapping')
@@ -8353,6 +8417,69 @@ def path_size_bytes(path):
     return total
 
 
+SESSION_REQUIRED_FILES = ('optimized_poses.txt', 'edges.txt', 'StaticMap.pcd')  # LTmapping 입력 (long_term_mapping.cpp)
+MULTI_OUTPUT_FILES = ('optimized_poses.txt', 'FirstMap.pcd', 'SecondMap.pcd')
+LTMAPPING_ERROR_PREFIXES = ('Error:', 'Failed to load')
+LTMAPPING_LOOP_COUNT_RE = re.compile(r'Loop Edge Generation Complete\. size : (\d+)')
+LONG_TERM_MAPPING_FALLBACK_DIR = '/home/kkw/localization_ws/src/long_term_mapping'
+
+
+def check_session_dir(path):
+    """LTmapping 입력 세션 폴더에서 없는(또는 빈) 필수 항목 이름 목록. 정상이면 빈 목록."""
+    missing = []
+    scans = os.path.join(path, 'Scans') if path else ''
+    if not (scans and os.path.isdir(scans) and os.listdir(scans)):
+        missing.append('Scans')
+    for name in SESSION_REQUIRED_FILES:
+        if not (path and os.path.isfile(os.path.join(path, name))):
+            missing.append(name)
+    return missing
+
+
+def check_multi_outputs(out_dir):
+    """LTmapping 결과 폴더에서 없거나 크기가 0인 결과 파일 목록. 정상이면 빈 목록."""
+    missing = []
+    for name in MULTI_OUTPUT_FILES:
+        file_path = os.path.join(out_dir, name) if out_dir else ''
+        if not (file_path and os.path.isfile(file_path) and os.path.getsize(file_path) > 0):
+            missing.append(name)
+    return missing
+
+
+def validate_output_name(name, map1, map2):
+    """Multi-Session 출력 폴더 이름 검사. 문제 없으면 None, 있으면 사용자용 문구.
+
+    LTmapping은 시작할 때 출력 폴더를 rm -r 하므로 입력 지도 폴더 이름과 같으면 거부한다.
+    """
+    reason = validate_map_dir_name(name)
+    if reason:
+        return reason
+    for map_path in (map1, map2):
+        if map_path and name == os.path.basename(map_path.rstrip('/')):
+            return '입력 지도 폴더와 같은 이름은 쓸 수 없습니다'
+    return None
+
+
+def multi_output_dir(output_name):
+    """LTmapping 결과 폴더 경로(<long_term_mapping>/<output_name>). 이름이 없으면 빈 문자열."""
+    if not output_name:
+        return ''
+    lt_dir = _find_sibling_package_dir('long_term_mapping')
+    return os.path.join(str(lt_dir) if lt_dir else LONG_TERM_MAPPING_FALLBACK_DIR, output_name)
+
+
+def extract_ltmapping_error(line):
+    """launch 출력 한 줄이 'Error:'/'Failed to load'로 시작하면 그 문구(접두 [노드명] 제외), 아니면 None."""
+    text = re.sub(r'^\[[^\]]*\]\s*', '', line.strip())
+    return text if text.startswith(LTMAPPING_ERROR_PREFIXES) else None
+
+
+def extract_loop_count(line):
+    """'Loop Edge Generation Complete. size : N' 줄이면 N, 아니면 None."""
+    match = LTMAPPING_LOOP_COUNT_RE.search(line)
+    return int(match.group(1)) if match else None
+
+
 def tail_text_file(path, max_lines):
     """파일 마지막 max_lines줄. 없으면 빈 목록."""
     try:
@@ -8825,17 +8952,22 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
 
         # SLAM API endpoints
         if parsed_path.path == '/api/slam/set_map1':
-            self.node.set_slam_map1(data.get('path', ''))
-            response = {'success': True, 'status': self.node.slam_status}
+            missing = self.node.set_slam_map1(data.get('path', ''))
+            response = {'success': True, 'status': self.node.slam_status, 'missing': missing}
         elif parsed_path.path == '/api/slam/set_map2':
-            self.node.set_slam_map2(data.get('path', ''))
-            response = {'success': True, 'status': self.node.slam_status}
+            missing = self.node.set_slam_map2(data.get('path', ''))
+            response = {'success': True, 'status': self.node.slam_status, 'missing': missing}
         elif parsed_path.path == '/api/slam/set_output':
-            self.node.set_slam_output(data.get('path', ''))
-            response = {'success': True, 'status': self.node.slam_status}
+            name_error = self.node.set_slam_output(data.get('path', ''))
+            if name_error:
+                response = {'success': False, 'error': name_error}
+            else:
+                response = {'success': True, 'status': self.node.slam_status}
         elif parsed_path.path == '/api/slam/optimize':
             success, message = self.node.run_slam_optimization()
             response = {'success': success, 'message': message, 'status': self.node.slam_status}
+            if not success:
+                response['error'] = message
         elif parsed_path.path == '/api/slam/cancel_optimization':
             success, message = self.node.cancel_optimization()
             response = {'success': success, 'message': message}
