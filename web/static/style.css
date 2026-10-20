@@ -3760,11 +3760,9 @@ button[onclick*="openAddDisplayModal"]:hover {
 }
 
 /* ── Category B: Primary (실행 버튼: Start / Play / Record / Run) ── */
-#slam-start-button,
 #bag-play-button,
 #play-button,
 #recorder-record-button,
-button[onclick*="startSlamMapping"],
 button[onclick*="startLocalization"],
 button[onclick*="runOptimization"],
 button[onclick*="optimizeSlam"] {
@@ -3776,11 +3774,9 @@ button[onclick*="optimizeSlam"] {
     box-shadow: none !important;
     transition: all 0.18s ease !important;
 }
-#slam-start-button:hover,
 #bag-play-button:hover,
 #play-button:hover,
 #recorder-record-button:hover,
-button[onclick*="startSlamMapping"]:hover,
 button[onclick*="startLocalization"]:hover,
 button[onclick*="runOptimization"]:hover,
 button[onclick*="optimizeSlam"]:hover {
@@ -3791,11 +3787,9 @@ button[onclick*="optimizeSlam"]:hover {
 }
 
 /* ── Category C: Destructive (중지 버튼: Stop / Pause) ── */
-#slam-stop-button,
 #bag-stop-button,
 #bag-pause-button,
 #pause-button,
-button[onclick*="stopSlamMapping"],
 button[onclick*="stopLocalization"] {
     background: rgba(240,98,146,0.1) !important;
     border: 1px solid rgba(240,98,146,0.4) !important;
@@ -3805,11 +3799,9 @@ button[onclick*="stopLocalization"] {
     box-shadow: none !important;
     transition: all 0.18s ease !important;
 }
-#slam-stop-button:hover,
 #bag-stop-button:hover,
 #bag-pause-button:hover,
 #pause-button:hover,
-button[onclick*="stopSlamMapping"]:hover,
 button[onclick*="stopLocalization"]:hover {
     background: rgba(240,98,146,0.2) !important;
     border-color: rgba(240,98,146,0.7) !important;

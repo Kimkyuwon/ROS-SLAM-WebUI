@@ -389,7 +389,10 @@ body.ui-has-sidebar { padding: 0; }
 .ui-screen-title-row .ui-screen-title { margin: 0; color: var(--color-ink); }
 .ui-screen-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .ui-screen-header .ui-stepper:empty { display: none; }
-body:not(.ui-has-sidebar) .ui-screen-header { display: none; }
+/* 옛 탭 모드(legacyNav): 옛 h2가 제목 역할 — 헤더로 옮긴 액션 버튼만 평범한 줄로 남긴다 */
+body:not(.ui-has-sidebar) .ui-screen-header { position: static; justify-content: flex-end; padding: 0 0 12px; border-bottom: 0; background: none; backdrop-filter: none; }
+body:not(.ui-has-sidebar) .ui-screen-heading, body:not(.ui-has-sidebar) .ui-screen-header .ui-stepper { display: none; }
+body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { display: none; }
 .ui-has-sidebar .subtab-content > .section > h2 { display: none; }
 /* 3D 카드 우상단 절대 위치 Snapshot/Reset이 Views 접기 버튼을 덮지 않게 h2 줄 높이를 남긴다 (헤더로 옮기면 삭제) */
 .ui-has-sidebar [id="3d-viewer-subtab"] > .section > h2 { display: block; visibility: hidden; }

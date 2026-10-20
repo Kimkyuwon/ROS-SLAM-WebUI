@@ -30,6 +30,9 @@
         <symbol id="icon-folder" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
         <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
         <symbol id="icon-box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
+        <symbol id="icon-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+        <symbol id="icon-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+        <symbol id="icon-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
     </svg>
     <div class="ui-app-shell">
         <aside class="ui-sidebar" id="ui-sidebar">
@@ -153,7 +156,22 @@
                             </span>
                         </div>
                     </div>
-                    <div class="ui-screen-actions" id="lidar-slam-header-actions"></div>
+                    <div class="ui-screen-actions" id="lidar-slam-header-actions">
+                        <button id="slam-save-map-button" class="ui-btn" onclick="saveSlamMap()">
+                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-save"></use></svg>
+                            <span class="ui-btn-label">Save Map</span>
+                        </button>
+                        <span class="ui-divider" aria-hidden="true"></span>
+                        <button id="slam-stop-button" class="ui-btn ui-btn-stop" onclick="stopSlamMapping()">
+                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-square"></use></svg>
+                            <span class="ui-btn-label">Stop SLAM</span>
+                        </button>
+                        <button id="slam-start-button" class="ui-btn ui-btn-go" onclick="startSlamMapping()"
+                                title="실행 중인 rviz2도 함께 종료됩니다">
+                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-play"></use></svg>
+                            <span class="ui-btn-label">Start SLAM</span>
+                        </button>
+                    </div>
                     <ol class="ui-stepper" id="lidar-slam-stepper" aria-label="진행 단계"></ol>
                 </header>
                 <div class="section card">
@@ -162,9 +180,6 @@
                     <div class="bag-control-buttons" style="margin-bottom: 15px;">
                         <button onclick="loadSlamConfig()">Config Load</button>
                         <button id="slam-save-button" onclick="saveSlamConfig()">Set Config File</button>
-                        <button id="slam-save-map-button" onclick="saveSlamMap()">Save Map</button>
-                        <button id="slam-start-button" onclick="startSlamMapping()">Start SLAM</button>
-                        <button id="slam-stop-button" onclick="stopSlamMapping()">Stop SLAM</button>
                     </div>
 
                     <!-- Config Parameters Display -->

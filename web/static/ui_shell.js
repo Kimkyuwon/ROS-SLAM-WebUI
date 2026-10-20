@@ -36,9 +36,75 @@ const uiShell = (() => {
         RUN: 'Running', REC: 'Recording', PLAY: 'Playing', PAUSE: 'Paused', SAVE: 'Saving', OPT: 'Optimizing',
     };
 
+    const SLAM_KF_COUNT_ID = 'ad-kf_count';
+    const ANALYTICS_STALE_MS = 3000;
+    const lastAnalyticsAt = { slam: 0, loc: 0 };
+    let lastSlamState = null;
+
+    function readNumber(id) {
+        const el = document.getElementById(id);
+        if (!el) return null;
+        const n = parseFloat(el.textContent);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    function noteAnalytics(kind) { lastAnalyticsAt[kind] = performance.now(); }
+
+    // 첫 메시지 전(0)에는 stale로 보지 않는다 — Start 직후 "데이터 없음"이 바로 뜨지 않게
+    function isAnalyticsStale(kind) {
+        return lastAnalyticsAt[kind] > 0 && performance.now() - lastAnalyticsAt[kind] > ANALYTICS_STALE_MS;
+    }
+
+    function onSlamState(state) {
+        lastSlamState = state;
+        refresh();
+    }
+
+    function saveMapLockReason(input) {
+        if (!input.isRunning) return 'SLAM 실행 중에만 저장할 수 있습니다';
+        if (input.stopping) return 'SLAM을 종료하는 중입니다';
+        if (input.saving) return '지도를 저장하는 중입니다';
+        if (!(input.kfCount > 0)) return '키프레임이 아직 없습니다';
+        return '데이터 수신이 멈춰 저장할 수 없습니다';
+    }
+
+    function renderSlam() {
+        const resultEl = document.getElementById('savemap-result-viewer');
+        const liveEl = document.getElementById('slam-live-viewer');
+        const runTime = document.getElementById('analytics-run-time');
+        const input = {
+            isRunning: Boolean(lastSlamState && lastSlamState.is_running),
+            starting: Boolean(window._slamLiveViewerHoldOpen),
+            stopping: Boolean(window._slamStopping),
+            saving: Boolean(window._slamSaving),
+            justSaved: Boolean(window._slamMapJustSaved),
+            resultVisible: Boolean(resultEl && resultEl.style.display !== 'none'),
+            elapsed: runTime && /\d/.test(runTime.textContent) ? runTime.textContent.trim() : '',
+            kfCount: readNumber(SLAM_KF_COUNT_ID),
+            stale: isAnalyticsStale('slam'),
+            imuHz: readNumber('analytics-imu-hz'),
+            lidHz: readNumber('analytics-lid-hz'),
+        };
+        const v = UiStatusLogic.deriveSlamView(input);
+        uiKit.setStatusBadge(document.getElementById('lidar-slam-header-badge'), v.tone, v.text);
+        uiKit.renderStepper(document.getElementById('lidar-slam-stepper'), UiStatusLogic.SLAM_STEPS, v.step);
+        uiKit.setEnabled(document.getElementById('slam-start-button'), v.buttons.start);
+        uiKit.setEnabled(document.getElementById('slam-stop-button'), v.buttons.stop);
+        uiKit.setEnabled(document.getElementById('slam-save-map-button'), v.buttons.saveMap, saveMapLockReason(input));
+        const empty = document.getElementById('lidar-slam-viewer-empty');
+        if (empty) {
+            empty.hidden = (liveEl && liveEl.style.display !== 'none')
+                || (resultEl && resultEl.style.display !== 'none');
+        }
+    }
+
     function refresh() {
         const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
         if (!screenEl) return;
+        if (screenEl.id === 'lidar-slam-subtab') {
+            renderSlam();
+            return;
+        }
         const badge = screenEl.querySelector('.ui-screen-header .ui-status-badge');
         const markers = lastSummary ? UiStatusLogic.deriveSidebarMarkers(lastSummary) : {};
         const marker = markers[screenEl.id];
@@ -120,7 +186,7 @@ const uiShell = (() => {
     }
 
     return {
-        SCREENS, showScreen, onScreenChanged, refresh, init,
+        SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, noteAnalytics,
         onRosbridgeState, onLatency, onDomainId, onBackendWsState,
         get lastSummary() { return lastSummary; },
     };

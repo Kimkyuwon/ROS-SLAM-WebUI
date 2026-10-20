@@ -726,6 +726,7 @@ async function updateSlamState() {
         }
         
         // Update Localization status will be handled by updateLocalizationState()
+        if (window.uiShell) uiShell.onSlamState(state);
     }
 }
 
@@ -3162,6 +3163,7 @@ function closeSaveMapModal(skipRestore = false) {
     // skipRestore=true이면 confirmSaveMap에서 호출한 것이므로 복원 생략
     if (!_saveMapPollTimer && !skipRestore) {
         window._slamSaving = false;
+        if (window.uiShell) uiShell.refresh();
         if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
         // 대시보드 복원 (saveSlamMap에서 숨겼으므로)
         if (typeof slamAnalyticsDashboard !== 'undefined') {
@@ -3193,6 +3195,7 @@ async function confirmSaveMap() {
 
     // 저장 확정 시점에 Live Viewer 화면만 숨김 (WebSocket 유지 → DDS 재조회 없음)
     window._slamSaving = true;
+    if (window.uiShell) uiShell.refresh();
     if (typeof slamLiveViewer !== 'undefined' && slamLiveViewer._visible) {
         slamLiveViewer._visualHide();
     }
@@ -3320,6 +3323,7 @@ async function _pollSaveMapStatus() {
             _saveMapPollTimer = null;
             window._slamSaving = false;
             window._slamMapJustSaved = true; // 저장 완료 후 Live Viewer 재출현 차단
+            if (window.uiShell) uiShell.refresh();
 
             if (status.success) {
                 _showSaveMapSuccess('✓ ' + (status.message || 'Map saved successfully'));
@@ -3348,6 +3352,7 @@ async function cancelSaveMap() {
         _saveMapPollTimer = null;
         window._slamSaving = false;
         window._slamMapJustSaved = false; // 취소 시 Live Viewer 복원 허용
+        if (window.uiShell) uiShell.refresh();
         // Live Viewer 복원
         if (typeof slamLiveViewer !== 'undefined') slamLiveViewer._visualShow();
         // 대시보드 복원
@@ -3384,6 +3389,7 @@ async function startSlamMapping() {
     updateLidarSlamStatus('Running');
     // SLAM Live Viewer 표시 (API 응답 전 is_running=false 폴링이 hide()하지 않도록 hold)
     window._slamLiveViewerHoldOpen = true;
+    if (window.uiShell) uiShell.refresh();
     if (typeof slamLiveViewer !== 'undefined') {
         slamLiveViewer.show();
     }
@@ -3398,6 +3404,7 @@ async function startSlamMapping() {
         result = await apiCall('/api/slam/start_mapping', {});
     } finally {
         window._slamLiveViewerHoldOpen = false;
+        if (window.uiShell) uiShell.refresh();
     }
     if (result.success) {
         console.log('SLAM mapping started');
@@ -3416,6 +3423,7 @@ async function stopSlamMapping() {
     }
     // 중지 중 updateSlamState가 뷰어를 다시 show하지 않도록 플래그 설정
     window._slamStopping = true;
+    if (window.uiShell) uiShell.refresh();
     // SLAM Live Viewer 즉시 숨김 (locLiveViewer.hide와 동일하게 즉시 처리)
     if (typeof slamLiveViewer !== 'undefined') {
         slamLiveViewer.hide();
@@ -3437,6 +3445,7 @@ async function stopSlamMapping() {
     const result = await apiCall('/api/slam/stop_mapping', {});
     // API 응답 후 플래그 해제
     window._slamStopping = false;
+    if (window.uiShell) uiShell.refresh();
     if (result.success) {
         console.log('SLAM mapping stopped');
         setTimeout(() => {
