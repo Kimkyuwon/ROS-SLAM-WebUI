@@ -2607,6 +2607,8 @@ class WebGUINode(Node):
         self.recorder_process = None
         self.recorder_ros1_thread = None   # Ros1BagRecorderThread 인스턴스
         self.recorder_mode = 'ros2'        # 'ros2' | 'ros1'
+        self.recorder_started_at = None    # 녹화 시작 시각 (time.time())
+        self.recorder_output_path = ''     # 녹화 결과 파일/폴더 (크기 집계용)
         self.bag_topics = []
         self.bag_selected_topics = []
         self.bag_duration = 0.0  # Duration in seconds
@@ -4148,6 +4150,8 @@ class WebGUINode(Node):
                 self.recorder_process = None
             self.recorder_recording = False
             self.recorder_mode = 'ros2'
+            self.recorder_started_at = None
+            self.recorder_output_path = ''
             return True
         else:
             # Start recording
@@ -4200,6 +4204,8 @@ class WebGUINode(Node):
                     self.recorder_ros1_thread.start()
                     self.recorder_recording = True
                     self.recorder_mode = 'ros1'
+                    self.recorder_started_at = time.time()
+                    self.recorder_output_path = output_path
                     self.get_logger().info('ROS1 bag recording started')
                     return True
                 except Exception as e:
@@ -4240,6 +4246,8 @@ class WebGUINode(Node):
                     )
                     self.recorder_recording = True
                     self.recorder_mode = bag_format  # 'ros2_mcap' or 'ros2_db3'
+                    self.recorder_started_at = time.time()
+                    self.recorder_output_path = output_dir
                     self.get_logger().info(f'Bag recording started (format: {bag_format})')
                     return True
                 except Exception as e:
@@ -4252,6 +4260,9 @@ class WebGUINode(Node):
             'bag_name': self.recorder_bag_name,
             'recording': self.recorder_recording,
             'mode': self.recorder_mode,  # 'ros2' | 'ros1'
+            'elapsed_sec': (time.time() - self.recorder_started_at)
+            if self.recorder_recording and self.recorder_started_at else 0.0,
+            'size_bytes': path_size_bytes(self.recorder_output_path) if self.recorder_recording else 0,
         }
 
     # File Player Functions
@@ -8324,6 +8335,22 @@ def validate_map_dir_name(name):
     if name in RESERVED_MAP_DIR_NAMES:
         return f'"{name}"은(는) 예약된 이름입니다'
     return None
+
+
+def path_size_bytes(path):
+    """파일이면 크기, 폴더면 하위 파일 크기 합, 없으면 0."""
+    if not path or not os.path.exists(path):
+        return 0
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                pass
+    return total
 
 
 def tail_text_file(path, max_lines):
