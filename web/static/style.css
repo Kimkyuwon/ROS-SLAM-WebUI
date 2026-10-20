@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 * {
     margin: 0;
     padding: 0;
@@ -3652,7 +3650,7 @@ h3 {
 
 /* ── Brand 타이틀 폰트 ── */
 body {
-    font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', 'Ubuntu', Arial, sans-serif !important;
+    font-family: var(--font-sans) !important;
 }
 
 /* 폰트를 명시적으로 상속받지 못하는 요소들에 강제 적용 */
@@ -3661,20 +3659,21 @@ body {
 .brand-title, label, span, p, h1, h2, h3, h4,
 button:not(.views-collapse-btn),
 input, select, textarea {
-    font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', 'Ubuntu', Arial, sans-serif !important;
+    font-family: var(--font-sans) !important;
 }
 
-/* monospace 요소는 JetBrains Mono 사용 */
+/* monospace 요소는 Fira Code 사용 */
 .font-mono, code, pre,
 .cfg-param-name, .cfg-param-value,
 input[type="text"].mono, .log-box,
 .analytics-hz-value, .analytics-traj-value,
 .dir-entry, .topic-item,
-.add-display-topic {
-    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+.add-display-topic,
+.ui-mono, .ui-kpi-value, .ui-status-badge, .ui-tag {
+    font-family: var(--font-mono) !important;
 }
 .brand-title {
-    font-family: 'Space Grotesk', 'Segoe UI', sans-serif !important;
+    font-family: var(--font-sans) !important;
     font-size: 15px !important;
     font-weight: 700 !important;
     letter-spacing: 0.12em !important;

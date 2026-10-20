@@ -1,0 +1,80 @@
+/* ui_theme.css — Field Console 디자인 토큰과 공용 컴포넌트 (style.css 다음에 로드) */
+@font-face { font-family: 'Fira Sans'; src: url('vendor/fonts/FiraSans-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Fira Sans'; src: url('vendor/fonts/FiraSans-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+@font-face { font-family: 'Fira Sans'; src: url('vendor/fonts/FiraSans-SemiBold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Fira Code'; src: url('vendor/fonts/FiraCode-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Fira Code'; src: url('vendor/fonts/FiraCode-Medium.woff2') format('woff2'); font-weight: 500; font-display: swap; }
+
+:root {
+    /* 색 — 뜻이 있을 때만 색을 쓴다 */
+    --color-bg: #0B0E11;
+    --color-surface: #11151A;
+    --color-raised: #171C22;
+    --color-line: #252B33;
+    --color-line2: #323A45;
+    --color-ink: #E8ECF0;
+    --color-mute: #8B95A1;
+    --color-dim: #5D6773;
+    --color-viewer: #07090C;
+    --color-go: #3FD07A;
+    --color-go-ink: #04210F;
+    --color-stop: #F0616D;
+    --color-warn: #E8B04B;
+    --color-info: #6CB6FF;
+    /* 글꼴 — Fira에 한글이 없어 Noto로 이어 받는다 */
+    --font-sans: 'Fira Sans', 'Noto Sans KR', 'Noto Sans CJK KR', system-ui, sans-serif;
+    --font-mono: 'Fira Code', 'Noto Sans Mono CJK KR', ui-monospace, monospace;
+    /* 모양 — 반경은 섞어 쓴다 (균일 14px 금지) */
+    --radius-xs: 3px;
+    --radius-sm: 4px;
+    --radius-md: 6px;
+    --control-h: 40px;
+    --control-h-lg: 44px;
+    --sidebar-w: 244px;
+    --sidebar-w-rail: 64px;
+    --focus-ring: 2px solid var(--color-info);
+    --dur-fast: 150ms;
+
+    /* 기존 변수 별칭 (style.css의 두 :root 블록을 덮어써 옛 화면도 새 색이 됨) */
+    --bg: var(--color-bg);
+    --panel: var(--color-surface);
+    --panel-strong: var(--color-raised);
+    --border: var(--color-line);
+    --border-light: var(--color-line2);
+    --text: var(--color-ink);
+    --text-primary: var(--color-ink);
+    --text-secondary: var(--color-mute);
+    --text-muted: var(--color-dim);
+    --muted: var(--color-mute);
+    --accent: var(--color-info);
+    --accent-2: var(--color-go);
+    --accent-dim: rgba(108, 182, 255, 0.12);
+    --teal: var(--color-go);
+    --teal-dim: rgba(63, 208, 122, 0.12);
+    --success: var(--color-go);
+    --danger: var(--color-stop);
+    --warning: var(--color-warn);
+    --primary: var(--color-info);
+    --bg-base: var(--color-bg);
+    --bg-card: var(--color-surface);
+    --bg-section: var(--color-surface);
+    --bg-input: var(--color-bg);
+    --bg-hover: var(--color-raised);
+    --radius: var(--radius-md);
+    --mono-font: var(--font-mono);
+    color-scheme: dark;
+}
+
+body {
+    background: var(--color-bg);
+    color: var(--color-ink);
+}
+
+::selection { background: rgba(108, 182, 255, 0.35); }
+
+.ui-mono, .ui-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.ui-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
