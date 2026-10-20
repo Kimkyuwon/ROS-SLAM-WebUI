@@ -72,6 +72,29 @@ const uiShell = (() => {
         set('ui-conn-port-rosbridge', ports.rosbridgePort);
     }
 
+    const SUMMARY_POLL_MS = 2000;
+    let lastSummary = null;
+
+    function renderSidebarMarkers(data) {
+        const markers = UiStatusLogic.deriveSidebarMarkers(data);
+        document.querySelectorAll('.ui-sidebar-item').forEach(item => {
+            const tag = item.querySelector('[data-run-tag]');
+            const marker = markers[item.dataset.screen];
+            tag.hidden = !marker;
+            tag.textContent = marker ? marker.text : '';
+            tag.dataset.tone = marker ? marker.tone : 'idle';
+        });
+    }
+
+    async function pollSummary() {
+        const result = await apiCall('/api/system/status_summary');
+        if (result && result.success && result.data) {
+            lastSummary = result.data;
+            renderSidebarMarkers(lastSummary);
+            refresh();
+        }
+    }
+
     function init() {
         if (isLegacyNav()) return;
         document.body.classList.add('ui-has-sidebar');
@@ -81,11 +104,14 @@ const uiShell = (() => {
         renderPorts();
         // webui_ports.js가 document에 bubbles 없이 보내므로 window가 아니라 document에서 받는다
         document.addEventListener('ros-slam-webui-ports-ready', renderPorts);
+        pollSummary();
+        setInterval(pollSummary, SUMMARY_POLL_MS);
     }
 
     return {
         SCREENS, showScreen, onScreenChanged, refresh, init,
         onRosbridgeState, onLatency, onDomainId, onBackendWsState,
+        get lastSummary() { return lastSummary; },
     };
 })();
 window.uiShell = uiShell;
