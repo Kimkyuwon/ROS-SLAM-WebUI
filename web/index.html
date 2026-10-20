@@ -96,7 +96,20 @@
                     </button></li>
                 </ul>
             </nav>
-            <div class="ui-conn-block" id="ui-conn-block"><!-- Task 1.6 --></div>
+            <div class="ui-conn-block" id="ui-conn-block">
+                <div class="ui-conn-head">
+                    <span class="ui-conn-state" id="ui-conn-rosbridge" data-tone="idle">
+                        <span class="ui-dot" aria-hidden="true"></span><span class="ui-status-text">rosbridge 확인 중…</span>
+                    </span>
+                    <span class="ui-mono" id="ui-conn-latency">-- ms</span>
+                </div>
+                <dl class="ui-conn-list">
+                    <dt>DOMAIN</dt><dd id="ui-conn-domain">-</dd>
+                    <dt>Web</dt><dd id="ui-conn-port-web">-</dd>
+                    <dt>PC2 WS</dt><dd id="ui-conn-port-pc2">-</dd>
+                    <dt>rosbridge</dt><dd id="ui-conn-port-rosbridge">-</dd>
+                </dl>
+            </div>
         </aside>
         <main class="ui-main">
     <div class="page-shell">

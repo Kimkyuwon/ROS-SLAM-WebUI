@@ -14,5 +14,14 @@ with open_page() as (page, errors):
         cur = page.locator('.ui-sidebar-item[aria-current="page"]').get_attribute('data-screen')
         if cur != subtab_id:
             failures.append(f'aria-current {cur} != {subtab_id}')
+    if page.locator('#ui-conn-rosbridge[data-tone]').count() != 1:
+        failures.append('conn rosbridge badge missing')
+    web_port = page.locator('#ui-conn-port-web')
+    if not web_port.count() or web_port.inner_text().strip() != '8080':
+        failures.append('conn web port != 8080')
+    page.wait_for_timeout(4000)
+    latency = page.locator('#ui-conn-latency')
+    if not latency.count() or not latency.inner_text().strip().endswith('ms'):
+        failures.append('conn latency not ms')
     shot(page, 'p1-shell')
     finish(failures, errors)

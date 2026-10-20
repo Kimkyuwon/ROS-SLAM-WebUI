@@ -35,15 +35,58 @@ const uiShell = (() => {
         // Task 1.8 이후 화면별 헤더 렌더를 여기서 부른다
     }
 
+    const ROSBRIDGE_TEXT = {
+        connected: ['go', 'rosbridge 연결됨'],
+        disconnected: ['stop', 'rosbridge 오류'],
+        reconnecting: ['warn', 'rosbridge 재연결 중…'],
+    };
+
+    function onRosbridgeState(state) {
+        const conf = ROSBRIDGE_TEXT[state];
+        if (conf) uiKit.setStatusBadge(document.getElementById('ui-conn-rosbridge'), conf[0], conf[1]);
+    }
+
+    function onLatency(ms) {
+        const el = document.getElementById('ui-conn-latency');
+        if (!el) return;
+        el.textContent = (ms == null || !isFinite(ms)) ? 'N/A' : `${Math.round(ms)} ms`;
+        el.dataset.tone = (ms == null) ? 'idle' : (ms < 50 ? 'go' : (ms < 150 ? 'warn' : 'stop'));
+    }
+
+    function onDomainId(id) {
+        const el = document.getElementById('ui-conn-domain');
+        if (el) el.textContent = String(id);
+    }
+
+    function onBackendWsState(state) {
+        const el = document.getElementById('ui-conn-port-pc2');
+        const ports = window.ROS_SLAM_WEBUI || {};
+        if (el) el.textContent = `${ports.pc2WsPort || '-'}${state === 'connected' ? '' : ' (끊김)'}`;
+    }
+
+    function renderPorts() {
+        const ports = window.ROS_SLAM_WEBUI || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v ?? '-'; };
+        set('ui-conn-port-web', ports.webPort);
+        set('ui-conn-port-pc2', ports.pc2WsPort);
+        set('ui-conn-port-rosbridge', ports.rosbridgePort);
+    }
+
     function init() {
         if (isLegacyNav()) return;
         document.body.classList.add('ui-has-sidebar');
         // 초기 HTML은 메인 탭마다 서브탭 하나씩 active라 보이는 탭 안의 것을 고른다
         const active = document.querySelector('.tab-content.active .subtab-content.active');
         onScreenChanged(active ? active.id : 'lidar-slam-subtab');
+        renderPorts();
+        // webui_ports.js가 document에 bubbles 없이 보내므로 window가 아니라 document에서 받는다
+        document.addEventListener('ros-slam-webui-ports-ready', renderPorts);
     }
 
-    return { SCREENS, showScreen, onScreenChanged, refresh, init };
+    return {
+        SCREENS, showScreen, onScreenChanged, refresh, init,
+        onRosbridgeState, onLatency, onDomainId, onBackendWsState,
+    };
 })();
 window.uiShell = uiShell;
 window.showScreen = uiShell.showScreen;

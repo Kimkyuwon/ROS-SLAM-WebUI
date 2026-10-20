@@ -4105,6 +4105,7 @@ function _ensureLatencyPingWorker() {
         _latencyPingWorker.onmessage = (e) => {
             const { type, ms } = e.data || {};
             if (type !== 'latency') return;
+            if (window.uiShell) uiShell.onLatency(ms);
             const latencyElement = document.getElementById('latency-indicator');
             if (!latencyElement) return;
             if (ms == null || !isFinite(ms)) {
@@ -4144,6 +4145,7 @@ async function updateRosDomainId() {
     try {
         const result = await apiCall('/api/ros_domain_id');
         if (result.success && result.domain_id !== undefined) {
+            if (window.uiShell) uiShell.onDomainId(result.domain_id);
             const chip = domCache.get('ros-domain-chip');
             if (chip) {
                 chip.textContent = `ROS DOMAIN ID: ${result.domain_id}`;
@@ -4270,6 +4272,7 @@ function _initBackendWs() {
         plotState.backendWs = ws;
 
         ws.onopen = () => {
+            if (window.uiShell) uiShell.onBackendWsState('connected');
             console.log('[BackendWs] 연결됨:', url);
             const pending = plotState._pendingPlotSubs.splice(0);
             for (const req of pending) {
@@ -4288,6 +4291,7 @@ function _initBackendWs() {
         };
 
         ws.onclose = () => {
+            if (window.uiShell) uiShell.onBackendWsState('disconnected');
             console.log('[BackendWs] 연결 끊김, 3초 후 재연결...');
             plotState.backendWs = null;
             setTimeout(_initBackendWs, 3000);
@@ -4625,6 +4629,7 @@ function createTopicNodes() {
  */
 function updateRosbridgeStatusChip(state) {
     const chip = document.getElementById('rosbridge-status-chip');
+    if (window.uiShell) uiShell.onRosbridgeState(state);
     if (!chip) return;
 
     // 상태별 클래스/텍스트 맵

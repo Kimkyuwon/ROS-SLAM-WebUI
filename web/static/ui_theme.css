@@ -368,6 +368,17 @@ body.ui-has-sidebar { padding: 0; }
 .ui-sidebar-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-conn-block { padding: 12px; border-top: 1px solid var(--color-line); }
 .ui-conn-list { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; font: 11px var(--font-mono); color: var(--color-dim); }
+.ui-conn-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.ui-conn-state { display: inline-flex; align-items: center; gap: 8px; min-width: 0; font-size: 14px; color: var(--color-ink); white-space: nowrap; }
+.ui-conn-state[data-tone="go"] .ui-dot { --ui-dot: var(--color-go); }
+.ui-conn-state[data-tone="warn"] .ui-dot { --ui-dot: var(--color-warn); }
+.ui-conn-state[data-tone="stop"] .ui-dot { --ui-dot: var(--color-stop); }
+#ui-conn-latency { font-size: 11px; color: var(--color-dim); }
+#ui-conn-latency[data-tone="go"] { color: var(--color-go); }
+#ui-conn-latency[data-tone="warn"] { color: var(--color-warn); }
+#ui-conn-latency[data-tone="stop"] { color: var(--color-stop); }
+.ui-conn-list dt { margin: 0; letter-spacing: 0.04em; }
+.ui-conn-list dd { margin: 0; text-align: right; color: var(--color-mute); }
 .ui-screen-header { position: sticky; top: 0; z-index: 20; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px 12px; border-bottom: 1px solid var(--color-line); background: rgba(11, 14, 17, 0.95); backdrop-filter: blur(6px); }
 .ui-screen-header .ui-stepper { flex-basis: 100%; padding-top: 8px; border-top: 1px solid rgba(37, 43, 51, 0.7); }
 .ui-screen-group { font-size: 11px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--color-dim); }
