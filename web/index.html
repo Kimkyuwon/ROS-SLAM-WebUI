@@ -1364,6 +1364,7 @@
                                         title="토픽 목록 패널 접기/펼치기">▶</button>
                             </div>
                             <div id="plot-display-panel-body" class="plot-display-panel-body">
+                                <input class="ui-input" type="search" id="plot-field-search" placeholder="필드 찾기" aria-label="필드 찾기" oninput="plotState.tree && plotState.tree.filterByText(this.value)">
                                 <div class="plot-display-toolbar">
                                     <button type="button" onclick="expandAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Expand All</button>
                                     <button type="button" onclick="collapseAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Collapse All</button>

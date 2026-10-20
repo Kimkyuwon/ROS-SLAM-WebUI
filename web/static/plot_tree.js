@@ -382,6 +382,59 @@ class PlotJugglerTree {
         });
     }
 
+    setExpanded(node, expanded) {
+        if (!node.childrenContainer) {
+            return;
+        }
+        const expandIcon = node.querySelector('.plot-tree-expand-icon');
+        node.childrenContainer.style.display = expanded ? 'block' : 'none';
+        if (expandIcon) {
+            expandIcon.textContent = expanded ? '▼' : '▶';
+        }
+        node.classList.toggle('plot-tree-expanded', expanded);
+    }
+
+    filterByText(query) {
+        if (!this.container) {
+            return;
+        }
+        const q = String(query || '').trim().toLowerCase();
+        const nodes = Array.from(this.container.querySelectorAll('.plot-tree-node'));
+
+        if (!q) {
+            nodes.forEach((node) => { node.hidden = false; });
+            if (this._expandSnapshot) {
+                nodes.forEach((node) => {
+                    if (this._expandSnapshot.has(node)) {
+                        this.setExpanded(node, this._expandSnapshot.get(node));
+                    }
+                });
+                this._expandSnapshot = null;
+            }
+            return;
+        }
+
+        if (!this._expandSnapshot) {
+            this._expandSnapshot = new Map(
+                nodes.map((node) => [node, node.classList.contains('plot-tree-expanded')])
+            );
+        }
+        nodes.forEach((node) => { node.hidden = true; });
+        nodes.forEach((node) => {
+            const isLeaf = !node.childrenContainer || node.childrenContainer.children.length === 0;
+            if (!isLeaf || !(node.dataset.path || '').toLowerCase().includes(q)) {
+                return;
+            }
+            node.hidden = false;
+            for (let anc = node.parentElement; anc && anc !== this.container; anc = anc.parentElement) {
+                if (anc.classList.contains('plot-tree-node')) {
+                    anc.hidden = false;
+                    this.setExpanded(anc, true);
+                }
+            }
+        });
+    }
+
     toggleSelection(node) {
         if (node.dataset.isLeaf !== 'true') {
             return;
