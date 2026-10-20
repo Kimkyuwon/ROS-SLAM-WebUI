@@ -103,7 +103,8 @@ def check_slam_running(page, failures):
     if not save.is_enabled():
         failures.append('slam: save map not enabled with kf_count=12')
     shot(page, 'p2-slam-running')
-    page.unroute('**/api/slam/state')
+    # 진행 중인 fetch 핸들러가 끝날 때까지 기다리고 푼다 (다음 검사가 같은 URL을 다시 가로챔)
+    page.unroute_all(behavior='wait')
     page.evaluate("document.getElementById('ad-kf_count').textContent = '—'")
 
 
@@ -196,8 +197,7 @@ def check_slam_save_overlay(page, failures):
     if page.locator('#slam-save-map-status-area .ui-progress').is_visible():
         failures.append('slam save: progress bar visible after success')
     shot(page, 'p2-slam-saved')
-    for url in ('**/api/slam/state', '**/api/slam/save_map', '**/api/slam/save_map_status'):
-        page.unroute(url)
+    page.unroute_all(behavior='wait')
 
 
 def check_slam_config_load_failed(page, failures):
@@ -213,22 +213,102 @@ def check_slam_config_load_failed(page, failures):
     page.unroute('**/api/slam/load_config_file')
 
 
+FAKE_ANALYTICS_JS = """(args) => {
+    const [n, dop] = args;
+    for (let i = 0; i < n; i++) {
+        slamAnalyticsDashboard._onMessage({
+            imu_freq: 199 + (i % 3), lid_freq: 10, cpu_usage: 50 + (i % 7), ram_usage: 812,
+            traj_dist: 90 + i * 0.2, run_time: 420 + i,
+            imu_time: 0.002, state_time: 0.008 + (i % 4) * 0.001, map_time: 0.004, total_time: 0.031,
+            scan_dop: dop, matching_dop: dop, kf_count: 12, kf_dist_last: 1.5,
+            imu_mean: 0.002, imu_max: 0.004, state_mean: 0.008, state_max: 0.012,
+            map_mean: 0.004, map_max: 0.009, total_mean: 0.03, total_max: 0.05,
+        });
+    }
+}"""
+
+
+def spark_points(page, key):
+    return page.evaluate(f"""() => {{
+        const line = document.querySelector('#analytics-spark-{key} polyline');
+        return line ? (line.getAttribute('points') || '') : '';
+    }}""")
+
+
+def check_slam_analytics(page, failures, width=1440):
+    """Analytics를 오른쪽 칸 KPI 2열·스파크라인으로 — 가짜 메시지를 처리 함수에 직접 넣는다 (rosbridge 구독 없음)."""
+    page.evaluate('slamAnalyticsDashboard.show()')
+    page.wait_for_timeout(500)
+    if page.locator('#slam-analytics-dashboard .ui-kpi').count() < 4:
+        failures.append(f'slam analytics ({width}): fewer than 4 .ui-kpi')
+    if page.locator('#slam-analytics-detail').is_visible():
+        failures.append(f'slam analytics ({width}): full statistics not collapsed')
+    widths = page.evaluate("""() => {
+        const svg = document.querySelector('#analytics-chart-proctime .main-svg');
+        const side = document.querySelector('#lidar-slam-subtab .ui-col-side');
+        return svg && side ? [svg.getBoundingClientRect().width, side.getBoundingClientRect().width] : null;
+    }""")
+    if not widths or widths[0] > widths[1]:
+        failures.append(f'slam analytics ({width}): chart width {widths} exceeds side column')
+    page.evaluate(FAKE_ANALYTICS_JS, [12, 0])
+    if not page.locator('#analytics-dop-off').is_visible():
+        failures.append(f'slam analytics ({width}): DOP off note hidden with all-zero DOP')
+    page.evaluate(FAKE_ANALYTICS_JS, [30, 0.7])
+    page.wait_for_timeout(500)
+    if page.locator('#analytics-dop-off').is_visible():
+        failures.append(f'slam analytics ({width}): DOP off note visible with non-zero DOP')
+    for key in ('imu', 'lid', 'cpu'):
+        points = spark_points(page, key)
+        if len(points.split()) < 30:
+            failures.append(f'slam analytics ({width}): sparkline {key} has {len(points.split())} points')
+    if page.locator('#analytics-imu-hz').inner_text().strip() not in ('199', '200', '201'):
+        failures.append(f'slam analytics ({width}): imu hz value not rendered')
+    shot(page, f'p2-slam-analytics-{width}')
+    page.evaluate('slamAnalyticsDashboard.unsubscribe(); slamAnalyticsDashboard.hide();')
+    if spark_points(page, 'imu'):
+        failures.append(f'slam analytics ({width}): sparkline not cleared on reset')
+
+
+def check_slam_kf_reset(page, failures):
+    """Stop→Start 경로(unsubscribe → _resetWidgets)에서 이전 kf_count가 지워져 Save Map이 다시 잠겨야 한다."""
+    page.evaluate('slamAnalyticsDashboard.show()')
+    page.evaluate(FAKE_ANALYTICS_JS, [3, 0.7])
+    if page.locator('#ad-kf_count').inner_text().strip() != '12':
+        failures.append('slam kf reset: fake kf_count not rendered')
+    page.evaluate('slamAnalyticsDashboard.unsubscribe(); slamAnalyticsDashboard.hide();')
+    kf = page.locator('#ad-kf_count').inner_text().strip()
+    if kf != '—':
+        failures.append(f'slam kf reset: ad-kf_count {kf!r} after reset')
+    mock_slam_running(page)
+    page.wait_for_timeout(3000)
+    save = page.locator('#slam-save-map-button')
+    # 앞 저장 검사가 남긴 justSaved로 배지는 "Map Saved · …"일 수 있어 Stop 활성으로 실행 흉내를 확인
+    if not page.locator('#slam-stop-button').is_enabled():
+        failures.append('slam kf reset: running mock not applied')
+    if save.is_enabled() or '키프레임' not in (save.get_attribute('title') or ''):
+        failures.append('slam kf reset: save map unlocked after reset (stale kf_count)')
+    page.unroute_all(behavior='wait')
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
     with open_page() as (page, errors):
         check_slam_ready(page, failures)
         check_slam_layout(page, failures)
+        check_slam_analytics(page, failures)
         if not failures:
             check_slam_start_fail(page, failures)
             check_slam_running(page, failures)
             check_slam_save_overlay(page, failures)
+            check_slam_kf_reset(page, failures)
             check_slam_legacy_nav(page, failures)
         all_errors += errors
     with open_page(width=1280) as (page, errors):
         go_screen(page, 'lidar-slam-subtab')
         page.wait_for_timeout(500)
         check_slam_layout(page, failures, width=1280)
+        check_slam_analytics(page, failures, width=1280)
         all_errors += errors
     with open_page() as (page, errors):
         check_slam_config_load_failed(page, failures)

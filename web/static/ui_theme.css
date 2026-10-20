@@ -420,6 +420,43 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 #slam-save-map-elapsed { margin: 0; font-size: 13px; color: var(--color-ink); }
 #slam-save-map-elapsed::before { content: '경과 '; color: var(--color-mute); }
 
+/* --- SLAM Analytics (오른쪽 칸). style.css의 analytics-* 규칙(일부 !important)은 Localization도 쓰므로 이 패널 안에서만 덮는다 --- */
+.ui-contents { display: contents; }
+.ui-analytics .ui-panel-body { display: flex; flex-direction: column; gap: 14px; }
+.ui-analytics .analytics-hz-value, .ui-analytics .analytics-traj-value, .ui-analytics .analytics-traj-derived { font-size: inherit; font-weight: inherit; line-height: inherit; }
+.ui-analytics .analytics-traj-value, .ui-analytics .analytics-traj-derived { color: var(--color-ink) !important; }
+.ui-analytics .analytics-hz-value.analytics-hz-ok { color: var(--color-go) !important; }
+.ui-analytics .analytics-hz-value.analytics-hz-warn { color: var(--color-warn) !important; }
+.ui-analytics .analytics-hz-value.analytics-hz-err { color: var(--color-stop) !important; }
+.ui-analytics .ui-kpi:has(.analytics-hz-ok) .ui-sparkline { color: var(--color-go); }
+.ui-analytics .ui-kpi:has(.analytics-hz-warn) .ui-sparkline { color: var(--color-warn); }
+.ui-analytics .ui-kpi:has(.analytics-hz-err) .ui-sparkline { color: var(--color-stop); }
+.ui-analytics .analytics-cpu-pct-sym { margin-left: 4px; font-size: 12px; color: var(--color-mute); }
+.ui-analytics .ui-kpi-sub .ui-progress { margin-top: 6px; }
+.ui-analytics .ui-kpi-sub:empty { display: none; }
+.ui-analytics-chart { position: relative; min-width: 0; }
+.ui-analytics-chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 12px; color: var(--color-mute); }
+.ui-analytics .analytics-plot-container { height: 160px; }
+.ui-analytics-chart-note {
+    position: absolute; top: 28px; left: 50%; z-index: 1; margin: 0; padding: 2px 8px; transform: translateX(-50%);
+    border: 1px solid var(--color-line2); border-radius: var(--radius-xs); background: var(--color-raised);
+    font-size: 11px; color: var(--color-warn); white-space: nowrap;
+}
+.ui-analytics-more { padding-top: 10px; border-top: 1px solid var(--color-line); }
+.ui-analytics .analytics-cumul-table th { color: var(--color-dim) !important; border-bottom-color: var(--color-line) !important; }
+.ui-analytics .analytics-cumul-table td { border-bottom-color: var(--color-line); }
+.ui-analytics .analytics-cumul-table tr:hover td { background: var(--color-raised); }
+.ui-analytics .analytics-detail-toggle-bar { margin: 0; border: 0; border-top: 1px solid var(--color-line); border-radius: 0; background: none; }
+.ui-analytics .analytics-detail-toggle-btn {
+    min-height: 40px; padding: 0 12px; color: var(--color-mute);
+    font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase;
+}
+.ui-analytics .analytics-detail-toggle-btn:hover { background: var(--color-raised); color: var(--color-ink); }
+.ui-analytics .analytics-detail-section { padding: 0 12px 12px; border-top-color: var(--color-line); }
+.ui-analytics .analytics-detail-cat-title { color: var(--color-dim); }
+.ui-analytics .analytics-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ui-analytics .analytics-detail-item { gap: 8px; min-width: 0; background: rgba(11, 14, 17, 0.6); }
+
 /* --- 포커스 (키보드 조작만 표시) --- */
 [class^="ui-"]:focus-visible, [class*=" ui-"]:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 .ui-input:focus-visible, .ui-select:focus-visible { outline: none; }

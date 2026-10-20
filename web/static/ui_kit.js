@@ -38,6 +38,31 @@ const uiKit = (() => {
         if (label) label.textContent = text; else btn.textContent = text;
     }
 
+    const SPARKLINE_POINTS = 60;
+
+    // viewBox 0 0 100 30 기준. 최근 값이 오른쪽 끝에 오도록 60칸에 맞춘다
+    function renderSparkline(svgEl, values, max) {
+        if (!svgEl) return;
+        let line = svgEl.querySelector('polyline');
+        if (!values || !values.length) {
+            if (line) line.remove();
+            return;
+        }
+        if (!line) {
+            line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+            line.setAttribute('vector-effect', 'non-scaling-stroke');
+            svgEl.appendChild(line);
+        }
+        const recent = values.slice(-SPARKLINE_POINTS);
+        const top = max > 0 ? max : (Math.max(...recent) * 1.2 || 1);
+        const step = 100 / (SPARKLINE_POINTS - 1);
+        const offset = SPARKLINE_POINTS - recent.length;
+        line.setAttribute('points', recent.map((v, i) => {
+            const y = 29 - Math.min(Math.max(v / top, 0), 1) * 28;
+            return `${((offset + i) * step).toFixed(2)},${y.toFixed(2)}`;
+        }).join(' '));
+    }
+
     function setReadonly(container, readonly) {
         if (!container) return;
         container.dataset.readonly = readonly ? 'true' : 'false';
@@ -78,6 +103,6 @@ const uiKit = (() => {
         return toast;
     }
 
-    return { setStatusBadge, renderStepper, setEnabled, setBtnLabel, setReadonly, showToast };
+    return { setStatusBadge, renderStepper, setEnabled, setBtnLabel, setReadonly, showToast, renderSparkline };
 })();
 window.uiKit = uiKit;

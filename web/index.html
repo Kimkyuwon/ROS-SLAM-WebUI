@@ -333,109 +333,79 @@
                         </div>
                         <aside class="ui-col-side">
                             <!-- SLAM Analytics Dashboard (Phase 4.10) -->
-                            <div id="slam-analytics-dashboard" style="display:none; margin-bottom: 12px;">
-                                <!-- 대쉬보드 헤더 -->
-                                <div class="analytics-dashboard-header">
-                                    <h3 class="analytics-dashboard-title">SLAM Analytics Dashboard</h3>
-                                    <span class="analytics-live-badge">● LIVE</span>
+                            <div id="slam-analytics-dashboard" class="ui-panel ui-analytics" style="display:none;">
+                                <div class="ui-panel-header">
+                                    <h3 class="ui-panel-title">Analytics</h3>
+                                    <span class="ui-tag" data-tone="go">LIVE</span>
                                 </div>
-
-                                <!-- 상단 행: 4열 (Hz / Traj / CPU / RAM) -->
-                                <div class="analytics-grid analytics-row-top">
-                                    <div class="analytics-card" id="widget-sensor-hz">
-                                        <div class="analytics-card-title">Sensor Frequency</div>
-                                        <div class="analytics-hz-grid">
-                                            <div class="analytics-hz-item">
-                                                <div class="analytics-hz-label">IMU</div>
-                                                <div class="analytics-hz-value analytics-hz-ok" id="analytics-imu-hz">—</div>
-                                                <div class="analytics-hz-unit">Hz</div>
+                                <div class="ui-panel-body">
+                                    <div class="ui-kpi-grid">
+                                        <div class="ui-contents" id="widget-sensor-hz">
+                                            <div class="ui-kpi" title="1초 벽시계 기준. bag을 1×가 아닌 속도로 재생하면 그만큼 달라집니다.">
+                                                <span class="ui-kpi-label">IMU</span>
+                                                <span class="ui-kpi-value"><span class="analytics-hz-value analytics-hz-ok" id="analytics-imu-hz">—</span><span class="ui-kpi-unit">Hz</span></span>
+                                                <svg class="ui-sparkline" id="analytics-spark-imu" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"></svg>
                                             </div>
-                                            <div class="analytics-hz-item">
-                                                <div class="analytics-hz-label">LiDAR</div>
-                                                <div class="analytics-hz-value analytics-hz-ok" id="analytics-lid-hz">—</div>
-                                                <div class="analytics-hz-unit">Hz</div>
+                                            <div class="ui-kpi" title="1초 벽시계 기준. bag을 1×가 아닌 속도로 재생하면 그만큼 달라집니다.">
+                                                <span class="ui-kpi-label">LiDAR</span>
+                                                <span class="ui-kpi-value"><span class="analytics-hz-value analytics-hz-ok" id="analytics-lid-hz">—</span><span class="ui-kpi-unit">Hz</span></span>
+                                                <svg class="ui-sparkline" id="analytics-spark-lid" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+                                            </div>
+                                        </div>
+                                        <div class="ui-kpi" id="widget-cpu">
+                                            <span class="ui-kpi-label">CPU (fast_lio)</span>
+                                            <span class="ui-kpi-value" id="analytics-cpu-percent">—<span class="analytics-cpu-pct-sym">%</span></span>
+                                            <svg class="ui-sparkline" id="analytics-spark-cpu" viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+                                            <div class="ui-kpi-sub">
+                                                <span id="analytics-cpu-cores-equiv"></span>
+                                                <div class="ui-progress" hidden><div class="ui-progress-fill" id="analytics-cpu-bar-fill" style="width:0%"></div></div>
+                                            </div>
+                                        </div>
+                                        <div class="ui-kpi" id="widget-ram">
+                                            <span class="ui-kpi-label">RAM (fast_lio)</span>
+                                            <span class="ui-kpi-value" id="analytics-ram-value">—<span class="analytics-cpu-pct-sym"> MB</span></span>
+                                            <div class="ui-kpi-sub">
+                                                <span id="analytics-ram-sub"></span>
+                                                <div class="ui-progress"><div class="ui-progress-fill" id="analytics-ram-bar-fill" style="width:0%"></div></div>
+                                            </div>
+                                        </div>
+                                        <div class="ui-contents" id="widget-traj">
+                                            <div class="ui-kpi" title="속도 0.2 m/s 이상일 때만 누적">
+                                                <span class="ui-kpi-label">Distance</span>
+                                                <span class="ui-kpi-value"><span class="analytics-traj-value" id="analytics-traj-dist">—</span><span class="ui-kpi-unit">m</span></span>
+                                                <span class="ui-kpi-sub" title="첫 스캔부터의 벽시계 시간">Run time <span class="ui-mono" id="analytics-run-time">—</span></span>
+                                            </div>
+                                            <div class="ui-kpi">
+                                                <span class="ui-kpi-label">Avg Speed</span>
+                                                <span class="ui-kpi-value"><span class="analytics-traj-derived" id="analytics-avg-speed">—</span><span class="ui-kpi-unit">m/s</span></span>
+                                                <span class="ui-kpi-sub">최근 1초 이동 평균</span>
                                             </div>
                                         </div>
                                     </div>
 
-                                    <div class="analytics-card" id="widget-traj">
-                                        <div class="analytics-card-title">Trajectory</div>
-                                        <div class="analytics-traj-grid">
-                                            <div class="analytics-traj-item">
-                                                <span class="analytics-traj-label">Distance</span>
-                                                <span><span class="analytics-traj-value" id="analytics-traj-dist">—</span><span class="analytics-traj-unit">m</span></span>
-                                            </div>
-                                            <div class="analytics-traj-item">
-                                                <span class="analytics-traj-label">Uptime</span>
-                                                <span class="analytics-traj-time" id="analytics-run-time">—</span>
-                                            </div>
-                                            <div class="analytics-traj-item">
-                                                <span class="analytics-traj-label">Avg Speed</span>
-                                                <span><span class="analytics-traj-derived" id="analytics-avg-speed">—</span><span class="analytics-traj-unit">m/s</span></span>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div class="analytics-card" id="widget-cpu">
-                                        <div class="analytics-card-title">CPU Usage</div>
-                                        <div class="analytics-cpu-wrap">
-                                            <div class="analytics-cpu-top-row">
-                                                <span class="analytics-cpu-percent" id="analytics-cpu-percent">—<span class="analytics-cpu-pct-sym">%</span></span>
-                                                <span class="analytics-cpu-cores-equiv" id="analytics-cpu-cores-equiv"></span>
-                                            </div>
-                                            <div class="analytics-cpu-bar-bg">
-                                                <div class="analytics-cpu-bar-fill" id="analytics-cpu-bar-fill" style="width:0%"></div>
-                                            </div>
-                                            <div class="analytics-cpu-ticks">
-                                                <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <div class="analytics-card" id="widget-ram">
-                                        <div class="analytics-card-title">RAM Usage</div>
-                                        <div class="analytics-cpu-wrap analytics-ram-wrap">
-                                            <div class="analytics-cpu-top-row">
-                                                <span class="analytics-cpu-percent" id="analytics-ram-value">—<span class="analytics-cpu-pct-sym"> MB</span></span>
-                                                <span class="analytics-cpu-cores-equiv" id="analytics-ram-sub"></span>
-                                            </div>
-                                            <div class="analytics-cpu-bar-bg">
-                                                <div class="analytics-cpu-bar-fill" id="analytics-ram-bar-fill" style="width:0%"></div>
-                                            </div>
-                                            <div class="analytics-cpu-ticks">
-                                                <span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <!-- 중간 행: 2열 (Processing Time / Geometry Quality) -->
-                                <div class="analytics-grid analytics-row-middle">
-                                    <div class="analytics-card" id="widget-proc-time">
-                                        <div class="analytics-card-title">Per-frame Processing Time
-                                            <span class="analytics-card-subtitle">last 10s — stacked area</span>
+                                    <div class="ui-analytics-chart" id="widget-proc-time">
+                                        <div class="ui-analytics-chart-head">
+                                            <span>Processing time</span>
+                                            <span class="ui-hint">최근 10초 · 단계 누적</span>
                                         </div>
                                         <div id="analytics-chart-proctime" class="analytics-plot-container"></div>
                                     </div>
 
-                                    <div class="analytics-card" id="widget-geometry">
-                                        <div class="analytics-card-title">Geometry Quality (DOP)
-                                            <span class="analytics-card-subtitle">lower is better — last 10s</span>
+                                    <div class="ui-analytics-chart" id="widget-geometry">
+                                        <div class="ui-analytics-chart-head">
+                                            <span>DOP</span>
+                                            <span class="ui-hint">낮을수록 좋음 · 최근 10초</span>
                                         </div>
+                                        <p class="ui-analytics-chart-note" id="analytics-dop-off" hidden>DOP 계산 꺼짐 (dop_flag)</p>
                                         <div id="analytics-chart-dop" class="analytics-plot-container"></div>
                                     </div>
-                                </div>
 
-                                <!-- 하단 행: 전체 너비 (Cumulative Timing) -->
-                                <div class="analytics-grid analytics-row-bottom">
-                                    <div class="analytics-card" id="widget-cumul-timing">
-                                        <div class="analytics-card-title">Cumulative Timing Statistics
-                                            <span class="analytics-card-subtitle">Mean / Max comparison + inline bar</span>
-                                        </div>
+                                    <details class="ui-more ui-analytics-more" id="widget-cumul-timing">
+                                        <summary>누적 타이밍 (mean / max)</summary>
                                         <table class="analytics-cumul-table">
                                             <thead>
                                                 <tr>
-                                                    <th style="width:140px;">Component</th>
+                                                    <th>Component</th>
                                                     <th class="analytics-right">Mean (ms)</th>
                                                     <th class="analytics-right">Max (ms)</th>
                                                     <th>Mean / Max Ratio</th>
@@ -443,13 +413,13 @@
                                             </thead>
                                             <tbody id="analytics-cumul-tbody"></tbody>
                                         </table>
-                                    </div>
+                                    </details>
                                 </div>
 
                                 <!-- 상세정보 토글 -->
                                 <div class="analytics-detail-toggle-bar">
                                     <button class="analytics-detail-toggle-btn" id="slam-analytics-detail-toggle" onclick="toggleSlamAnalyticsDetail()">
-                                        Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)
+                                        Full Statistics · 27 항목
                                     </button>
                                     <div class="analytics-detail-section" id="slam-analytics-detail">
                                         <div class="analytics-detail-cat-title">Scan / Map Statistics</div>

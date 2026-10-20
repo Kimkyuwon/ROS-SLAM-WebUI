@@ -11196,7 +11196,18 @@ class SlamAnalyticsDashboard {
         // latest-only coalesce: rosbridge/TCP 적체 시 큐를 순서대로 비우지 않음
         this._pendingMsg = null;
         this._rafId = null;
+        this._spark = { imu: [], lid: [], cpu: [] };
         this._fetchSysInfo();
+        // 오른쪽 칸 폭이 바뀌면(창 크기·사이드바) Plotly가 스스로 따라가지 않는다
+        const dashEl = document.getElementById('slam-analytics-dashboard');
+        if (dashEl && window.ResizeObserver) {
+            new ResizeObserver(() => {
+                ['analytics-chart-proctime', 'analytics-chart-dop'].forEach((id) => {
+                    const el = document.getElementById(id);
+                    if (el && el.data) Plotly.Plots.resize(el);
+                });
+            }).observe(dashEl);
+        }
     }
 
     async _fetchSysInfo() {
@@ -11268,6 +11279,7 @@ class SlamAnalyticsDashboard {
             queue_length: 1
         });
         this._subscription.subscribe((msg) => {
+            if (window.uiShell) uiShell.noteAnalytics('slam');
             this._pendingMsg = msg;
             if (this._rafId == null) {
                 this._rafId = requestAnimationFrame(() => this._flushPending());
@@ -11357,26 +11369,26 @@ class SlamAnalyticsDashboard {
     _initProcTimePlot() {
         const layout = {
             paper_bgcolor: 'transparent',
-            plot_bgcolor: 'rgba(13,13,26,0.5)',
+            plot_bgcolor: 'transparent',
             margin: { t: 4, b: 30, l: 42, r: 8 },
             xaxis: {
                 showgrid: false,
-                color: '#556',
-                tickfont: { size: 9, color: '#556' },
+                color: '#5D6773',
+                tickfont: { size: 9, color: '#5D6773' },
                 nticks: 5,
                 type: 'date'
             },
             yaxis: {
-                gridcolor: '#2d2d4e',
-                color: '#556',
-                tickfont: { size: 9, color: '#8899aa' },
-                title: { text: 'ms', font: { size: 10, color: '#556' } }
+                gridcolor: '#252B33',
+                color: '#5D6773',
+                tickfont: { size: 9, color: '#8B95A1' },
+                title: { text: 'ms', font: { size: 10, color: '#5D6773' } }
             },
             legend: {
                 orientation: 'h',
                 y: -0.22,
                 x: 0,
-                font: { size: 9, color: '#c8d6e5' },
+                font: { size: 9, color: '#8B95A1' },
                 bgcolor: 'transparent'
             },
             hovermode: 'x unified',
@@ -11421,7 +11433,7 @@ class SlamAnalyticsDashboard {
             {
                 x: [],
                 y: [],
-                name: 'Total Pipeline',
+                name: 'Total (한 주기)',
                 type: 'scatter',
                 mode: 'lines',
                 line: { color: '#ffd32a', width: 2, dash: 'dot' }
@@ -11432,27 +11444,27 @@ class SlamAnalyticsDashboard {
     _initDopPlot() {
         const layout = {
             paper_bgcolor: 'transparent',
-            plot_bgcolor: 'rgba(13,13,26,0.5)',
+            plot_bgcolor: 'transparent',
             margin: { t: 4, b: 30, l: 36, r: 8 },
             xaxis: {
                 showgrid: false,
-                color: '#556',
-                tickfont: { size: 9, color: '#556' },
+                color: '#5D6773',
+                tickfont: { size: 9, color: '#5D6773' },
                 nticks: 5,
                 type: 'date'
             },
             yaxis: {
-                gridcolor: '#2d2d4e',
-                color: '#556',
-                tickfont: { size: 9, color: '#8899aa' },
-                title: { text: 'DOP', font: { size: 10, color: '#556' } },
+                gridcolor: '#252B33',
+                color: '#5D6773',
+                tickfont: { size: 9, color: '#8B95A1' },
+                title: { text: 'DOP', font: { size: 10, color: '#5D6773' } },
                 range: [0, 10]
             },
             legend: {
                 orientation: 'h',
                 y: -0.22,
                 x: 0,
-                font: { size: 9, color: '#c8d6e5' },
+                font: { size: 9, color: '#8B95A1' },
                 bgcolor: 'transparent'
             },
             hovermode: 'x unified',
@@ -11545,6 +11557,15 @@ class SlamAnalyticsDashboard {
         };
         setHz(imuEl, msg.imu_freq || 0);
         setHz(lidEl, msg.lid_freq || 0);
+        this._pushSpark('imu', msg.imu_freq || 0);
+        this._pushSpark('lid', msg.lid_freq || 0);
+    }
+
+    _pushSpark(key, value, max) {
+        const values = this._spark[key];
+        values.push(value);
+        if (values.length > 60) values.shift();
+        uiKit.renderSparkline(document.getElementById(`analytics-spark-${key}`), values, max);
     }
 
     _updateTrajCard(msg) {
@@ -11600,6 +11621,7 @@ class SlamAnalyticsDashboard {
             coreEl.textContent = `${usedCores.toFixed(1)} of ${totalCores} cores`;
         }
         barEl.style.width = `${barPct}%`;
+        this._pushSpark('cpu', cpuPercent, 100);
     }
 
     _updateRamCard(msg) {
@@ -11670,6 +11692,9 @@ class SlamAnalyticsDashboard {
             'xaxis.range': [new Date(now - (this._WINDOW_SEC * 1000)), x],
             'yaxis.range': [0, dopYmax]
         });
+        // dop_flag가 꺼진 노드는 DOP를 0으로만 보낸다
+        const dopOffEl = document.getElementById('analytics-dop-off');
+        if (dopOffEl) dopOffEl.hidden = !(buf.scan_dop.length >= 10 && allDop.every((v) => v === 0));
     }
 
     _updateCumulTable(msg) {
@@ -11752,6 +11777,10 @@ class SlamAnalyticsDashboard {
     }
 
     _resetWidgets() {
+        // 이전 실행의 kf_count가 남으면 Save Map 잠금(kfCount > 0)이 키프레임 전에 풀린다
+        document.querySelectorAll('#slam-analytics-detail [id^="ad-"]').forEach((el) => {
+            el.textContent = '—';
+        });
         const textIds = [
             'analytics-imu-hz',
             'analytics-lid-hz',
@@ -11784,6 +11813,13 @@ class SlamAnalyticsDashboard {
             ramBar.style.width = '0%';
         }
 
+        this._spark = { imu: [], lid: [], cpu: [] };
+        ['imu', 'lid', 'cpu'].forEach((key) => {
+            uiKit.renderSparkline(document.getElementById(`analytics-spark-${key}`), []);
+        });
+        const dopOffEl = document.getElementById('analytics-dop-off');
+        if (dopOffEl) dopOffEl.hidden = true;
+
         // 상세 섹션 닫기 및 버튼 텍스트 초기화
         const detailSection = document.getElementById('slam-analytics-detail');
         const detailBtn = document.getElementById('slam-analytics-detail-toggle');
@@ -11792,7 +11828,7 @@ class SlamAnalyticsDashboard {
         }
         if (detailBtn) {
             detailBtn.classList.remove('open');
-            detailBtn.textContent = 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)';
+            detailBtn.textContent = 'Full Statistics · 27 항목';
         }
 
         this._plotsInitialized = false;
@@ -11814,7 +11850,7 @@ function toggleSlamAnalyticsDetail() {
     // 버튼 텍스트: arrow는 CSS ::after로 처리
     btn.textContent = isOpen
         ? 'Collapse Statistics'
-        : 'Full Statistics (Scan/Map · Feature Matching · Residual · IESEKF · IMU State · Time Sync …)';
+        : 'Full Statistics · 27 항목';
 }
 
 // ══════════════════════════════════════════════════════════════════════
