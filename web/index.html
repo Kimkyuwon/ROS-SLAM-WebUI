@@ -19,7 +19,7 @@
     }
     </script>
 </head>
-<body>
+<body class="ui-has-sidebar">
     <svg id="ui-icon-sprite" hidden>
         <!-- Lucide icons v0.460.0 (https://lucide.dev), ISC License -->
         <symbol id="icon-radar" viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></symbol>
@@ -31,6 +31,8 @@
         <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
         <symbol id="icon-box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
         <symbol id="icon-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
+        <symbol id="icon-pause" viewBox="0 0 24 24"><rect x="14" y="4" width="4" height="16" rx="1"/><rect x="6" y="4" width="4" height="16" rx="1"/></symbol>
+        <symbol id="icon-menu" viewBox="0 0 24 24"><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="18" y2="18"/></symbol>
         <symbol id="icon-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
         <symbol id="icon-save" viewBox="0 0 24 24"><path d="M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M17 21v-7a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7"/><path d="M7 3v4a1 1 0 0 0 1 1h7"/></symbol>
         <symbol id="icon-terminal" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></symbol>
@@ -39,6 +41,13 @@
         <symbol id="icon-camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
         <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
         <symbol id="icon-eye-off" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></symbol>
+        <symbol id="icon-home" viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></symbol>
+        <symbol id="icon-pin" viewBox="0 0 24 24"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></symbol>
+        <symbol id="icon-topview" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></symbol>
+        <symbol id="icon-expand" viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></symbol>
+        <symbol id="icon-collapse" viewBox="0 0 24 24"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></symbol>
+        <symbol id="icon-layers-edl" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></symbol>
+        <symbol id="icon-diff" viewBox="0 0 24 24"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></symbol>
     </svg>
     <div class="ui-app-shell">
         <aside class="ui-sidebar" id="ui-sidebar">
@@ -121,6 +130,10 @@
             </div>
         </aside>
         <main class="ui-main">
+            <button type="button" id="ui-sidebar-toggle" class="ui-icon-btn" aria-label="메뉴 열기" title="메뉴 열기"
+                    aria-controls="ui-sidebar" aria-expanded="false">
+                <svg class="ui-icon" aria-hidden="true"><use href="#icon-menu"></use></svg>
+            </button>
     <div class="page-shell">
         <header class="topbar">
             <div class="brand">
@@ -220,49 +233,24 @@
                                             <div id="slam-live-viewer-actions">
                                                 <button class="slam-action-btn ui-icon-btn" id="slam-live-reset-btn"
                                                         onclick="resetSlamLiveViewer()" title="Reset View" aria-label="Reset View">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                                                        <polyline points="9 22 9 12 15 12 15 22"/>
-                                                    </svg>
+                                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg>
                                                 </button>
                                                 <button class="slam-action-btn ui-icon-btn" id="slam-live-follow-btn"
                                                         onclick="slamLiveViewer && slamLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글" aria-label="Follow 카메라 추종 토글" aria-pressed="false">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-                                                        <circle cx="12" cy="10" r="3"/>
-                                                    </svg>
+                                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-pin"></use></svg>
                                                 </button>
                                                 <button class="slam-action-btn ui-icon-btn" id="slam-live-fs-topview-btn"
                                                         onclick="toggleSlamLiveTopView(!slamLiveViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <circle cx="12" cy="12" r="3"/>
-                                                        <line x1="12" y1="2" x2="12" y2="6"/>
-                                                        <line x1="12" y1="18" x2="12" y2="22"/>
-                                                        <line x1="2" y1="12" x2="6" y2="12"/>
-                                                        <line x1="18" y1="12" x2="22" y2="12"/>
-                                                    </svg>
+                                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-topview"></use></svg>
                                                 </button>
                                                 <button class="slam-action-btn ui-icon-btn" id="slam-live-snapshot-btn"
                                                         onclick="takeSlamLiveSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                                                        <circle cx="12" cy="13" r="4"/>
-                                                    </svg>
+                                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg>
                                                 </button>
                                                 <button class="slam-action-btn ui-icon-btn" id="slam-live-fullscreen-btn"
                                                         onclick="toggleSlamLiveViewerFullscreen()" title="풀스크린" aria-label="풀스크린">
-                                                    <svg id="slam-live-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                        <polyline points="15 3 21 3 21 9"/>
-                                                        <polyline points="9 21 3 21 3 15"/>
-                                                        <line x1="21" y1="3" x2="14" y2="10"/>
-                                                        <line x1="3" y1="21" x2="10" y2="14"/>
-                                                    </svg>
-                                                    <svg id="slam-live-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
-                                                        <polyline points="4 14 10 14 10 20"/>
-                                                        <polyline points="20 10 14 10 14 4"/>
-                                                        <line x1="10" y1="14" x2="3" y2="21"/>
-                                                        <line x1="21" y1="3" x2="14" y2="10"/>
-                                                    </svg>
+                                                    <svg class="ui-icon" aria-hidden="true" id="slam-live-fullscreen-icon-expand"><use href="#icon-expand"></use></svg>
+                                                    <svg class="ui-icon" aria-hidden="true" id="slam-live-fullscreen-icon-collapse" style="display:none;"><use href="#icon-collapse"></use></svg>
                                                 </button>
                                             </div><!-- /slam-live-viewer-actions -->
                                         </div><!-- /slam-live-canvas-container -->
@@ -293,13 +281,13 @@
                                         <span class="height-clip-current" id="savemap-height-clip-current-label">Z: -</span>
                                     </div>
                                     <div id="savemap-pcd-legend">
-                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="background:#ffdd00;"></span><span>LIO Map</span></div>
-                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="background:#ff3333;"></span><span>Optimized</span></div>
-                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="static" data-active="true" title="동적 객체·이상치 제거(지면 포함)" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="background:#44ff88;"></span><span>Dynamic Object Removal</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="liomap" data-active="true" onclick="toggleSaveMapLayer('liomap')"><span class="slam-legend-dot" style="--swatch:#ffdd00"></span><span>LIO Map</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="optimized" data-active="true" onclick="toggleSaveMapLayer('optimized')"><span class="slam-legend-dot" style="--swatch:#ff3333"></span><span>Optimized</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="static" data-active="true" title="동적 객체·이상치 제거(지면 포함)" onclick="toggleSaveMapLayer('static')"><span class="slam-legend-dot" style="--swatch:#44ff88"></span><span>Dynamic Object Removal</span></div>
                                     </div>
                                     <div id="savemap-result-legend">
-                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="background:#ff8800;"></span><span>LIO</span></div>
-                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="background:#ffffff;"></span><span>PGO</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="lio" data-active="true" onclick="toggleSaveMapLayer('lio')"><span class="slam-legend-dot" style="--swatch:#ff8800"></span><span>LIO</span></div>
+                                        <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="pgo" data-active="true" onclick="toggleSaveMapLayer('pgo')"><span class="slam-legend-dot" style="--swatch:#ffffff"></span><span>PGO</span></div>
                                         <div class="slam-legend-separator"></div>
                                         <div class="slam-legend-row" role="button" aria-pressed="true" data-layer="loopclosure" data-active="true" onclick="toggleSaveMapLayer('loopclosure')"><span class="slam-legend-line" style="background:#2288ff;"></span><span>Loop Closure</span></div>
                                     </div>
@@ -312,20 +300,20 @@
                                     </div>
                                     <div id="savemap-viewer-actions">
                                         <button class="slam-action-btn ui-icon-btn" id="savemap-reset-btn" onclick="resetSaveMapResultView()" title="Reset View" aria-label="Reset View">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg>
                                         </button>
                                         <button class="slam-action-btn ui-icon-btn" id="savemap-fs-topview-btn" onclick="toggleSaveMapTopView(!saveMapResultViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+                                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-topview"></use></svg>
                                         </button>
                                         <button class="slam-action-btn ui-icon-btn" id="savemap-fs-edl-btn" onclick="toggleSaveMapEDL(!saveMapResultViewer._edlEnabled)" title="Depth Filter" aria-label="Depth Filter" aria-pressed="false">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-layers-edl"></use></svg>
                                         </button>
                                         <button class="slam-action-btn ui-icon-btn" id="savemap-snapshot-btn" onclick="takeSaveMapSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
-                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg>
                                         </button>
                                         <button class="slam-action-btn ui-icon-btn" id="savemap-fullscreen-btn" onclick="toggleSaveMapResultFullscreen()" title="풀스크린" aria-label="풀스크린">
-                                            <svg id="savemap-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-                                            <svg id="savemap-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
+                                            <svg class="ui-icon" aria-hidden="true" id="savemap-fullscreen-icon-expand"><use href="#icon-expand"></use></svg>
+                                            <svg class="ui-icon" aria-hidden="true" id="savemap-fullscreen-icon-collapse" style="display:none;"><use href="#icon-collapse"></use></svg>
                                         </button>
                                     </div>
                                 </div>
@@ -586,49 +574,36 @@
                                         <div id="loc-viewer-actions">
                                             <button class="slam-action-btn ui-icon-btn" id="loc-reset-btn"
                                                     onclick="resetLocViewer()" title="Reset View" aria-label="Reset View">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                                                    <polyline points="9 22 9 12 15 12 15 22"/>
-                                                </svg>
+                                                <svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg>
                                             </button>
                                             <button class="slam-action-btn ui-icon-btn" id="loc-follow-btn"
                                                     onclick="locLiveViewer && locLiveViewer.toggleFollow()" title="Follow 카메라 추종 토글" aria-label="Follow 카메라 추종 토글" aria-pressed="false">
+                                                <svg class="ui-icon" aria-hidden="true"><use href="#icon-pin"></use></svg>
+                                            </button>
+                                            <button class="slam-action-btn ui-icon-btn" id="loc-initpose-btn" type="button"
+                                                    onclick="locLiveViewer && locLiveViewer.startInitialPosePick()"
+                                                    title="Localization 실행 중에만 지정할 수 있습니다" aria-label="초기 위치 지정"
+                                                    aria-pressed="false" disabled>
                                                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-                                                    <circle cx="12" cy="10" r="3"/>
+                                                    <circle cx="12" cy="12" r="3"/>
+                                                    <line x1="12" y1="2" x2="12" y2="7"/>
+                                                    <line x1="12" y1="17" x2="12" y2="22"/>
+                                                    <line x1="2" y1="12" x2="7" y2="12"/>
+                                                    <line x1="17" y1="12" x2="22" y2="12"/>
                                                 </svg>
                                             </button>
                                             <button class="slam-action-btn ui-icon-btn" id="loc-fs-topview-btn"
                                                     onclick="toggleLocTopView(!locLiveViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <circle cx="12" cy="12" r="3"/>
-                                                    <line x1="12" y1="2" x2="12" y2="6"/>
-                                                    <line x1="12" y1="18" x2="12" y2="22"/>
-                                                    <line x1="2" y1="12" x2="6" y2="12"/>
-                                                    <line x1="18" y1="12" x2="22" y2="12"/>
-                                                </svg>
+                                                <svg class="ui-icon" aria-hidden="true"><use href="#icon-topview"></use></svg>
                                             </button>
                                             <button class="slam-action-btn ui-icon-btn" id="loc-snapshot-btn"
                                                     onclick="takeLocSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
-                                                    <circle cx="12" cy="13" r="4"/>
-                                                </svg>
+                                                <svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg>
                                             </button>
                                             <button class="slam-action-btn ui-icon-btn" id="loc-fullscreen-btn"
                                                     onclick="toggleLocViewerFullscreen()" title="풀스크린" aria-label="풀스크린">
-                                                <svg id="loc-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                                    <polyline points="15 3 21 3 21 9"/>
-                                                    <polyline points="9 21 3 21 3 15"/>
-                                                    <line x1="21" y1="3" x2="14" y2="10"/>
-                                                    <line x1="3" y1="21" x2="10" y2="14"/>
-                                                </svg>
-                                                <svg id="loc-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;">
-                                                    <polyline points="4 14 10 14 10 20"/>
-                                                    <polyline points="20 10 14 10 14 4"/>
-                                                    <line x1="10" y1="14" x2="3" y2="21"/>
-                                                    <line x1="21" y1="3" x2="14" y2="10"/>
-                                                </svg>
+                                                <svg class="ui-icon" aria-hidden="true" id="loc-fullscreen-icon-expand"><use href="#icon-expand"></use></svg>
+                                                <svg class="ui-icon" aria-hidden="true" id="loc-fullscreen-icon-collapse" style="display:none;"><use href="#icon-collapse"></use></svg>
                                             </button>
                                         </div><!-- /loc-viewer-actions -->
                                     </div><!-- /loc-viewer-canvas-container -->
@@ -849,43 +824,69 @@
                             </span>
                         </div>
                     </div>
-                    <div class="ui-screen-actions" id="multi-session-header-actions"></div>
+                    <div class="ui-screen-actions" id="multi-session-header-actions">
+                        <button id="multi-session-header-cancel-btn" class="ui-btn ui-btn-stop" type="button"
+                                onclick="cancelOptimization()" hidden>Cancel</button>
+                        <button id="slam-opt-run-btn" class="ui-btn ui-btn-go" type="button"
+                                onclick="handleOptBtnClick()">Multi Session Optimization</button>
+                    </div>
                     <ol class="ui-stepper" id="multi-session-stepper" aria-label="진행 단계"></ol>
                 </header>
                 <div class="section card">
                     <h2>Multi-Session SLAM</h2>
 
-                    <div class="form-group">
-                        <label>Map 1:</label>
-                        <input type="text" id="slam-map1" placeholder="Click Load Map 1 to browse" readonly>
-                        <button onclick="loadMap1()">Load Map 1</button>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Map 2:</label>
-                        <input type="text" id="slam-map2" placeholder="Click Load Map 2 to browse" readonly>
-                        <button onclick="loadMap2()">Load Map 2</button>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Output:</label>
-                        <input type="text" id="slam-output" placeholder="Enter directory name (e.g., result)">
-                        <button onclick="setOutput()">Set Output</button>
-                    </div>
-
-                    <div class="separator"></div>
-
-                    <div class="status">
-                        <label id="slam-status">Status: Ready</label>
-                    </div>
-
-                    <div class="separator"></div>
-
-                    <div class="action-buttons center">
-                        <button id="slam-opt-run-btn" class="primary-button" onclick="handleOptBtnClick()">Multi Session Optimization</button>
-                    </div>
-
-                    <div id="slam-opt-status-area" class="status-banner" style="display:none; margin-top: 14px;">
+                    <div class="ui-screen-grid">
+                        <div class="ui-col-main">
+                            <section class="ui-panel">
+                                <div class="ui-panel-body">
+                                    <h3 class="ui-panel-title">Inputs</h3>
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="slam-map1">Map 1</label>
+                                        <div class="ui-field-control">
+                                            <input type="text" class="ui-input" id="slam-map1" placeholder="Click Load Map 1 to browse" readonly>
+                                            <button type="button" class="ui-icon-btn" onclick="loadMap1()" aria-label="Map 1 폴더 선택" title="Map 1 폴더 선택">
+                                                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                            </button>
+                                        </div>
+                                        <p class="ui-hint">Save Map으로 만든 세션 폴더 (Scans/·optimized_poses.txt·edges.txt·StaticMap.pcd 필요)</p>
+                                        <p class="ui-hint" id="multi-session-map1-check" hidden></p>
+                                    </div>
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="slam-map2">Map 2</label>
+                                        <div class="ui-field-control">
+                                            <input type="text" class="ui-input" id="slam-map2" placeholder="Click Load Map 2 to browse" readonly>
+                                            <button type="button" class="ui-icon-btn" onclick="loadMap2()" aria-label="Map 2 폴더 선택" title="Map 2 폴더 선택">
+                                                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                            </button>
+                                        </div>
+                                        <p class="ui-hint">합칠 두 번째 세션</p>
+                                        <p class="ui-hint" id="multi-session-map2-check" hidden></p>
+                                    </div>
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="slam-output">Output</label>
+                                        <input type="text" class="ui-input" id="slam-output" placeholder="Enter directory name (e.g., result)"
+                                               oninput="markMultiOutputDirty()">
+                                        <button type="button" onclick="setOutput()" hidden>Set Output</button>
+                                        <p class="ui-hint">결과 폴더 이름 — long_term_mapping/&lt;이름&gt;/에 만들어지고, 같은 이름의 폴더는 지워집니다</p>
+                                        <p class="ui-hint ui-error" id="multi-session-output-error" hidden></p>
+                                    </div>
+                                </div>
+                            </section>
+                            <section class="ui-panel">
+                                <div class="ui-panel-body">
+                                    <h3 class="ui-panel-title">Progress</h3>
+                                    <ol class="ui-progress-list" id="multi-session-progress"></ol>
+                                </div>
+                            </section>
+                            <p class="ui-hint" id="slam-status">Status: Ready</p>
+                        </div>
+                        <div class="ui-col-side">
+                            <div class="ui-viewer-empty" id="multi-session-viewer-empty">
+                                <p class="ui-viewer-empty-eyebrow">RESULT</p>
+                                <p class="ui-viewer-empty-title">최적화가 끝나면 합친 지도가 여기에 그려집니다</p>
+                                <p class="ui-viewer-empty-body">Map 1·Map 2와 결과 폴더 이름을 넣은 뒤 실행하세요.</p>
+                            </div>
+                    <div id="slam-opt-status-area" class="status-banner ui-viewer-overlay" style="display:none; margin-top: 14px;">
                         <div style="display:flex; align-items:center; gap:10px;">
                             <span id="slam-opt-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>
                             <span id="slam-opt-msg" style="flex:1; font-size:13px; color:var(--text);"></span>
@@ -916,23 +917,23 @@
                                 <span class="height-clip-current" id="slam-height-clip-current-label">Z: -</span>
                             </div>
                             <div id="slam-pcd-legend">
-                                <div class="slam-legend-row" data-layer="map1" data-active="true" onclick="toggleSlamLayer('map1')"><span class="slam-legend-dot" style="background:#198cff;"></span><span>Map1</span></div>
-                                <div class="slam-legend-row" data-layer="map2" data-active="true" onclick="toggleSlamLayer('map2')"><span class="slam-legend-dot" style="background:#19ff8c;"></span><span>Map2</span></div>
+                                <div class="slam-legend-row" data-layer="map1" data-active="true" onclick="toggleSlamLayer('map1')"><span class="slam-legend-dot" style="--swatch:#198cff"></span><span>Map1</span></div>
+                                <div class="slam-legend-row" data-layer="map2" data-active="true" onclick="toggleSlamLayer('map2')"><span class="slam-legend-dot" style="--swatch:#19ff8c"></span><span>Map2</span></div>
                                 <div class="slam-legend-separator"></div>
-                                <div class="slam-legend-row" data-layer="mergemap1" data-active="true" onclick="toggleSlamLayer('mergemap1')"><span class="slam-legend-dot" style="background:#ff19ff;"></span><span>Merge Map 1</span></div>
-                                <div class="slam-legend-row" data-layer="mergemap2" data-active="true" onclick="toggleSlamLayer('mergemap2')"><span class="slam-legend-dot" style="background:#ff8c19;"></span><span>Merge Map 2</span></div>
+                                <div class="slam-legend-row" data-layer="mergemap1" data-active="true" onclick="toggleSlamLayer('mergemap1')"><span class="slam-legend-dot" style="--swatch:#ff19ff"></span><span>Merge Map 1</span></div>
+                                <div class="slam-legend-row" data-layer="mergemap2" data-active="true" onclick="toggleSlamLayer('mergemap2')"><span class="slam-legend-dot" style="--swatch:#ff8c19"></span><span>Merge Map 2</span></div>
                                 <div id="slam-diff-legend-rows" style="display:none;">
                                     <div class="slam-legend-separator"></div>
-                                    <div class="slam-legend-row" data-layer="pd" data-active="true" onclick="toggleSlamLayer('pd')"><span class="slam-legend-dot" style="background:#ff1919;"></span><span>PD (New)</span></div>
-                                    <div class="slam-legend-row" data-layer="nd" data-active="true" onclick="toggleSlamLayer('nd')"><span class="slam-legend-dot" style="background:#8c19ff;"></span><span>ND (Del)</span></div>
-                                    <div class="slam-legend-row" data-layer="firstue" data-active="true" onclick="toggleSlamLayer('firstue')"><span class="slam-legend-dot" style="background:#ff198c;"></span><span>FirstUE</span></div>
-                                    <div class="slam-legend-row" data-layer="secondue" data-active="true" onclick="toggleSlamLayer('secondue')"><span class="slam-legend-dot" style="background:#8cff19;"></span><span>SecondUE</span></div>
+                                    <div class="slam-legend-row" data-layer="pd" data-active="true" onclick="toggleSlamLayer('pd')" title="세션2에만 있는 구조 (새로 생김)"><span class="slam-legend-dot" style="--swatch:#ff1919"></span><span>PD (New)</span></div>
+                                    <div class="slam-legend-row" data-layer="nd" data-active="true" onclick="toggleSlamLayer('nd')" title="세션1에만 있는 구조 (사라짐)"><span class="slam-legend-dot" style="--swatch:#8c19ff"></span><span>ND (Del)</span></div>
+                                    <div class="slam-legend-row" data-layer="firstue" data-active="true" onclick="toggleSlamLayer('firstue')" title="세션1만 본 영역 (세션2 미관측)"><span class="slam-legend-dot" style="--swatch:#ff198c"></span><span>FirstUE</span></div>
+                                    <div class="slam-legend-row" data-layer="secondue" data-active="true" onclick="toggleSlamLayer('secondue')" title="세션2만 본 영역 (세션1 미관측)"><span class="slam-legend-dot" style="--swatch:#8cff19"></span><span>SecondUE</span></div>
                                 </div>
                             </div>
                             <div id="slam-result-legend">
-                                <div class="slam-legend-row" data-layer="map1traj" data-active="true" onclick="toggleSlamLayer('map1traj')"><span class="slam-legend-dot" style="background:#ffff19;"></span><span>Map1 Traj</span></div>
-                                <div class="slam-legend-row" data-layer="map2traj" data-active="true" onclick="toggleSlamLayer('map2traj')"><span class="slam-legend-dot" style="background:#1919ff;"></span><span>Map2 Traj</span></div>
-                                <div class="slam-legend-row" data-layer="outputtraj" data-active="true" onclick="toggleSlamLayer('outputtraj')"><span class="slam-legend-dot" style="background:#19ffff;"></span><span>Output Traj</span></div>
+                                <div class="slam-legend-row" data-layer="map1traj" data-active="true" onclick="toggleSlamLayer('map1traj')"><span class="slam-legend-dot" style="--swatch:#ffff19"></span><span>Map1 Traj</span></div>
+                                <div class="slam-legend-row" data-layer="map2traj" data-active="true" onclick="toggleSlamLayer('map2traj')"><span class="slam-legend-dot" style="--swatch:#1919ff"></span><span>Map2 Traj</span></div>
+                                <div class="slam-legend-row" data-layer="outputtraj" data-active="true" onclick="toggleSlamLayer('outputtraj')"><span class="slam-legend-dot" style="--swatch:#19ffff"></span><span>Output Traj</span></div>
                                 <div class="slam-legend-separator"></div>
                                 <div class="slam-legend-row" data-layer="loopclosure" data-active="true" onclick="toggleSlamLayer('loopclosure')"><span class="slam-legend-line" style="background:#19ff19;"></span><span>Loop Closure</span></div>
                             </div>
@@ -945,25 +946,27 @@
                             </div>
                             <div id="slam-viewer-actions">
                                 <button class="slam-action-btn" id="slam-reset-btn" onclick="resetSlamResultView()" title="Reset View">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg>
                                 </button>
                                 <button class="slam-action-btn" id="slam-fs-topview-btn" onclick="toggleSlamTopView(!slamResultViewer._topView)" title="Top View">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-topview"></use></svg>
                                 </button>
                                 <button class="slam-action-btn" id="slam-fs-edl-btn" onclick="toggleSlamEDL(!slamResultViewer._edlEnabled)" title="Depth Filter">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-layers-edl"></use></svg>
                                 </button>
-                                <button class="slam-action-btn" id="slam-fs-diff-btn" onclick="toggleSlamDiff(!slamResultViewer._diffEnabled)" title="Check Difference">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></svg>
+                                <button class="slam-action-btn ui-icon-btn" id="slam-fs-diff-btn" onclick="toggleSlamDiff(!slamResultViewer._diffEnabled)" title="Check Difference" aria-label="Check Difference">
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-diff"></use></svg>
                                 </button>
                                 <button class="slam-action-btn" id="slam-snapshot-btn" onclick="takeSlamSnapshot()" title="스냅샷 저장">
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg>
                                 </button>
                                 <button class="slam-action-btn" id="slam-fullscreen-btn" onclick="toggleSlamFullscreen()" title="풀스크린">
-                                    <svg id="slam-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-                                    <svg id="slam-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
+                                    <svg class="ui-icon" aria-hidden="true" id="slam-fullscreen-icon-expand"><use href="#icon-expand"></use></svg>
+                                    <svg class="ui-icon" aria-hidden="true" id="slam-fullscreen-icon-collapse" style="display:none;"><use href="#icon-collapse"></use></svg>
                                 </button>
                             </div>
+                        </div>
+                    </div>
                         </div>
                     </div>
                 </div>
@@ -999,65 +1002,81 @@
                         <label>Bag Directory:</label>
                         <input type="text" id="bag-directory" placeholder="Click Load Bag File to browse" readonly>
                         <button onclick="loadBagFile()">Load Bag File</button>
-                        <span id="bag-ros1-badge" style="display:none;" class="ros1-badge">ROS1 Bag</span>
-                        <span id="bag-ros2-badge" style="display:none;" class="ros2-badge">ROS2 Bag</span>
                     </div>
+                    <p class="ui-hint">
+                        <span id="bag-ros1-badge" style="display:none;" class="ui-tag">ROS1 Bag</span>
+                        <span id="bag-ros2-badge" style="display:none;" class="ui-tag">ROS2 Bag</span>
+                        <span id="bag-meta-duration" class="ui-tag ui-mono"></span>
+                        <span id="bag-meta-topics" class="ui-tag"></span>
+                    </p>
 
-                    <div id="bag-convert-controls" class="form-group" style="display:none;">
-                        <label>Format:</label>
-                        <select id="player-format-select" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                            <option value="ros2_mcap">ROS2 (mcap)</option>
-                            <option value="ros2_db3">ROS2 (db3)</option>
-                            <option value="ros1">ROS1 (.bag)</option>
-                        </select>
-                        <button id="convert-bag-btn" onclick="convertBag()">Convert</button>
-                        <div></div>
-                    </div>
+                    <section id="bag-convert-controls" class="ui-panel" style="display:none;">
+                        <div class="ui-panel-body">
+                            <h3 class="ui-panel-title">형식 변환 (CONVERT)</h3>
+                            <label class="ui-field-label" for="player-format-select">Format</label>
+                            <select id="player-format-select" class="ui-select">
+                                <option value="ros2_mcap">ROS2 (mcap)</option>
+                                <option value="ros2_db3">ROS2 (db3)</option>
+                                <option value="ros1">ROS1 (.bag)</option>
+                            </select>
+                            <button id="convert-bag-btn" class="ui-btn" type="button" onclick="convertBag()">Convert</button>
+                            <div class="ui-progress ui-progress-indeterminate"></div>
+                            <p class="ui-hint">선택한 토픽만 변환됩니다</p>
+                        </div>
+                    </section>
 
-                    <div class="form-group">
+                    <div class="form-group" hidden>
                         <label>Selected Topics:</label>
-                        <div id="bag-selected-topics-display" style="padding: 5px; background: #3a3a3a; border-radius: 4px; margin-bottom: 10px; min-height: 25px;">
+                        <div id="bag-selected-topics-display" hidden style="padding: 5px; background: #3a3a3a; border-radius: 4px; margin-bottom: 10px; min-height: 25px;">
                             <span style="color: #888;">No topics selected</span>
                         </div>
                     </div>
 
-                    <div class="form-group">
-                        <label></label>
-                        <div class="bag-control-buttons">
-                            <button onclick="selectTopics()">Select Topic</button>
-                            <button id="bag-play-button" onclick="playBag()">Play</button>
-                            <button id="bag-pause-button" onclick="pauseBag()">Pause</button>
-                        </div>
-                        <div></div>
-                    </div>
-
-                    <!-- 재생 속도 + Loop (bag 로드 시 표시, ROS1/ROS2 공용) -->
-                    <div id="ros1-playback-controls" style="display:none; padding: 8px 0 4px 0;">
-                        <div class="form-group">
-                            <label>Playback Rate:</label>
-                            <div style="display: flex; align-items: center; gap: 12px;">
-                                <input type="range" id="bag-playback-rate" min="1" max="40" value="10"
-                                       style="flex: 1; min-width: 160px;"
-                                       oninput="updatePlaybackRate(this.value)" />
-                                <span id="playback-rate-label" style="min-width: 36px; color: var(--accent, #4ad6ff); font-weight: 600;">1.0x</span>
-                                <label style="cursor:pointer; margin-left: 8px;">
-                                    <input type="checkbox" id="bag-player-loop" onchange="setBagPlayerLoop(this.checked)">
-                                    Loop
-                                </label>
+                    <section class="ui-panel">
+                        <div class="ui-panel-header">
+                            <h3 class="ui-panel-title" id="bag-topic-table-title">SELECTED TOPICS · 0/0</h3>
+                            <div>
+                                <button type="button" class="ui-btn ui-btn-ghost" onclick="setAllBagTopics(true)">모두 선택</button>
+                                <button type="button" class="ui-btn ui-btn-ghost" onclick="setAllBagTopics(false)">모두 해제</button>
                             </div>
-                            <div></div>
                         </div>
-                    </div>
-
-                    <div class="separator"></div>
-
-                    <div class="bag-timeline">
-                        <label id="bag-time-label">0:00 / 0:00</label>
-                        <div class="slider-container">
-                            <input type="range" id="bag-slider" min="0" max="10000" value="0" onchange="setBagPosition(this.value)">
+                        <div class="ui-panel-body">
+                            <table class="ui-table" id="bag-topic-table">
+                                <thead>
+                                    <tr>
+                                        <th scope="col"><span class="ui-sr-only">선택</span></th>
+                                        <th scope="col">Topic</th>
+                                        <th scope="col">Type</th>
+                                        <th scope="col" class="ui-num">Hz</th>
+                                        <th scope="col" class="ui-num">Msgs</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                            <p class="ui-hint" id="bag-topic-table-hint" hidden>재생 중 바꾼 선택은 다음 Play부터 적용됩니다</p>
                         </div>
-                    </div>
+                    </section>
 
+                    <button onclick="selectTopics()" hidden>Select Topic</button>
+
+                </div>
+                <div class="ui-playbar" id="bag-playbar">
+                    <button id="bag-play-button" class="ui-btn ui-btn-go" type="button" onclick="playBag()"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"/></svg><span class="ui-btn-label">Play</span></button>
+                    <button id="bag-pause-button" class="ui-btn ui-btn-ghost" type="button" onclick="pauseBag()"><span class="ui-btn-label">Pause</span></button>
+                    <span id="bag-time-label" class="ui-mono">0:00 / 0:00</span>
+                    <input type="range" id="bag-slider" min="0" max="10000" value="0" onchange="setBagPosition(this.value)">
+                    <div class="ui-seg" role="radiogroup" aria-label="재생 속도" id="bag-rate-seg">
+                        <button type="button" class="ui-seg-option" data-rate="0.5" role="radio" aria-checked="false">0.5×</button>
+                        <button type="button" class="ui-seg-option" data-rate="1" role="radio" aria-checked="true">1×</button>
+                        <button type="button" class="ui-seg-option" data-rate="2" role="radio" aria-checked="false">2×</button>
+                        <button type="button" class="ui-seg-option" data-rate="4" role="radio" aria-checked="false">4×</button>
+                    </div>
+                    <label class="ui-hint"><input type="checkbox" id="bag-player-loop" onchange="setBagPlayerLoop(this.checked)"> Loop</label>
+                    <details class="ui-more" id="ros1-playback-controls">
+                        <summary>세밀 조절</summary>
+                        <input type="range" id="bag-playback-rate" min="1" max="40" value="10" oninput="updatePlaybackRate(this.value)">
+                        <span id="playback-rate-label" class="ui-mono">1.0x</span>
+                    </details>
                 </div>
             </div>
 
@@ -1071,6 +1090,7 @@
                             <span class="ui-status-badge" id="bag-recorder-header-badge" data-tone="idle" role="status">
                                 <span class="ui-dot" aria-hidden="true"></span><span class="ui-status-text">Ready</span>
                             </span>
+                            <span id="recorder-mode-badge" class="ui-tag" style="display:none;"></span>
                         </div>
                     </div>
                     <div class="ui-screen-actions" id="bag-recorder-header-actions"></div>
@@ -1078,36 +1098,49 @@
                 <div class="section card">
                     <h2>Bag Recorder</h2>
 
-                    <div class="form-group">
-                        <label>Bag Name:</label>
-                        <input type="text" id="recorder-bag-name" placeholder="Enter bag name" readonly style="cursor:default;">
-                        <button onclick="enterBagName()">Enter Bag Name</button>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Selected Topics:</label>
-                        <div id="recorder-selected-topics-display" style="padding: 5px; background: #3a3a3a; border-radius: 4px; margin-bottom: 10px; min-height: 25px;">
-                            <span style="color: #888;">No topics selected</span>
-                        </div>
-                    </div>
-
-                    <div class="form-group">
-                        <label>Format:</label>
-                        <select id="recorder-format-select" style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                            <option value="ros2_mcap">ROS2 (mcap)</option>
-                            <option value="ros2_db3">ROS2 (db3)</option>
-                            <option value="ros1">ROS1 (.bag)</option>
-                        </select>
-                    </div>
-
-                    <div class="form-group">
-                        <label></label>
-                        <div class="bag-control-buttons">
-                            <button onclick="selectRecorderTopics()">Select Topic</button>
-                            <button id="recorder-record-button" onclick="recordBag()">Record</button>
-                        </div>
-                        <span id="recorder-mode-badge" style="display:none;"></span>
-                        <div></div>
+                    <div class="ui-screen-grid">
+                        <section class="ui-panel">
+                            <div class="ui-panel-body">
+                                <h3 class="ui-panel-title">Record</h3>
+                                <div class="ui-field">
+                                    <label class="ui-field-label" for="recorder-bag-name">Bag Name</label>
+                                    <div class="ui-field-control">
+                                        <input type="text" class="ui-input" id="recorder-bag-name" placeholder="Enter bag name" readonly>
+                                        <button type="button" class="ui-icon-btn" onclick="enterBagName()" aria-label="Bag 이름">
+                                            <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="ui-field">
+                                    <label class="ui-field-label" for="recorder-format-select">Format</label>
+                                    <select id="recorder-format-select" class="ui-select">
+                                        <option value="ros2_mcap">ROS2 (mcap)</option>
+                                        <option value="ros2_db3">ROS2 (db3)</option>
+                                        <option value="ros1">ROS1 (.bag)</option>
+                                    </select>
+                                </div>
+                                <button id="recorder-record-button" class="ui-btn ui-btn-record" type="button" onclick="recordBag()"><span class="ui-btn-label">Record</span></button>
+                                <div class="ui-screen-grid" id="recorder-stats">
+                                    <div class="ui-kpi"><span class="ui-kpi-hint">Time</span><span class="ui-kpi-value" id="recorder-stat-time">0:00</span></div>
+                                    <div class="ui-kpi"><span class="ui-kpi-hint">Size</span><span class="ui-kpi-value" id="recorder-stat-size">0 MB</span></div>
+                                    <div class="ui-kpi"><span class="ui-kpi-hint">Topics</span><span class="ui-kpi-value" id="recorder-stat-topics">0</span></div>
+                                </div>
+                            </div>
+                        </section>
+                        <section class="ui-panel">
+                            <div class="ui-panel-header">
+                                <h3 class="ui-panel-title">Selected Topics</h3>
+                                <button type="button" class="ui-btn ui-btn-ghost" onclick="refreshRecorderTopics()">목록 새로고침</button>
+                            </div>
+                            <div class="ui-panel-body">
+                                <div id="recorder-selected-topics-display" hidden></div>
+                                <button onclick="selectRecorderTopics()" hidden>Select Topic</button>
+                                <table class="ui-table" id="recorder-topic-table">
+                                    <thead><tr><th scope="col"><span class="ui-sr-only">선택</span></th><th scope="col">Topic</th><th scope="col">Type</th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </section>
                     </div>
 
                 </div>
@@ -1135,8 +1168,14 @@
                         <div class="player-row">
                             <div class="player-info">
                                 <span class="player-info-key">Dataset</span>
-                                <select id="dataset-format-select" onchange="onDatasetFormatChange(this.value)"
-                                        style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                                <div class="ui-seg" role="radiogroup" aria-label="데이터셋" id="file-player-dataset-seg">
+                                    <button type="button" class="ui-seg-option" data-dataset="conpr" role="radio" aria-checked="true">ConPR</button>
+                                    <button type="button" class="ui-seg-option" data-dataset="kitti" role="radio" aria-checked="false">KITTI Raw</button>
+                                    <button type="button" class="ui-seg-option" data-dataset="kaist" role="radio" aria-checked="false">KAIST Complex Urban</button>
+                                    <button type="button" class="ui-seg-option" data-dataset="mulran" role="radio" aria-checked="false">MulRan</button>
+                                    <button type="button" class="ui-seg-option" data-dataset="helipr" role="radio" aria-checked="false">HeLiPR</button>
+                                </div>
+                                <select id="dataset-format-select" hidden onchange="onDatasetFormatChange(this.value)">
                                     <option value="conpr">ConPR</option>
                                     <option value="kitti">KITTI Raw</option>
                                     <option value="kaist">KAIST Complex Urban</option>
@@ -1291,16 +1330,6 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="player-row">
-                            <div class="player-info">
-                                <span class="player-info-key">Timestamp</span>
-                                <label id="player-timestamp-label" class="player-info-val">—</label>
-                            </div>
-                            <div class="player-actions">
-                                <button id="play-button" onclick="playPlayer()">▶ Play</button>
-                                <button id="pause-button" onclick="pausePlayer()">⏸ Pause</button>
-                            </div>
-                        </div>
                     </div>
 
                     <div class="player-divider"></div>
@@ -1328,9 +1357,12 @@
 
                     <div class="player-divider"></div>
 
-                    <div class="slider-container">
-                        <input type="range" id="player-slider" min="0" max="10000" value="0" onchange="setSliderPosition(this.value)">
-                    </div>
+                </div>
+                <div class="ui-playbar" id="file-playbar">
+                    <button id="play-button" class="ui-btn ui-btn-go" type="button" onclick="playPlayer()"><span class="ui-btn-label">Play</span></button>
+                    <button id="pause-button" class="ui-btn ui-btn-ghost" type="button" onclick="pausePlayer()"><span class="ui-btn-label">Pause</span></button>
+                    <span id="player-timestamp-label" class="ui-mono">—</span>
+                    <input type="range" id="player-slider" min="0" max="10000" value="0" onchange="setSliderPosition(this.value)">
                 </div>
             </div>
         </div>
@@ -1354,7 +1386,31 @@
                             </span>
                         </div>
                     </div>
-                    <div class="ui-screen-actions" id="plot-header-actions"></div>
+                    <div class="ui-screen-actions" id="plot-header-actions">
+                        <div class="ui-seg" role="radiogroup" aria-label="시간 창" id="plot-window-seg">
+                            <button type="button" class="ui-seg-option" role="radio" aria-checked="false" data-sec="10"
+                                    onclick="uiShell.setPlotWindow(10)">10 s</button>
+                            <button type="button" class="ui-seg-option" role="radio" aria-checked="false" data-sec="30"
+                                    onclick="uiShell.setPlotWindow(30)">30 s</button>
+                            <button type="button" class="ui-seg-option" role="radio" aria-checked="false" data-sec="60"
+                                    onclick="uiShell.setPlotWindow(60)">60 s</button>
+                        </div>
+                        <details class="ui-more ui-plot-window-more">
+                            <summary>직접 입력</summary>
+                            <div class="ui-plot-window-custom">
+                                <label for="buffer-time-input">Buffer</label>
+                                <input type="number" id="buffer-time-input" class="ui-input" min="1" max="100" value="5" step="1"
+                                       onchange="updateBufferTime(this.value)"
+                                       title="일시정지 시 모든 데이터를 표시합니다. 고주파 센서(100Hz+)는 60초 이하 권장.">
+                                <span>sec</span>
+                            </div>
+                        </details>
+                        <button type="button" class="ui-btn" id="plot-header-pause-btn" onclick="uiShell.togglePlotPause()"
+                                title="모든 Plot 탭 일시정지/재개">
+                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-pause"></use></svg>
+                            <span class="ui-btn-label">Pause</span>
+                        </button>
+                    </div>
                 </header>
                 <div class="section card">
                     <h2>Plot</h2>
@@ -1364,7 +1420,7 @@
                             <div class="plot-display-panel-header views-panel-header">
                                 <h3>Topic List</h3>
                                 <button type="button" id="plot-display-collapse-btn" class="views-collapse-btn"
-                                        onclick="togglePlotDisplayPanel()"
+                                        onclick="togglePlotDisplayPanel()" aria-label="토픽 목록 패널 접기/펼치기"
                                         title="토픽 목록 패널 접기/펼치기">▶</button>
                             </div>
                             <div id="plot-display-panel-body" class="plot-display-panel-body">
@@ -1388,14 +1444,6 @@
                         <div class="plot-panel">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
                                 <h3 style="margin: 0;">Plot Area</h3>
-                                <div style="display: flex; align-items: center; gap: 8px;">
-                                    <label for="buffer-time-input" style="font-size: 12px; color: var(--text);">Buffer:</label>
-                                    <input type="number" id="buffer-time-input" min="1" max="100" value="5" step="1"
-                                           style="width: 60px; padding: 4px 8px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 12px;"
-                                           onchange="updateBufferTime(this.value)"
-                                           title="일시정지 시 모든 데이터를 표시합니다. 고주파 센서(100Hz+)는 60초 이하 권장.">
-                                    <span style="font-size: 12px; color: var(--muted);">sec</span>
-                                </div>
                             </div>
                             <div id="plot-tab-bar-container"></div>
                             <div id="plot-area-container" style="position: relative; width: 100%; height: 550px;">
@@ -1439,7 +1487,7 @@
                             <div class="viewer-display-panel-header views-panel-header">
                                 <h3>Displays</h3>
                                 <button type="button" id="viewer-display-collapse-btn" class="views-collapse-btn"
-                                        onclick="toggleViewerDisplayPanel()"
+                                        onclick="toggleViewerDisplayPanel()" aria-label="Displays 패널 접기/펼치기"
                                         title="Displays 패널 접기/펼치기">▶</button>
                             </div>
                             <div id="viewer-display-panel-body" class="viewer-display-panel-body">
@@ -1458,7 +1506,7 @@
                                                autocomplete="off" />
                                         <button class="fixed-frame-dropdown-btn"
                                                 onmousedown="event.preventDefault(); toggleFixedFrameDropdown();"
-                                                title="사용 가능한 TF 프레임 목록">▾</button>
+                                                aria-label="사용 가능한 TF 프레임 목록" title="사용 가능한 TF 프레임 목록">▾</button>
                                         <div id="fixed-frame-dropdown" class="fixed-frame-dropdown" style="display:none;"></div>
                                     </div>
                                 </div>
@@ -1480,8 +1528,8 @@
                                 <!-- 풀스크린 버튼 오버레이 -->
                                 <div id="viewer-3d-actions">
                                     <button class="viewer-3d-action-btn" id="viewer-fullscreen-btn" onclick="toggle3DViewerFullscreen()" title="풀스크린">
-                                        <svg id="viewer-fullscreen-icon-expand" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
-                                        <svg id="viewer-fullscreen-icon-collapse" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></svg>
+                                        <svg class="ui-icon" aria-hidden="true" id="viewer-fullscreen-icon-expand"><use href="#icon-expand"></use></svg>
+                                        <svg class="ui-icon" aria-hidden="true" id="viewer-fullscreen-icon-collapse" style="display:none;"><use href="#icon-collapse"></use></svg>
                                     </button>
                                 </div>
                             </div>
@@ -1502,7 +1550,7 @@
                                 <h3>Views</h3>
                                 <button id="views-collapse-btn"
                                         class="views-collapse-btn"
-                                        onclick="toggleViewsPanel()"
+                                        onclick="toggleViewsPanel()" aria-label="Views 패널 접기/펼치기"
                                         title="Views 패널 접기/펼치기">▶</button>
                             </div>
                             <!-- 패널 본문 (접히면 숨김) -->

@@ -56,7 +56,8 @@ const bagPlayerState = {
     bagType: 'ros2',   // 'ros1' or 'ros2'
     bagFormat: 'ros2_db3', // 'ros1' | 'ros2_db3' | 'ros2_mcap'
     playbackRate: 1.0, // ROS1 재생 속도 배율
-    wasPlaying: false  // 재생 종료 시 슬라이더 리셋 감지용
+    wasPlaying: false, // 재생 종료 시 슬라이더 리셋 감지용
+    topicDetails: []
 };
 
 // bag 슬라이더 드래그 중 여부 (드래그 중에만 폴링 업데이트 차단)
@@ -425,8 +426,17 @@ async function loadMap1() {
         const result = await apiCall('/api/slam/set_map1', { path });
         if (result.success) {
             updateSlamStatus(result.status);
+            showMapMissing('multi-session-map1-check', result.missing);
         }
     }, defaultDir);
+}
+
+function showMapMissing(id, missing) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const list = Array.isArray(missing) ? missing : [];
+    el.hidden = list.length === 0;
+    el.textContent = list.length ? `필요한 파일 없음: ${list.join(', ')}` : '';
 }
 
 async function loadMap2() {
@@ -436,6 +446,7 @@ async function loadMap2() {
         const result = await apiCall('/api/slam/set_map2', { path });
         if (result.success) {
             updateSlamStatus(result.status);
+            showMapMissing('multi-session-map2-check', result.missing);
         }
     }, defaultDir);
 }
@@ -459,8 +470,23 @@ let _optPollTimer = null;
 let _optComplete = false;
 let _optRunning = false;
 let _optViewerDismissed = false;  // Exit로 결과 뷰어를 닫은 경우 폴링 자동 복원 방지
+let _multiOutputDirty = false;
 
-function handleOptBtnClick() {
+function markMultiOutputDirty() {
+    _multiOutputDirty = true;
+    if (window.uiShell) uiShell.refresh();
+}
+
+async function handleOptBtnClick() {
+    if (!_optComplete && _multiOutputDirty) {
+        const output = domCache.get('slam-output').value.trim();
+        const saved = await apiCall('/api/slam/set_output', { path: output });
+        if (!saved.success) {
+            alert('Failed to set output: ' + (saved.error || saved.message || ''));
+            return;
+        }
+        _multiOutputDirty = false;
+    }
     if (_optComplete) {
         exitOptimization();
     } else {
@@ -506,6 +532,7 @@ function _showOptStatus(message, running) {
     area.style.display = 'block';
     area.style.opacity = '1';
     _setOptAreaState(null);
+    if (window.uiShell) uiShell.refresh();
 }
 
 function _resetOptBtn() {
@@ -513,6 +540,7 @@ function _resetOptBtn() {
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = false;
     runBtn.textContent = 'Multi Session Optimization';
+    if (window.uiShell) uiShell.refresh();
 }
 
 function _showOptSuccess() {
@@ -530,6 +558,7 @@ function _showOptSuccess() {
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = false;
     runBtn.textContent = 'Exit';
+    if (window.uiShell) uiShell.refresh();
 
     slamResultViewer.show().finally(() => {
         spinner.style.display = 'none';
@@ -586,6 +615,7 @@ async function _pollOptStatus() {
     _optPollTimer = null;
     try {
         const status = await apiCall('/api/slam/optimization_status');
+        if (window.uiShell && uiShell.onOptStatus) uiShell.onOptStatus(status);
 
         if (status.done) {
             if (status.success) {
@@ -656,7 +686,7 @@ async function updateSlamState() {
 
         // Only update output field if it's not currently focused (user is not typing)
         const outputField = domCache.get('slam-output');
-        if (document.activeElement !== outputField) {
+        if (document.activeElement !== outputField && !_multiOutputDirty) {
             outputField.value = state.output || '';
         }
 
@@ -667,6 +697,9 @@ async function updateSlamState() {
         // _optRunning이 true이면 최적화 진행 중, _optViewerDismissed면 사용자가 Exit로 닫은 상태
         // → 두 경우 모두 뷰어를 강제 복원하지 않음
         if (!_optRunning && !_optViewerDismissed && state.status === 'Optimization complete!') {
+            _optComplete = true;
+            const runBtn = domCache.get('slam-opt-run-btn');
+            if (runBtn) runBtn.textContent = 'Exit';
             const viewerEl = document.getElementById('slam-result-viewer');
             if (viewerEl && viewerEl.style.display === 'none') {
                 slamResultViewer.show();
@@ -777,7 +810,16 @@ function applyBagPlayerInfo(path, result, opts = {}) {
         updatePlaybackRate(document.getElementById('bag-playback-rate')?.value ?? 10);
         updateBagTimeLabel(0, bagPlayerState.bagDuration);
     }
+    bagPlayerState.topicDetails = result.topic_details || [];
+    const durEl = document.getElementById('bag-meta-duration');
+    const topicEl = document.getElementById('bag-meta-topics');
+    if (durEl) {
+        const sec = Math.max(0, Math.round(bagPlayerState.bagDuration || 0));
+        durEl.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+    }
+    if (topicEl) topicEl.textContent = `${bagPlayerState.availableTopics.length} topics`;
     updateSelectedTopicsDisplay();
+    renderBagTopicTable();
 }
 
 /** 페이지 로드·다른 기기 접속 시 서버 bag player 상태 복원 */
@@ -951,6 +993,77 @@ function updateSelectedTopicsDisplay() {
     }
 }
 
+function renderBagTopicTable() {
+    const tbody = document.querySelector('#bag-topic-table tbody');
+    if (!tbody) return;
+    const details = new Map((bagPlayerState.topicDetails || []).map(d => [d.name, d]));
+    const duration = bagPlayerState.bagDuration || 0;
+    tbody.replaceChildren(...bagPlayerState.availableTopics.map(entry => {
+        const name = typeof entry === 'object' ? entry.name : entry;
+        const publishable = typeof entry === 'object' ? entry.publishable !== false : true;
+        const info = details.get(name) || {};
+        const type = info.type || (typeof entry === 'object' ? entry.type : '') || '';
+        const count = Number.isFinite(info.count) ? info.count : null;
+        const tr = document.createElement('tr');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = publishable && bagPlayerState.selectedTopics.includes(name);
+        box.disabled = !publishable;
+        box.setAttribute('aria-label', `${name} 선택`);
+        box.onchange = () => {
+            const set = new Set(bagPlayerState.selectedTopics);
+            if (box.checked) set.add(name);
+            else set.delete(name);
+            bagPlayerState.selectedTopics = bagPlayerState.availableTopics
+                .map(t => (typeof t === 'object' ? t.name : t))
+                .filter(t => set.has(t));
+            updateSelectedTopicsDisplay();
+            renderBagTopicTableMeta();
+        };
+        const cells = [
+            name + (publishable ? '' : ' (not publishable)'),
+            type,
+            count !== null && duration > 0 ? (count / duration).toFixed(1) : '–',
+            count !== null ? count.toLocaleString() : '–',
+        ];
+        const tdBox = document.createElement('td');
+        tdBox.appendChild(box);
+        tr.appendChild(tdBox);
+        cells.forEach((text, i) => {
+            const td = document.createElement('td');
+            td.textContent = text;
+            if (i >= 2) td.className = 'ui-num';
+            tr.appendChild(td);
+        });
+        if (!publishable) tr.dataset.disabled = 'true';
+        return tr;
+    }));
+    renderBagTopicTableMeta();
+}
+
+function renderBagTopicTableMeta() {
+    const title = document.getElementById('bag-topic-table-title');
+    if (title) {
+        const n = bagPlayerState.selectedTopics.length;
+        const m = bagPlayerState.availableTopics.length;
+        title.textContent = `SELECTED TOPICS · ${n}/${m}`;
+        title.dataset.tone = n === 0 ? 'warn' : '';
+    }
+    const hint = document.getElementById('bag-topic-table-hint');
+    const play = domCache.get('bag-play-button');
+    if (hint) hint.hidden = !play || play.textContent.trim() !== 'Stop';
+}
+
+function setAllBagTopics(checked) {
+    bagPlayerState.selectedTopics = checked
+        ? bagPlayerState.availableTopics
+            .filter(t => typeof t !== 'object' || t.publishable !== false)
+            .map(t => (typeof t === 'object' ? t.name : t))
+        : [];
+    updateSelectedTopicsDisplay();
+    renderBagTopicTable();
+}
+
 async function playBag() {
     const bagPath = domCache.get('bag-directory').value;
     if (!bagPath) {
@@ -966,12 +1079,13 @@ async function playBag() {
         if (playButton && playButton.textContent === 'Stop') {
             const stopResult = await apiCall('/api/bag/stop_ros1', {});
             if (stopResult.success) {
-                playButton.textContent = 'Play';
-                domCache.get('bag-pause-button').textContent = 'Pause';
+                uiKit.setBtnLabel(playButton, 'Play');
+                uiKit.setBtnLabel(domCache.get('bag-pause-button'), 'Pause');
                 console.log('ROS1 bag playback stopped');
             } else {
                 console.error('Failed to stop ROS1 playback');
             }
+            if (window.uiShell) uiShell.refresh();
             return;
         }
 
@@ -981,9 +1095,11 @@ async function playBag() {
         );
         if (unpublishable.length > 0) {
             const names = unpublishable.map(t => t.name).join('\n  - ');
-            const proceed = confirm(
-                `다음 토픽은 ROS2에서 지원되지 않아 publish되지 않습니다:\n  - ${names}\n\n계속하시겠습니까?`
-            );
+            const proceed = await uiKit.confirmDialog({
+                title: '재생할 수 없는 토픽',
+                message: `다음 토픽은 ROS2에서 지원되지 않아 publish되지 않습니다:\n  - ${names}\n\n계속하시겠습니까?`,
+                okText: '나머지만 재생',
+            });
             if (!proceed) {
                 return;
             }
@@ -996,12 +1112,13 @@ async function playBag() {
         });
         if (result.success) {
             if (playButton) {
-                playButton.textContent = 'Stop';
+                uiKit.setBtnLabel(playButton, 'Stop');
             }
             console.log('ROS1 bag playback started');
         } else {
             alert('Failed to start ROS1 playback: ' + (result.message || 'Unknown error'));
         }
+        if (window.uiShell) uiShell.refresh();
         return;
     }
 
@@ -1012,12 +1129,13 @@ async function playBag() {
     });
     if (result.success) {
         const button = domCache.get('bag-play-button');
-        button.textContent = result.playing ? 'Stop' : 'Play';
+        uiKit.setBtnLabel(button, result.playing ? 'Stop' : 'Play');
         console.log('Bag playback:', result.playing ? 'started' : 'stopped',
                     `(rate=${bagPlayerState.playbackRate}x)`);
     } else {
         alert('Failed to play bag file: ' + (result.message || 'Unknown error'));
     }
+    if (window.uiShell) uiShell.refresh();
 }
 
 async function pauseBag() {
@@ -1026,11 +1144,12 @@ async function pauseBag() {
         const result = await apiCall('/api/bag/pause_ros1', {});
         if (result.success) {
             const button = domCache.get('bag-pause-button');
-            button.textContent = result.paused ? 'Resume' : 'Pause';
+            uiKit.setBtnLabel(button, result.paused ? 'Resume' : 'Pause');
             console.log('ROS1 bag playback:', result.paused ? 'paused' : 'resumed');
         } else {
             console.error('Failed to pause/resume ROS1 bag');
         }
+        if (window.uiShell) uiShell.refresh();
         return;
     }
 
@@ -1038,11 +1157,12 @@ async function pauseBag() {
     const result = await apiCall('/api/bag/pause', {});
     if (result.success) {
         const button = domCache.get('bag-pause-button');
-        button.textContent = result.paused ? 'Resume' : 'Pause';
+        uiKit.setBtnLabel(button, result.paused ? 'Resume' : 'Pause');
         console.log('Bag playback:', result.paused ? 'paused' : 'resumed');
     } else {
         console.error('Failed to pause/resume bag');
     }
+    if (window.uiShell) uiShell.refresh();
 }
 
 async function setBagPosition(position) {
@@ -1078,10 +1198,10 @@ async function updateBagState() {
             if (status === 'stopped') {
                 // 재생 완료 → 버튼 초기화
                 if (playButton) {
-                    playButton.textContent = 'Play';
+                    uiKit.setBtnLabel(playButton, 'Play');
                 }
                 if (pauseButton) {
-                    pauseButton.textContent = 'Pause';
+                    uiKit.setBtnLabel(pauseButton, 'Pause');
                 }
                 // 슬라이더가 0이 아니거나 방금 재생 중이었던 경우 처음으로 리셋
                 const slider = domCache.get('bag-slider');
@@ -1093,17 +1213,17 @@ async function updateBagState() {
             } else if (status === 'playing') {
                 bagPlayerState.wasPlaying = true;
                 if (playButton) {
-                    playButton.textContent = 'Stop';
+                    uiKit.setBtnLabel(playButton, 'Stop');
                 }
                 if (pauseButton) {
-                    pauseButton.textContent = 'Pause';
+                    uiKit.setBtnLabel(pauseButton, 'Pause');
                 }
             } else if (status === 'paused') {
                 if (playButton) {
-                    playButton.textContent = 'Stop';
+                    uiKit.setBtnLabel(playButton, 'Stop');
                 }
                 if (pauseButton) {
-                    pauseButton.textContent = 'Resume';
+                    uiKit.setBtnLabel(pauseButton, 'Resume');
                 }
             }
 
@@ -1134,6 +1254,7 @@ async function updateBagState() {
                 loopCb.checked = state.loop;
             }
         }
+        if (window.uiShell) uiShell.refresh();
         return;
     }
 
@@ -1144,9 +1265,9 @@ async function updateBagState() {
         if (state.playing) {
             bagPlayerState.wasPlaying = true;
             _bagSeeking = false;  // 재생 재개 확인 → seek 플래그 해제
-            playButton.textContent = 'Stop';
+            uiKit.setBtnLabel(playButton, 'Stop');
         } else {
-            playButton.textContent = 'Play';
+            uiKit.setBtnLabel(playButton, 'Play');
             // seek 처리 중(ROS2 stop→restart 과도 구간)에는 슬라이더 리셋 금지
             if (!_bagSeeking) {
                 const slider = domCache.get('bag-slider');
@@ -1180,9 +1301,9 @@ async function updateBagState() {
         // Update pause button state
         const pauseButton = domCache.get('bag-pause-button');
         if (state.paused) {
-            pauseButton.textContent = 'Resume';
+            uiKit.setBtnLabel(pauseButton, 'Resume');
         } else {
-            pauseButton.textContent = 'Pause';
+            uiKit.setBtnLabel(pauseButton, 'Pause');
         }
 
         // Loop 체크박스 동기화
@@ -1191,6 +1312,7 @@ async function updateBagState() {
             loopCb.checked = state.loop;
         }
     }
+    if (window.uiShell) uiShell.refresh();
 }
 
 /**
@@ -1293,7 +1415,7 @@ async function convertBag() {
         btn.textContent = originalText;
 
         if (result.success) {
-            alert(`Conversion complete!\nOutput: ${result.output_path}`);
+            uiKit.showToast(`Conversion complete!\nOutput: ${result.output_path}`, 'go');
 
             const outputPath = result.output_path;
             if (outputPath) {
@@ -1319,6 +1441,7 @@ async function convertBag() {
         btn.disabled = false;
         btn.textContent = originalText;
     }
+    if (window.uiShell) uiShell.refresh();
 }
 
 // File Player Functions
@@ -2268,7 +2391,7 @@ async function playPlayer() {
     const result = await apiCall('/api/player/play', {});
     if (result.success) {
         const button = domCache.get('play-button');
-        button.textContent = result.playing ? 'End' : 'Play';
+        uiKit.setBtnLabel(button, result.playing ? 'End' : 'Play');
     }
 }
 
@@ -2276,7 +2399,7 @@ async function pausePlayer() {
     const result = await apiCall('/api/player/pause', {});
     if (result.success) {
         const button = domCache.get('pause-button');
-        button.textContent = result.paused ? 'Resume' : 'Pause';
+        uiKit.setBtnLabel(button, result.paused ? 'Resume' : 'Pause');
     }
 }
 
@@ -2393,7 +2516,7 @@ async function updatePlayerState() {
         if (state.playing) {
             _playerWasPlaying = true;
             domCache.get('player-slider').value = state.slider_pos || 0;
-            domCache.get('play-button').textContent = 'End';
+            uiKit.setBtnLabel(domCache.get('play-button'), 'End');
         } else {
             // 재생이 끝난 직후 슬라이더를 처음으로 되돌림
             if (_playerWasPlaying) {
@@ -2404,16 +2527,17 @@ async function updatePlayerState() {
             } else {
                 domCache.get('player-slider').value = state.slider_pos || 0;
             }
-            domCache.get('play-button').textContent = 'Play';
+            uiKit.setBtnLabel(domCache.get('play-button'), 'Play');
         }
 
         if (state.paused) {
-            domCache.get('pause-button').textContent = 'Resume';
+            uiKit.setBtnLabel(domCache.get('pause-button'), 'Resume');
         } else {
-            domCache.get('pause-button').textContent = 'Pause';
+            uiKit.setBtnLabel(domCache.get('pause-button'), 'Pause');
         }
 
     }
+    if (window.uiShell) uiShell.refresh();
 }
 
 // Bag Recorder Functions
@@ -2629,7 +2753,7 @@ async function recordBag() {
     });
     if (result.success) {
         const button = domCache.get('recorder-record-button');
-        button.textContent = result.recording ? 'Stop' : 'Record';
+        uiKit.setBtnLabel(button, result.recording ? 'Stop' : 'Record');
         console.log('Recording:', result.recording ? 'started' : 'stopped');
 
         // 녹화 중 모드 배지 표시
@@ -2640,9 +2764,9 @@ async function recordBag() {
 
         if (result.recording) {
             const displayPath = format === 'ros1' ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
-            alert(`Recording started:\n${displayPath}`);
+            uiKit.showToast(`Recording started:\n${displayPath}`, 'go');
         } else {
-            alert('Recording stopped');
+            uiKit.showToast('Recording stopped', 'go');
         }
     } else {
         alert('Failed to start/stop recording: ' + (result.message || 'Unknown error'));
@@ -2654,11 +2778,7 @@ async function updateRecorderState() {
     if (state) {
         // Update button state
         const button = domCache.get('recorder-record-button');
-        if (state.recording) {
-            button.textContent = 'Stop';
-        } else {
-            button.textContent = 'Record';
-        }
+        if (button) uiKit.setBtnLabel(button, state.recording ? 'Stop' : 'Record');
 
         // 모드 배지 업데이트
         const badge = domCache.get('recorder-mode-badge');
@@ -2667,7 +2787,51 @@ async function updateRecorderState() {
             const modeLabels = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
             badge.textContent = modeLabels[state.mode] || 'ROS2 mcap';
         }
+        if (window.uiShell) uiShell.onRecorderState(state);
     }
+}
+
+async function refreshRecorderTopics() {
+    const result = await apiCall('/api/recorder/get_topics');
+    if (!result || !result.success) return;
+    renderRecorderTopicTable(result.topics || []);
+}
+
+function renderRecorderTopicTable(topics) {
+    const tbody = document.querySelector('#recorder-topic-table tbody');
+    if (!tbody) return;
+    const selected = new Set(bagRecorderState.selectedTopics.map(t => (typeof t === 'object' ? t.name : t)));
+    const recording = (document.getElementById('recorder-record-button') || {}).textContent;
+    const locked = recording && recording.trim() === 'Stop';
+    tbody.replaceChildren(...(topics || []).map((entry) => {
+        const name = typeof entry === 'object' ? entry.name : entry;
+        const type = typeof entry === 'object' ? (entry.type || '') : '';
+        const tr = document.createElement('tr');
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = selected.has(name);
+        box.disabled = locked;
+        box.dataset.name = name;
+        box.dataset.type = type;
+        box.setAttribute('aria-label', `${name} 선택`);
+        box.onchange = () => {
+            bagRecorderState.selectedTopics = [...tbody.querySelectorAll('input')]
+                .filter(el => el.checked)
+                .map(el => ({ name: el.dataset.name, type: el.dataset.type || '' }));
+            updateRecorderSelectedTopicsDisplay();
+            const stat = document.getElementById('recorder-stat-topics');
+            if (stat) stat.textContent = String(bagRecorderState.selectedTopics.length);
+            if (window.uiShell) uiShell.refresh();
+        };
+        const tdBox = document.createElement('td');
+        tdBox.appendChild(box);
+        const tdName = document.createElement('td');
+        tdName.textContent = name;
+        const tdType = document.createElement('td');
+        tdType.textContent = type;
+        tr.append(tdBox, tdName, tdType);
+        return tr;
+    }));
 }
 
 // ==============================================================
@@ -2795,7 +2959,7 @@ class ConfigManager {
         if (result.success) {
             const savedPath = result.path || targetPath;
             this.currentPath = savedPath;
-            alert('Config file saved successfully to:\n' + savedPath);
+            uiKit.showToast('Config file saved successfully to:\n' + savedPath, 'go');
             console.log(`${this.name} config saved to:`, savedPath);
             return true;
         }
@@ -3629,6 +3793,7 @@ async function startLocalizationMapping() {
     }
     if (result.success) {
         console.log('Localization mapping started');
+        if (window.uiShell) uiShell.onLocStartRequested();
         locLiveViewer.show();
         locAnalyticsDashboard.show();
         locAnalyticsDashboard.subscribe();
@@ -4265,6 +4430,7 @@ window.addEventListener('load', async () => {
     updateLocalizationState();
     updatePlayerState();
     updateBagState();
+    updateRecorderState();
     updateRosDomainId(); // Update ROS DOMAIN ID display
 
     // Resolve FAST-LIO config paths and sibling package paths from the current ROS workspace.
@@ -4296,6 +4462,8 @@ window.addEventListener('load', async () => {
                 updateBagState();
             } else if (activeSubTab && activeSubTab.id === 'file-player-subtab') {
                 updatePlayerState();
+            } else if (activeSubTab && activeSubTab.id === 'bag-recorder-subtab') {
+                updateRecorderState();
             }
         } else if (activeTab.id === 'visualization-tab') {
             // Visualization tab - no periodic updates needed
@@ -4452,7 +4620,7 @@ function _handleBackendWsMessage(rawData) {
         const text = domCache.get('kitti-progress-text');
         const msgEl = domCache.get('kitti-progress-msg');
         const pct = parseInt(msg.progress || 0);
-        if (!isNaN(pct)) {
+        if (fill && text && !isNaN(pct)) {
             fill.style.width = pct + '%';
             text.textContent = pct + '%';
         }
@@ -4475,7 +4643,7 @@ function _handleBackendWsMessage(rawData) {
         btn.textContent = 'Save Bag';
         if (bar) bar.style.display = 'none';
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
-        alert('Conversion error: ' + (msg.error || 'Unknown'));
+        uiKit.showToast('Conversion error: ' + (msg.error || 'Unknown'), 'stop');
 
     // ── KAIST 변환 진행률 / 완료 / 오류 ──────────────────────────────────────
     } else if (msg.type === 'kaist_convert_progress') {
@@ -4503,7 +4671,7 @@ function _handleBackendWsMessage(rawData) {
         if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
         if (bar) { bar.style.display = 'none'; }
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
-        alert('Conversion error: ' + (msg.error || 'Unknown'));
+        uiKit.showToast('Conversion error: ' + (msg.error || 'Unknown'), 'stop');
 
     // ── MulRan 변환 진행률 / 완료 / 오류 ─────────────────────────────────────
     } else if (msg.type === 'mulran_convert_progress') {
@@ -4531,7 +4699,7 @@ function _handleBackendWsMessage(rawData) {
         if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
         if (bar) { bar.style.display = 'none'; }
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
-        alert('Conversion error: ' + (msg.error || 'Unknown'));
+        uiKit.showToast('Conversion error: ' + (msg.error || 'Unknown'), 'stop');
 
     // ── HeLiPR 변환 진행률 / 완료 / 오류 ─────────────────────────────────────
     } else if (msg.type === 'helipr_convert_progress') {
@@ -4559,7 +4727,7 @@ function _handleBackendWsMessage(rawData) {
         if (btn) { btn.disabled = false; btn.textContent = 'Save Bag'; }
         if (bar) { bar.style.display = 'none'; }
         if (msgEl) { msgEl.textContent = 'Error: ' + (msg.error || 'Unknown'); }
-        alert('Conversion error: ' + (msg.error || 'Unknown'));
+        uiKit.showToast('Conversion error: ' + (msg.error || 'Unknown'), 'stop');
     }
 }
 
@@ -5593,7 +5761,7 @@ function collapseAllPlotTree() {
  */
 async function openPlotTopicSelectionModal() {
     if (!plotState.ros || !plotState.ros.isConnected) {
-        alert('rosbridge에 연결된 뒤 토픽을 선택할 수 있습니다.');
+        uiKit.showToast('rosbridge에 연결된 뒤 토픽을 선택할 수 있습니다.', 'warn');
         return;
     }
     if (plotState.isLoadingTopics) {
@@ -5604,7 +5772,7 @@ async function openPlotTopicSelectionModal() {
     }
     await loadPlotTopics();
     if (!plotState.topics || plotState.topics.length === 0) {
-        alert('현재 publish된 토픽이 없습니다.');
+        uiKit.showToast('현재 publish된 토픽이 없습니다.', 'warn');
         return;
     }
 
@@ -5673,7 +5841,7 @@ function updateBufferTime(seconds) {
     // 유효성 검사
     if (isNaN(bufferTime) || bufferTime < 1 || bufferTime > 100) {
         console.error('[updateBufferTime] Invalid buffer time:', seconds);
-        alert('Buffer time must be between 1 and 100 seconds');
+        uiKit.showToast('Buffer time must be between 1 and 100 seconds', 'warn');
         // 기본값으로 복원
         document.getElementById('buffer-time-input').value = 5;
         return;
@@ -6644,7 +6812,7 @@ window.saveFilter = function() {
     }
 
     if (!currentFilterType) {
-        alert('Please select a filter type.');
+        uiKit.showToast('Please select a filter type.', 'warn');
         return;
     }
 
@@ -6679,7 +6847,7 @@ window.saveFilter = function() {
         window.closeFilterDialog();
     } else {
         console.error('[saveFilter] Failed to apply filter');
-        alert('Failed to apply filter. Make sure the trace has data.');
+        uiKit.showToast('Failed to apply filter. Make sure the trace has data.', 'stop');
     }
 };
 
@@ -6767,6 +6935,8 @@ class LocalizationLiveViewer {
         this._pathPoseBuffer = { xyz: null, count: 0, lastMsgCount: 0 };
         this._pathRebuildTimer = null;
         this._lastPathPose = null; // {x,y,z} — /Odometry path 샘플링용
+        this._posePick = null;
+        this._poseArrow = null;
     }
 
     _waitForThree() {
@@ -7976,6 +8146,212 @@ class LocalizationLiveViewer {
         const isVisible = dropdown.style.display !== 'none';
         dropdown.style.display = isVisible ? 'none' : 'block';
         if (!isVisible) this._updateFixedFrameDropdown();
+    }
+
+    startInitialPosePick() {
+        if (this._posePick) return;
+        const btn = document.getElementById('loc-initpose-btn');
+        if (btn && btn.disabled) return;
+        this._posePick = { active: true };
+        this._armPosePick();
+    }
+
+    cancelInitialPosePick() {
+        if (!this._posePick) return;
+        this._posePick = null;
+        this._unbindPosePick();
+        if (this._poseArrow) this._poseArrow.visible = false;
+        const hint = document.getElementById('loc-pose-hint');
+        if (hint) hint.hidden = true;
+        const btn = document.getElementById('loc-initpose-btn');
+        if (btn) btn.setAttribute('aria-pressed', 'false');
+        if (this._posePickRestore) {
+            if (this._controls) this._controls.enabled = true;
+            if (this._posePickRestore.switchedTop) this.toggleTopView(false);
+            this.toggleFollow(this._posePickRestore.follow);
+            this._posePickRestore = null;
+        }
+    }
+
+    async _armPosePick() {
+        await this._init();
+        if (!this._posePick || !this._initialized) {
+            this.cancelInitialPosePick();
+            return;
+        }
+        const host = document.getElementById('loc-viewer-canvas-container');
+        let hint = document.getElementById('loc-pose-hint');
+        if (!hint && host) {
+            hint = document.createElement('div');
+            hint.id = 'loc-pose-hint';
+            hint.className = 'ui-viewer-overlay ui-pose-hint';
+            const text = document.createElement('p');
+            text.className = 'ui-hint';
+            text.textContent = '지도에서 위치를 누르고 방향으로 끄세요 (Esc 취소)';
+            hint.appendChild(text);
+            host.appendChild(hint);
+        }
+        if (hint) hint.hidden = false;
+        const btn = document.getElementById('loc-initpose-btn');
+        if (btn) btn.setAttribute('aria-pressed', 'true');
+        this._posePickRestore = {
+            follow: this._followMode,
+            switchedTop: !this._topView,
+        };
+        this.toggleFollow(false);
+        if (!this._topView) this.toggleTopView(true);
+        if (this._controls) this._controls.enabled = false;
+        this._bindPosePick();
+    }
+
+    _bindPosePick() {
+        const canvas = this._renderer && this._renderer.domElement;
+        if (!canvas || this._posePickBound) return;
+        this._onPoseDown = (e) => this._posePointerDown(e);
+        this._onPoseMove = (e) => this._posePointerMove(e);
+        this._onPoseUp = (e) => this._posePointerUp(e);
+        this._onPoseKey = (e) => {
+            if (e.key !== 'Escape' || document.querySelector('.ui-dialog-backdrop')) return;
+            e.preventDefault();
+            this.cancelInitialPosePick();
+        };
+        canvas.addEventListener('pointerdown', this._onPoseDown, true);
+        canvas.addEventListener('pointermove', this._onPoseMove, true);
+        window.addEventListener('pointerup', this._onPoseUp, true);
+        window.addEventListener('keydown', this._onPoseKey, true);
+        this._posePickBound = true;
+    }
+
+    _unbindPosePick() {
+        const canvas = this._renderer && this._renderer.domElement;
+        if (!this._posePickBound) return;
+        if (canvas) {
+            canvas.removeEventListener('pointerdown', this._onPoseDown, true);
+            canvas.removeEventListener('pointermove', this._onPoseMove, true);
+        }
+        window.removeEventListener('pointerup', this._onPoseUp, true);
+        window.removeEventListener('keydown', this._onPoseKey, true);
+        this._posePickBound = false;
+    }
+
+    _groundPoint(event) {
+        const THREE = window.THREE;
+        const canvas = this._renderer && this._renderer.domElement;
+        if (!THREE || !canvas || !this._camera) return null;
+        const rect = canvas.getBoundingClientRect();
+        if (!rect.width || !rect.height) return null;
+        const ndc = new THREE.Vector2(
+            ((event.clientX - rect.left) / rect.width) * 2 - 1,
+            -((event.clientY - rect.top) / rect.height) * 2 + 1
+        );
+        if (!this._poseRay) this._poseRay = new THREE.Raycaster();
+        this._poseRay.setFromCamera(ndc, this._camera);
+        if (!this._posePlane) this._posePlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+        const hit = new THREE.Vector3();
+        return this._poseRay.ray.intersectPlane(this._posePlane, hit) ? hit : null;
+    }
+
+    _showPoseArrow(origin, yaw, length) {
+        const THREE = window.THREE;
+        if (!THREE || !this._scene) return;
+        if (!this._poseArrow) {
+            this._poseArrow = new THREE.ArrowHelper(
+                new THREE.Vector3(1, 0, 0), origin.clone(), Math.max(length, 2), 0xf0a030, 1.2, 0.6
+            );
+            this._scene.add(this._poseArrow);
+        }
+        const dir = new THREE.Vector3(Math.cos(yaw), Math.sin(yaw), 0);
+        this._poseArrow.position.copy(origin);
+        this._poseArrow.setDirection(dir);
+        this._poseArrow.setLength(Math.max(length, 2), 1.2, 0.6);
+        this._poseArrow.visible = true;
+    }
+
+    _posePointerDown(event) {
+        if (!this._posePick || event.button !== 0) return;
+        const hit = this._groundPoint(event);
+        if (!hit) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this._posePick.down = hit;
+        this._posePick.yaw = 0;
+        this._posePick.dragging = true;
+        this._showPoseArrow(hit, 0, 3);
+    }
+
+    _posePointerMove(event) {
+        if (!this._posePick || !this._posePick.dragging || !this._posePick.down) return;
+        const hit = this._groundPoint(event);
+        if (!hit) return;
+        const dx = hit.x - this._posePick.down.x;
+        const dy = hit.y - this._posePick.down.y;
+        const yaw = Math.hypot(dx, dy) < 0.05 ? 0 : Math.atan2(dy, dx);
+        this._posePick.yaw = yaw;
+        this._showPoseArrow(this._posePick.down, yaw, Math.max(Math.hypot(dx, dy), 3));
+    }
+
+    _posePointerUp(event) {
+        if (!this._posePick || !this._posePick.dragging || event.button !== 0) return;
+        this._posePick.dragging = false;
+        const down = this._posePick.down;
+        if (!down) return;
+        const x = down.x;
+        const y = down.y;
+        const yaw = this._posePick.yaw || 0;
+        this._confirmInitialPose(x, y, yaw);
+    }
+
+    async _confirmInitialPose(x, y, yaw) {
+        if (!this._posePick || this._posePick.confirming) return;
+        this._posePick.confirming = true;
+        this._unbindPosePick();
+        const yawDeg = Math.round(yaw * 180 / Math.PI);
+        const ok = await uiKit.confirmDialog({
+            title: '초기 위치',
+            message: `이 위치로 초기화할까요? (${x.toFixed(2)}, ${y.toFixed(2)}, ${yawDeg}°)`,
+            okText: '보내기',
+            cancelText: '취소',
+            tone: 'warn',
+        });
+        if (!this._posePick) return;
+        this._posePick.confirming = false;
+        if (!ok) {
+            this._bindPosePick();
+            return;
+        }
+        this._publishInitialPose(x, y, yaw);
+        this.cancelInitialPosePick();
+    }
+
+    // laserLocalization.cpp init_pose_cbk는 위치·쿼터니언만 쓰고 frame_id는 검사하지 않는다. 공분산은 무시된다.
+    _publishInitialPose(x, y, yaw) {
+        const ros = (window.plotState && plotState.ros && plotState.ros.isConnected)
+            ? plotState.ros
+            : (this._ros && this._ros.isConnected ? this._ros : null);
+        if (!ros || !window.uiKit) {
+            if (window.uiKit) uiKit.showToast('rosbridge 연결이 없어 보낼 수 없습니다', 'stop');
+            return;
+        }
+        const half = yaw / 2;
+        const topic = new ROSLIB.Topic({
+            ros,
+            name: '/initialpose',
+            messageType: getMsgType(
+                'geometry_msgs/PoseWithCovarianceStamped',
+                'geometry_msgs/msg/PoseWithCovarianceStamped'
+            ),
+        });
+        topic.publish(new ROSLIB.Message({
+            header: { frame_id: 'odom', stamp: { sec: 0, nanosec: 0 } },
+            pose: {
+                pose: {
+                    position: { x, y, z: 0 },
+                    orientation: { x: 0, y: 0, z: Math.sin(half), w: Math.cos(half) },
+                },
+                covariance: new Array(36).fill(0),
+            },
+        }));
+        uiKit.showToast('초기 위치를 보냈습니다. 로봇이 멈춰 있어야 적용됩니다', 'info');
     }
 }
 
@@ -10692,6 +11068,7 @@ class SlamResultViewer {
                     try { if (paths && paths.first_ue_pcd) await this._loadDiffPCD(paths.first_ue_pcd, 0xff198c, 'firstue'); } catch (e) { console.warn('FirstUE.pcd not available'); }
                     try { if (paths && paths.second_ue_pcd) await this._loadDiffPCD(paths.second_ue_pcd, 0x8cff19, 'secondue'); } catch (e) { console.warn('SecondUE.pcd not available'); }
                     this._diffLoaded = true;
+                    this._markMissingDiffChips(paths);
                 } finally {
                     if (loadingEl) loadingEl.style.display = 'none';
                 }
@@ -10709,6 +11086,23 @@ class SlamResultViewer {
             if (diffLegend) diffLegend.style.display = 'none';
         }
         this._syncControlStates();
+    }
+
+    _markMissingDiffChips(paths) {
+        const specs = [
+            ['pd', 'PD (New)', paths && paths.pd_pcd],
+            ['nd', 'ND (Del)', paths && paths.nd_pcd],
+            ['firstue', 'FirstUE', paths && paths.first_ue_pcd],
+            ['secondue', 'SecondUE', paths && paths.second_ue_pcd],
+        ];
+        specs.forEach(([name, label, filePath]) => {
+            const row = this._legendRow(name);
+            if (!row) return;
+            const missing = !filePath || !(this._layers[name] && this._layers[name].length);
+            row.classList.toggle('ui-chip-missing', missing);
+            const text = row.querySelector('span:last-child');
+            if (text) text.textContent = missing ? `${label} (없음)` : label;
+        });
     }
 
     _restoreDiffLayerVisuals() {

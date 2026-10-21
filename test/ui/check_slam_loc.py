@@ -109,27 +109,20 @@ def check_slam_running(page, failures):
 
 
 def check_slam_legacy_nav(page, failures):
-    """옛 탭 모드(legacyNav=1)에서도 헤더 액션 버튼이 보이고 누를 수 있어야 한다."""
+    """되돌리기 스위치는 제거됐다. 예전 플래그를 켜도 새 헤더가 남는다."""
     page.evaluate("localStorage.setItem('webui.legacyNav', '1')")
     try:
         page.reload(wait_until='load')
         page.wait_for_selector('#slam-tab')
         go_screen(page, 'lidar-slam-subtab')
-        page.wait_for_timeout(500)
-        start = page.locator('#slam-start-button')
-        if not start.is_visible():
-            failures.append('slam legacy: start button not visible')
-        else:
-            start.click(trial=True, timeout=3000)
-        if page.locator('#lidar-slam-subtab .ui-screen-heading').is_visible():
-            failures.append('slam legacy: header heading visible')
-        if page.locator('#lidar-slam-stepper').is_visible():
-            failures.append('slam legacy: stepper visible')
-        if not page.locator('#lidar-slam-subtab > .section > h2').is_visible():
-            failures.append('slam legacy: old h2 hidden')
+        page.wait_for_timeout(400)
+        if not page.locator('#slam-start-button').is_visible():
+            failures.append('legacy flag: start button hidden')
+        if not page.locator('#lidar-slam-subtab .ui-screen-heading').is_visible():
+            failures.append('legacy flag: new header hidden')
         shot(page, 'p2-slam-legacy-nav')
-    except Exception as e:  # trial click 시간 초과 = 클릭 불가
-        failures.append(f'slam legacy: {e}')
+    except Exception as e:
+        failures.append(f'legacy flag: {e}')
     finally:
         page.evaluate("localStorage.removeItem('webui.legacyNav')")
 
@@ -409,7 +402,7 @@ def check_live_toolbars(page, failures):
     go_screen(page, 'lidar-slam-subtab')
     labels = page.evaluate("""() => [...document.querySelectorAll('#slam-live-viewer-actions button, #loc-viewer-actions button')]
         .map(b => (b.getAttribute('aria-label') || '').trim())""")
-    if len(labels) != 10 or not all(labels):
+    if len(labels) != 11 or not all(labels) or '초기 위치 지정' not in labels:
         failures.append(f'live toolbar: aria-label missing {labels}')
     legend = page.locator('#slam-live-legend').text_content()
     for text in ('LIO (원래 자세)', 'Pose Graph (최적화)', '지도: 최근 50 m'):
@@ -841,6 +834,191 @@ def check_node_log(page, failures, kind, screen):
     page.unroute_all(behavior='wait')
 
 
+def check_slam_stale(page, failures):
+    """데이터 끊김: 마지막 /analytics 뒤 3초 넘게 조용하면 배지 'Running · 데이터 없음' + 사이드바 RUN 태그 warn."""
+    go_screen(page, 'lidar-slam-subtab')
+
+    def state_running(route):
+        resp = route.fetch()
+        data = resp.json()
+        data['is_running'] = True
+        route.fulfill(response=resp, body=json.dumps(data))
+
+    def summary_running(route):
+        resp = route.fetch()
+        body = resp.json()
+        body['data']['slam']['running'] = True
+        route.fulfill(response=resp, body=json.dumps(body))
+
+    page.route('**/api/slam/state', state_running)
+    page.route('**/api/system/status_summary', summary_running)
+    tag = page.locator('.ui-sidebar-item[data-screen="lidar-slam-subtab"] [data-run-tag]')
+    try:
+        page.evaluate("() => { uiShell.noteAnalytics('slam'); uiShell.onSlamState({ is_running: true }); }")
+        page.wait_for_timeout(2500)
+        if badge_text(page, 'lidar-slam-header-badge') != 'Running':
+            failures.append(f'slam stale: badge before 3s {badge_text(page, "lidar-slam-header-badge")!r}')
+        if tag.get_attribute('data-tone') == 'warn':
+            failures.append('slam stale: sidebar tag warn before stale')
+        page.wait_for_timeout(1500)
+        text = badge_text(page, 'lidar-slam-header-badge')
+        if text != 'Running · 데이터 없음':
+            failures.append(f'slam stale: badge {text!r} != Running · 데이터 없음')
+        if page.locator('#lidar-slam-header-badge').get_attribute('data-tone') != 'warn':
+            failures.append('slam stale: badge tone not warn')
+        if tag.inner_text().strip() != 'RUN' or tag.get_attribute('data-tone') != 'warn':
+            failures.append(f'slam stale: sidebar tag {tag.inner_text()!r} tone {tag.get_attribute("data-tone")!r}')
+        page.wait_for_timeout(2500)  # 요약 폴링이 태그를 다시 그려도 warn 유지
+        if tag.get_attribute('data-tone') != 'warn':
+            failures.append('slam stale: sidebar tag tone lost after summary poll')
+        shot(page, 'p2-slam-stale')
+        page.evaluate("() => uiShell.noteAnalytics('slam')")
+        page.wait_for_timeout(1300)
+        if badge_text(page, 'lidar-slam-header-badge') != 'Running':
+            failures.append('slam stale: badge not recovered after new message')
+        if tag.get_attribute('data-tone') == 'warn':
+            failures.append('slam stale: sidebar tag still warn after recovery')
+    finally:
+        page.unroute_all(behavior='wait')
+
+
+def check_loc_start_failed(page, failures):
+    """Start 성공 응답 뒤 10초 동안 /loc_analytics가 없으면 '시작 실패 (로그 보기)', 배지 클릭 시 로그 패널."""
+    go_screen(page, 'localization-subtab')
+    badge = page.locator('#localization-header-badge')
+
+    def state_running(route):
+        resp = route.fetch()
+        data = resp.json()
+        data['is_running'] = True
+        route.fulfill(response=resp, body=json.dumps(data))
+
+    page.route('**/api/localization/start_mapping',
+               lambda route: route.fulfill(status=200, content_type='application/json',
+                                           body=json.dumps({'success': True})))
+    def summary_running(route):
+        resp = route.fetch()
+        body = resp.json()
+        body['data']['localization']['running'] = True
+        route.fulfill(response=resp, body=json.dumps(body))
+
+    page.route(LOC_STATE_RUNNING, state_running)
+    page.route('**/api/system/status_summary', summary_running)
+    try:
+        page.wait_for_selector('#localization-start-button:not([disabled])')
+        page.locator('#localization-start-button').click()
+        page.wait_for_timeout(8000)
+        text = badge_text(page, 'localization-header-badge')
+        if '시작 실패' in text:
+            failures.append(f'loc start fail: badge {text!r} before 10s')
+        if badge.get_attribute('role') != 'status' or badge.get_attribute('tabindex') is not None:
+            failures.append('loc start fail: badge not plain status before failure')
+        page.wait_for_timeout(2500)
+        text = badge_text(page, 'localization-header-badge')
+        if text != '시작 실패 (로그 보기)':
+            failures.append(f'loc start fail: badge {text!r} != 시작 실패 (로그 보기)')
+        if badge.get_attribute('role') != 'button' or badge.get_attribute('tabindex') != '0':
+            failures.append('loc start fail: badge not role=button tabindex=0')
+        if badge.get_attribute('data-tone') != 'stop':
+            failures.append(f'loc start fail: badge tone {badge.get_attribute("data-tone")!r}')
+        if page.locator('#loc-log-panel').is_visible():
+            failures.append('loc start fail: log panel open before click')
+        shot(page, 'p2-loc-start-failed')
+        badge.click()
+        page.wait_for_timeout(500)
+        if not page.locator('#loc-log-panel').is_visible():
+            failures.append('loc start fail: badge click did not open log panel')
+        shot(page, 'p2-loc-start-failed-log')
+        page.evaluate("() => uiShell.openNodeLog('loc')")
+        page.locator('#loc-log-panel .ui-log-close').click()
+        badge.focus()
+        page.keyboard.press('Enter')
+        page.wait_for_timeout(300)
+        if not page.locator('#loc-log-panel').is_visible():
+            failures.append('loc start fail: Enter on badge did not open log panel')
+        # 늦게라도 /loc_analytics가 오면 실패가 풀린다
+        page.evaluate(FAKE_LOC_JS, [3, True, 0.9, False])
+        page.evaluate("() => uiShell.noteAnalytics('loc')")  # 구독 콜백이 하는 일
+        page.wait_for_timeout(1300)
+        text = badge_text(page, 'localization-header-badge')
+        if '시작 실패' in text or badge.get_attribute('role') != 'status':
+            failures.append(f'loc start fail: not cleared by loc_analytics ({text!r})')
+        page.wait_for_timeout(3500)
+        text = badge_text(page, 'localization-header-badge')
+        if '데이터 없음' not in text:
+            failures.append(f'loc stale: badge {text!r} lacks 데이터 없음 after 3s silence')
+        shot(page, 'p2-loc-stale')
+    finally:
+        page.unroute_all(behavior='wait')
+        page.evaluate('locAnalyticsDashboard.unsubscribe(); locAnalyticsDashboard.hide(); locLiveViewer.hide();')
+        page.evaluate("uiShell.openNodeLog('loc')")
+        if page.locator('#loc-log-panel').is_visible():
+            page.locator('#loc-log-panel .ui-log-close').click()
+
+
+def check_loc_init_pose(page, failures):
+    """초기 위치: 실행 중일 때만 버튼, 드래그 후 rosbridge 없으면 오류 토스트."""
+    go_screen(page, 'localization-subtab')
+    btn = page.locator('#loc-initpose-btn')
+    if not btn.count():
+        failures.append('initpose: #loc-initpose-btn missing')
+        return
+    if btn.is_enabled():
+        failures.append('initpose: button enabled before Localization runs')
+    page.evaluate(
+        """async () => {
+            document.getElementById('localization-viewer-empty').hidden = true;
+            document.getElementById('localization-live-viewer').style.display = 'block';
+            uiShell.onLocState({ is_running: true });
+            await locLiveViewer._init();
+            locLiveViewer._resizeRenderer();
+            locLiveViewer.toggleTopView(true);
+        }""")
+    page.wait_for_timeout(300)
+    if btn.is_disabled():
+        failures.append('initpose: button disabled while running')
+        return
+    btn.click()
+    page.wait_for_timeout(400)
+    overlay = page.locator('#loc-pose-hint')
+    if not overlay.is_visible():
+        failures.append('initpose: overlay missing')
+        return
+    text = overlay.inner_text()
+    if '지도에서 위치를 누르고 방향으로 끄세요 (Esc 취소)' not in text:
+        failures.append(f'initpose: overlay text {text!r}')
+    box = page.locator('#loc-viewer-canvas').bounding_box()
+    if not box or box['width'] < 10:
+        failures.append(f'initpose: canvas box {box}')
+        return
+    x0 = box['x'] + box['width'] * 0.4
+    y0 = box['y'] + box['height'] * 0.55
+    page.mouse.move(x0, y0)
+    page.mouse.down()
+    page.mouse.move(x0 + 90, y0 - 40, steps=6)
+    page.mouse.up()
+    page.wait_for_timeout(500)
+    dialog = page.locator('.ui-dialog')
+    if not dialog.count() or not dialog.is_visible():
+        failures.append('initpose: confirm dialog missing')
+    else:
+        msg = dialog.inner_text()
+        if '이 위치로 초기화할까요?' not in msg:
+            failures.append(f'initpose: dialog {msg!r}')
+        page.locator('.ui-dialog button[data-tone="warn"]').click()
+        page.wait_for_timeout(400)
+        toast = page.locator('.ui-toast').last.inner_text()
+        if 'rosbridge 연결이 없어 보낼 수 없습니다' not in toast:
+            failures.append(f'initpose: toast {toast!r}')
+    shot(page, 'p2-loc-initpose')
+    page.evaluate(
+        """() => {
+            locLiveViewer.cancelInitialPosePick();
+            document.getElementById('localization-live-viewer').style.display = 'none';
+            uiShell.onLocState({ is_running: false });
+        }""")
+
+
 if __name__ == '__main__':
     failures = []
     all_errors = []
@@ -884,6 +1062,15 @@ if __name__ == '__main__':
         all_errors += errors
     with open_page() as (page, errors):
         check_save_map_name(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_slam_stale(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_loc_start_failed(page, failures)
+        all_errors += errors
+    with open_page() as (page, errors):
+        check_loc_init_pose(page, failures)
         all_errors += errors
     with open_page() as (page, errors):
         check_node_log(page, failures, 'slam', 'lidar-slam-subtab')

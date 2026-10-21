@@ -10,12 +10,6 @@ const uiShell = (() => {
         'plot-subtab':         { tab: 'visualization-tab', group: 'Visualization', title: 'Plot' },
         '3d-viewer-subtab':    { tab: 'visualization-tab', group: 'Visualization', title: '3D Viewer' },
     };
-    const LEGACY_NAV_KEY = 'webui.legacyNav';
-
-    function isLegacyNav() {
-        try { return localStorage.getItem(LEGACY_NAV_KEY) === '1'; } catch (e) { return false; }
-    }
-
     function onScreenChanged(subtabId) {
         document.querySelectorAll('.ui-sidebar-item').forEach(item => {
             if (item.dataset.screen === subtabId) item.setAttribute('aria-current', 'page');
@@ -41,8 +35,12 @@ const uiShell = (() => {
     const lastAnalyticsAt = { slam: 0, loc: 0 };
     let lastSlamState = null;
     let lastLocState = null;
-    // 시작 실패 감시는 Task 2.11이 이 값을 바꾼다
+    const HEALTH_TICK_MS = 1000;
+    // Start 성공 응답 뒤 이 시간 안에 /loc_analytics가 한 번도 안 오면 시작 실패로 본다
+    const LOC_START_TIMEOUT_MS = 10000;
     let locStartFailed = false;
+    let locStartWatch = null;
+    let locStartedAt = 0;
     let locNotInitSince = 0;
 
     function readNumber(id) {
@@ -52,7 +50,31 @@ const uiShell = (() => {
         return Number.isFinite(n) ? n : null;
     }
 
-    function noteAnalytics(kind) { lastAnalyticsAt[kind] = performance.now(); }
+    function clearLocStartWatch() {
+        if (locStartWatch) clearTimeout(locStartWatch);
+        locStartWatch = null;
+    }
+
+    function noteAnalytics(kind) {
+        lastAnalyticsAt[kind] = performance.now();
+        if (kind === 'loc') {
+            clearLocStartWatch();
+            locStartFailed = false;
+        }
+    }
+
+    function onLocStartRequested() {
+        clearLocStartWatch();
+        locStartFailed = false;
+        locStartedAt = performance.now();
+        locStartWatch = setTimeout(() => {
+            locStartWatch = null;
+            if (lastAnalyticsAt.loc < locStartedAt) {
+                locStartFailed = true;
+                refresh();
+            }
+        }, LOC_START_TIMEOUT_MS);
+    }
 
     // 첫 메시지 전(0)에는 stale로 보지 않는다 — Start 직후 "데이터 없음"이 바로 뜨지 않게
     function isAnalyticsStale(kind) {
@@ -189,8 +211,29 @@ const uiShell = (() => {
     // 노드는 원점에서 스스로 초기화를 시도하므로, 이 시간이 지나도 Not Init이면 안내를 보인다 (임의 값)
     const LOC_INIT_HINT_MS = 10000;
 
+    // 시작 실패일 때만 배지가 로그 패널을 여는 버튼이 된다
+    function setBadgeLogLink(badge, active) {
+        if (!badge) return;
+        badge.setAttribute('role', active ? 'button' : 'status');
+        if (active) badge.tabIndex = 0;
+        else badge.removeAttribute('tabindex');
+    }
+
+    function initBadgeLogLink() {
+        const badge = document.getElementById('localization-header-badge');
+        if (!badge) return;
+        const open = () => { if (locStartFailed) openNodeLog('loc'); };
+        badge.addEventListener('click', open);
+        badge.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter' && e.key !== ' ') return;
+            e.preventDefault();
+            open();
+        });
+    }
+
     function renderLoc() {
-        const isRunning = Boolean(lastLocState && lastLocState.is_running);
+        // launch는 octomap_server 때문에 살아 있어도 /loc_analytics가 없으면 시작 실패가 우선한다
+        const isRunning = Boolean(lastLocState && lastLocState.is_running) && !locStartFailed;
         const badge = document.getElementById('loc-header-init-badge');
         const summaryLoc = lastSummary ? lastSummary.localization.running : null;
         const input = {
@@ -203,11 +246,16 @@ const uiShell = (() => {
             lastStartFailed: locStartFailed,
         };
         const v = UiStatusLogic.deriveLocView(input);
-        uiKit.setStatusBadge(document.getElementById('localization-header-badge'), v.tone, v.text);
+        const headBadge = document.getElementById('localization-header-badge');
+        uiKit.setStatusBadge(headBadge, v.tone, v.text);
+        setBadgeLogLink(headBadge, locStartFailed);
         uiKit.renderStepper(document.getElementById('localization-stepper'), UiStatusLogic.LOC_STEPS, v.step);
         uiKit.setEnabled(document.getElementById('localization-start-button'), v.buttons.start);
         uiKit.setEnabled(document.getElementById('localization-stop-button'), v.buttons.stop,
             v.text.includes('외부') ? '웹 UI가 시작하지 않은 Localization입니다' : '');
+        uiKit.setEnabled(document.getElementById('loc-initpose-btn'), isRunning,
+            isRunning ? '' : 'Localization 실행 중에만 지정할 수 있습니다');
+        if (!isRunning && window.locLiveViewer && locLiveViewer._posePick) locLiveViewer.cancelInitialPosePick();
         const mapInput = document.querySelector('#localization-config-parameters [data-config-key$="map_file_path"]');
         const mapPath = document.getElementById('localization-map-path');
         // map_file_path는 FAST_LIO 소스 폴더 기준 상대 경로 (laserLocalization.cpp:1544)
@@ -225,17 +273,353 @@ const uiShell = (() => {
         if (hint) hint.hidden = !(notInit && performance.now() - locNotInitSince > LOC_INIT_HINT_MS);
     }
 
+    function plotTabs() {
+        const manager = typeof plotState !== 'undefined' && plotState.plotTabManager;
+        return manager ? manager.tabs.filter(tab => tab.plotManager) : [];
+    }
+
+    // 탭 modebar로 따로 멈출 수 있어, 모든 탭이 멈췄을 때만 Paused로 본다
+    function isPlotAllPaused() {
+        const tabs = plotTabs();
+        return tabs.length > 0 && tabs.every(tab => tab.plotManager.isPaused);
+    }
+
+    function renderPlotHeader() {
+        const paused = isPlotAllPaused();
+        const btn = document.getElementById('plot-header-pause-btn');
+        uiKit.setBtnLabel(btn, paused ? 'Resume' : 'Pause');
+        const icon = btn && btn.querySelector('.ui-icon use');
+        if (icon) icon.setAttribute('href', paused ? '#icon-play' : '#icon-pause');
+        const hasData = plotTabs().some(tab => tab.plotManager.dataBuffers.size > 0);
+        const badge = document.getElementById('plot-header-badge');
+        if (paused) uiKit.setStatusBadge(badge, 'warn', 'Paused');
+        else if (hasData) uiKit.setStatusBadge(badge, 'go', 'Streaming');
+        else uiKit.setStatusBadge(badge, 'idle', 'Ready');
+    }
+
+    function setPlotPaused(paused) {
+        plotTabs().forEach(tab => {
+            if (tab.plotManager.isPaused !== paused) tab.plotManager.togglePause(paused);
+        });
+        renderPlotHeader();
+    }
+
+    function togglePlotPause() { setPlotPaused(!isPlotAllPaused()); }
+
+    function syncPlotWindowSeg() {
+        const input = document.getElementById('buffer-time-input');
+        const value = input ? input.value : '';
+        document.querySelectorAll('#plot-window-seg [data-sec]').forEach(option => {
+            option.setAttribute('aria-checked', String(option.dataset.sec === value));
+        });
+    }
+
+    function setPlotWindow(seconds) {
+        const input = document.getElementById('buffer-time-input');
+        if (input) input.value = String(seconds);
+        updateBufferTime(seconds);
+        syncPlotWindowSeg();
+    }
+
+    function onPlotPauseChanged() {
+        const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
+        if (screenEl && screenEl.id === 'plot-subtab') renderPlotHeader();
+    }
+
+    function initPlotHeader() {
+        const input = document.getElementById('buffer-time-input');
+        if (input) input.addEventListener('change', syncPlotWindowSeg);
+        syncPlotWindowSeg();
+    }
+
+    // 1024px 미만에서만 보이는 메뉴 버튼으로 사이드바를 겹쳐 연다 (CSS가 폭별 배치를 맡음)
+    function setSidebarOpen(open) {
+        document.body.classList.toggle('ui-sidebar-open', open);
+        const toggle = document.getElementById('ui-sidebar-toggle');
+        if (!toggle) return;
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.setAttribute('aria-label', open ? '메뉴 닫기' : '메뉴 열기');
+        toggle.title = toggle.getAttribute('aria-label');
+    }
+
+    function initSidebarToggle() {
+        // 아이콘 레일(1024~1279px)에서는 라벨이 숨으므로 툴팁으로 이름을 보인다
+        document.querySelectorAll('.ui-sidebar-item').forEach(item => {
+            const label = item.querySelector('.ui-sidebar-label');
+            if (label && !item.title) item.title = label.textContent.trim();
+            item.addEventListener('click', () => setSidebarOpen(false));
+        });
+        const toggle = document.getElementById('ui-sidebar-toggle');
+        if (!toggle) return;
+        toggle.addEventListener('click', () => setSidebarOpen(!document.body.classList.contains('ui-sidebar-open')));
+        document.addEventListener('click', (e) => {
+            if (!document.body.classList.contains('ui-sidebar-open')) return;
+            if (e.target.closest('#ui-sidebar, #ui-sidebar-toggle')) return;
+            setSidebarOpen(false);
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && document.body.classList.contains('ui-sidebar-open')) setSidebarOpen(false);
+        });
+    }
+
+    let multiLoopCount = null;
+
+    function onOptStatus(status) {
+        if (status && status.loop_count != null) multiLoopCount = Number(status.loop_count);
+    }
+    let multiSawRunning = false;
+
+    function multiBasename(path) {
+        const parts = String(path || '').split(/[/\\]/).filter(Boolean);
+        return parts.length ? parts[parts.length - 1] : '';
+    }
+
+    function multiOutputError(output, map1, map2) {
+        if (!output) return '';
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(output)) return '영문, 숫자, _, - 만 1~64자입니다';
+        const base1 = multiBasename(map1);
+        const base2 = multiBasename(map2);
+        if ((base1 && output === base1) || (base2 && output === base2)) {
+            return '입력 폴더와 같은 이름은 쓸 수 없습니다';
+        }
+        return '';
+    }
+
+    function renderMulti() {
+        const map1 = (document.getElementById('slam-map1') || {}).value || '';
+        const map2 = (document.getElementById('slam-map2') || {}).value || '';
+        const outputEl = document.getElementById('slam-output');
+        const output = outputEl ? outputEl.value.trim() : '';
+        const err = multiOutputError(output, map1.trim(), map2.trim());
+        const errEl = document.getElementById('multi-session-output-error');
+        if (errEl) {
+            errEl.hidden = !err;
+            errEl.textContent = err;
+        }
+        const inputsReady = Boolean(map1.trim() && map2.trim() && output && !err);
+        const running = Boolean(typeof _optRunning !== 'undefined' && _optRunning);
+        if (running && !multiSawRunning) multiLoopCount = null;
+        multiSawRunning = running;
+        const msgEl = document.getElementById('slam-opt-msg');
+        const message = msgEl ? msgEl.textContent : '';
+        const parsedLoop = UiStatusLogic.parseLoopCount(message);
+        if (parsedLoop !== null) multiLoopCount = parsedLoop;
+        const area = document.getElementById('slam-opt-status-area');
+        const failed = Boolean(area && area.classList.contains('error') && area.style.display !== 'none');
+        const v = UiStatusLogic.deriveMultiView({
+            running,
+            complete: typeof _optComplete !== 'undefined' && _optComplete,
+            failed,
+            inputsReady,
+            doneCount: UiStatusLogic.optDoneCount(message),
+            loopCount: multiLoopCount,
+        });
+        uiKit.setStatusBadge(document.getElementById('multi-session-header-badge'), v.tone, v.text);
+        uiKit.renderStepper(
+            document.getElementById('multi-session-stepper'), UiStatusLogic.MULTI_STEPS, v.step
+        );
+        const runBtn = document.getElementById('slam-opt-run-btn');
+        if (!running && runBtn) uiKit.setEnabled(runBtn, v.buttons.run);
+        const cancel = document.getElementById('multi-session-header-cancel-btn');
+        if (cancel) cancel.hidden = !v.buttons.cancel;
+        const list = document.getElementById('multi-session-progress');
+        if (list) {
+            const doneCount = UiStatusLogic.optDoneCount(message);
+            list.replaceChildren(...UiStatusLogic.OPT_PROGRESS_LABELS.map((label, i) => {
+                const li = document.createElement('li');
+                let state = 'todo';
+                if (running) state = i < doneCount ? 'done' : (i === doneCount ? 'current' : 'todo');
+                else if (typeof _optComplete !== 'undefined' && _optComplete) state = 'done';
+                li.dataset.state = state;
+                li.textContent = (i === 1 && multiLoopCount !== null)
+                    ? `${label} · 루프 ${multiLoopCount}개` : label;
+                return li;
+            }));
+        }
+        const viewer = document.getElementById('slam-result-viewer');
+        const empty = document.getElementById('multi-session-viewer-empty');
+        if (empty) empty.hidden = Boolean(viewer && viewer.style.display !== 'none');
+    }
+
+    function syncBagRateSeg() {
+        const slider = document.getElementById('bag-playback-rate');
+        const rate = slider ? Number(slider.value) / 10 : 1;
+        document.querySelectorAll('#bag-rate-seg [data-rate]').forEach((btn) => {
+            btn.setAttribute('aria-checked', String(Number(btn.dataset.rate) === rate));
+        });
+    }
+
+    function initBagRateSeg() {
+        const seg = document.getElementById('bag-rate-seg');
+        if (!seg || seg.dataset.bound) return;
+        seg.dataset.bound = '1';
+        seg.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-rate]');
+            if (!btn || btn.disabled) return;
+            const slider = document.getElementById('bag-playback-rate');
+            if (!slider) return;
+            slider.value = String(Math.round(Number(btn.dataset.rate) * 10));
+            if (typeof updatePlaybackRate === 'function') updatePlaybackRate(slider.value);
+            syncBagRateSeg();
+        });
+    }
+
+    function renderBag() {
+        const dir = document.getElementById('bag-directory');
+        const loaded = Boolean(dir && dir.value.trim());
+        const play = document.getElementById('bag-play-button');
+        const pause = document.getElementById('bag-pause-button');
+        const playing = Boolean(play && play.textContent.trim() === 'Stop');
+        const paused = Boolean(pause && pause.textContent.trim() === 'Resume');
+        const slider = document.getElementById('bag-playback-rate');
+        const rate = slider ? Number(slider.value) / 10 : 1;
+        const convert = document.getElementById('convert-bag-btn');
+        const converting = Boolean(convert && convert.textContent.includes('Converting'));
+        const v = UiStatusLogic.deriveBagView({ loaded, playing, paused, rate, converting });
+        uiKit.setStatusBadge(document.getElementById('bag-player-header-badge'), v.tone, v.text);
+        if (play) uiKit.setEnabled(play, v.buttons.play);
+        if (pause) uiKit.setEnabled(pause, v.buttons.pause);
+        const seek = document.getElementById('bag-slider');
+        if (seek) seek.disabled = !v.buttons.seek;
+        document.querySelectorAll('#bag-rate-seg [data-rate]').forEach((btn) => {
+            btn.disabled = !v.buttons.seek;
+        });
+        const loop = document.getElementById('bag-player-loop');
+        if (loop) loop.disabled = !loaded;
+        if (convert && !converting) uiKit.setEnabled(convert, v.buttons.convert);
+        syncBagRateSeg();
+    }
+
+    let lastRecorder = null;
+
+    function onRecorderState(state) {
+        lastRecorder = state;
+        const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
+        if (screenEl && screenEl.id === 'bag-recorder-subtab') renderRecorder();
+    }
+
+    function renderRecorder() {
+        const nameEl = document.getElementById('recorder-bag-name');
+        const elapsed = lastRecorder ? Number(lastRecorder.elapsed_sec) || 0 : 0;
+        const bytes = lastRecorder ? Number(lastRecorder.size_bytes) || 0 : 0;
+        const v = UiStatusLogic.deriveRecorderView({
+            recording: Boolean(lastRecorder && lastRecorder.recording),
+            hasName: Boolean(nameEl && nameEl.value.trim()),
+            topicCount: bagRecorderState.selectedTopics.length,
+            elapsedSec: elapsed,
+        });
+        uiKit.setStatusBadge(document.getElementById('bag-recorder-header-badge'), v.tone, v.text);
+        const rec = document.getElementById('recorder-record-button');
+        if (rec) uiKit.setEnabled(rec, v.buttons.record);
+        const nameBtn = document.querySelector('#bag-recorder-subtab [onclick="enterBagName()"]');
+        if (nameBtn) nameBtn.disabled = !v.buttons.edit;
+        const fmt = document.getElementById('recorder-format-select');
+        if (fmt) fmt.disabled = !v.buttons.edit;
+        document.querySelectorAll('#recorder-topic-table input').forEach((el) => {
+            el.disabled = !v.buttons.edit;
+        });
+        const sec = Math.max(0, Math.floor(elapsed));
+        const time = document.getElementById('recorder-stat-time');
+        if (time) time.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+        const size = document.getElementById('recorder-stat-size');
+        if (size) {
+            size.textContent = bytes >= 1073741824
+                ? `${(bytes / 1073741824).toFixed(1)} GB`
+                : `${(bytes / 1048576).toFixed(0)} MB`;
+        }
+        const topics = document.getElementById('recorder-stat-topics');
+        if (topics) topics.textContent = String(bagRecorderState.selectedTopics.length);
+    }
+
+    function initFileDatasetSeg() {
+        const seg = document.getElementById('file-player-dataset-seg');
+        if (!seg || seg.dataset.bound) return;
+        seg.dataset.bound = '1';
+        seg.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-dataset]');
+            if (!btn || btn.disabled) return;
+            const select = document.getElementById('dataset-format-select');
+            if (!select) return;
+            select.value = btn.dataset.dataset;
+            select.dispatchEvent(new Event('change'));
+            renderFile();
+        });
+    }
+
+    function renderFile() {
+        const select = document.getElementById('dataset-format-select');
+        const ds = select ? select.value : '';
+        document.querySelectorAll('#file-player-dataset-seg [data-dataset]').forEach((btn) => {
+            btn.setAttribute('aria-checked', String(btn.dataset.dataset === ds));
+            btn.disabled = false;
+        });
+        const fp = lastSummary && lastSummary.file_player ? lastSummary.file_player : {};
+        const play = document.getElementById('play-button');
+        const pause = document.getElementById('pause-button');
+        const playing = Boolean(play && play.textContent.trim() === 'End');
+        const paused = Boolean(pause && pause.textContent.trim() === 'Resume');
+        const converting = Boolean(fp.converting)
+            || (typeof kittiState !== 'undefined' && kittiState.converting)
+            || (typeof kaistState !== 'undefined' && kaistState.converting)
+            || (typeof mulranState !== 'undefined' && mulranState.converting)
+            || (typeof heliprState !== 'undefined' && heliprState.converting);
+        const v = UiStatusLogic.deriveFileView({
+            loaded: Boolean(fp.loaded),
+            playing,
+            paused,
+            converting,
+            savingBag: Boolean(fp.saving_bag),
+            progress: 0,
+        });
+        uiKit.setStatusBadge(document.getElementById('file-player-header-badge'), v.tone, v.text);
+        if (play) uiKit.setEnabled(play, v.buttons.play);
+        document.querySelectorAll('#file-player-dataset-seg [data-dataset]').forEach((btn) => {
+            btn.disabled = !v.buttons.load;
+        });
+    }
+
     function refresh() {
         const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
+        if (window._locStopping) {
+            clearLocStartWatch();
+            locStartFailed = false;
+        }
         syncSaveElapsed();
         syncNodeLogPolling();
         if (!screenEl) return;
         if (screenEl.id === 'lidar-slam-subtab') {
             renderSlam();
+            warnSidebarTag(screenEl);
             return;
         }
         if (screenEl.id === 'localization-subtab') {
             renderLoc();
+            warnSidebarTag(screenEl);
+            return;
+        }
+        if (screenEl.id === 'multi-session-slam-subtab') {
+            renderMulti();
+            return;
+        }
+        if (screenEl.id === 'bag-player-subtab') {
+            renderBag();
+            return;
+        }
+        if (screenEl.id === 'bag-recorder-subtab') {
+            renderRecorder();
+            return;
+        }
+        if (screenEl.id === 'file-player-subtab') {
+            renderFile();
+            return;
+        }
+        if (screenEl.id === 'plot-subtab') {
+            renderPlotHeader();
+            return;
+        }
+        // 3D 배지는 Fixed Frame 표시 전용 (threejs_display.js)
+        if (screenEl.id === '3d-viewer-subtab') {
+            if (typeof updateFixedFrameBadge === 'function') updateFixedFrameBadge();
             return;
         }
         const badge = screenEl.querySelector('.ui-screen-header .ui-status-badge');
@@ -243,6 +627,25 @@ const uiShell = (() => {
         const marker = markers[screenEl.id];
         if (marker) uiKit.setStatusBadge(badge, marker.tone, HEADER_BADGE_TEXT[marker.text] || marker.text);
         else uiKit.setStatusBadge(badge, 'idle', 'Ready');
+    }
+
+    // 사이드바 RUN 태그는 launch 프로세스만 보므로, 보이는 화면의 배지가 warn일 때만 그 태그 톤을 맞춘다
+    function warnSidebarTag(screenEl) {
+        const item = document.querySelector(`.ui-sidebar-item[data-screen="${screenEl.id}"]`);
+        const tag = item && item.querySelector('[data-run-tag]');
+        const badge = screenEl.querySelector('.ui-screen-header .ui-status-badge');
+        if (!tag || tag.hidden || !badge) return;
+        if (badge.dataset.tone === 'warn') {
+            tag.dataset.tone = 'warn';
+        } else if (lastSummary) {
+            tag.dataset.tone = UiStatusLogic.deriveSidebarMarkers(lastSummary)[screenEl.id].tone;
+        }
+    }
+
+    // 새 메시지가 없어도 데이터 끊김(3초) 판정이 갱신되게 한다
+    function healthTick() {
+        const screenEl = document.querySelector('.tab-content.active .subtab-content.active');
+        if (screenEl && (screenEl.id === 'lidar-slam-subtab' || screenEl.id === 'localization-subtab')) refresh();
     }
 
     const ROSBRIDGE_TEXT = {
@@ -379,14 +782,24 @@ const uiShell = (() => {
         if (result && result.success && result.data) {
             lastSummary = result.data;
             renderSidebarMarkers(lastSummary);
+            if (lastSummary.optimization && lastSummary.optimization.running
+                && typeof _optPollTimer !== 'undefined' && !_optPollTimer && !_optRunning) {
+                _optRunning = true;
+                if (typeof _startOptPolling === 'function') _startOptPolling();
+            }
             refresh();
         }
     }
 
     function init() {
         initNodeLog();
-        if (isLegacyNav()) return;
+        initBadgeLogLink();
+        initPlotHeader();
+        initBagRateSeg();
+        initFileDatasetSeg();
+        setInterval(healthTick, HEALTH_TICK_MS);
         document.body.classList.add('ui-has-sidebar');
+        initSidebarToggle();
         // 초기 HTML은 메인 탭마다 서브탭 하나씩 active라 보이는 탭 안의 것을 고른다
         const active = document.querySelector('.tab-content.active .subtab-content.active');
         onScreenChanged(active ? active.id : 'lidar-slam-subtab');
@@ -399,7 +812,9 @@ const uiShell = (() => {
 
     return {
         SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, onLocState, noteAnalytics, onSaveMapRestoreFailed,
-        onRosbridgeState, onLatency, onDomainId, onBackendWsState, openNodeLog,
+        onRosbridgeState, onLatency, onDomainId, onBackendWsState, openNodeLog, onLocStartRequested,
+        onRecorderState, onOptStatus,
+        setPlotPaused, togglePlotPause, setPlotWindow, onPlotPauseChanged,
         get lastSummary() { return lastSummary; },
     };
 })();

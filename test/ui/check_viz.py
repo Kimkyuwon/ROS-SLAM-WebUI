@@ -1,4 +1,7 @@
-"""3D Viewer 헤더 Reset/Snapshot·Displays 눈 토글·Fixed Frame 배지·Views 정리 (서버 필요, ROS 노드 실행 안 함)."""
+"""Plot 헤더 Pause·시간 창, 3D Viewer 헤더 Reset/Snapshot·Displays 눈 토글·Fixed Frame 배지·Views 정리.
+
+서버 필요, ROS 노드 실행 안 함.
+"""
 from ui_check_common import finish, go_screen, open_page, shot
 
 VIEWS_HIDDEN_LABELS = ('Distance', 'Yaw', 'Pitch', 'Scale')
@@ -9,6 +12,81 @@ def visible_view_labels(page):
         """() => [...document.querySelectorAll('#views-params-container .views-row')]
             .filter(row => row.offsetParent !== null)
             .map(row => row.textContent.trim())""")
+
+
+def plot_header_state(page):
+    return page.evaluate(
+        """() => {
+            const badge = document.getElementById('plot-header-badge');
+            const btn = document.getElementById('plot-header-pause-btn');
+            return {
+                paused: plotState.plotTabManager.tabs.map(t => t.plotManager.isPaused),
+                label: btn ? btn.querySelector('.ui-btn-label').textContent.trim() : null,
+                badge: [badge.dataset.tone, badge.querySelector('.ui-status-text').textContent.trim()],
+            };
+        }""")
+
+
+def check_plot_header(page, failures):
+    page.wait_for_function('() => plotState.plotTabManager && plotState.plotTabManager.tabs.length > 0')
+    if not page.locator('#plot-header-actions #plot-header-pause-btn').count():
+        failures.append('plot: #plot-header-pause-btn not inside #plot-header-actions')
+        return
+    page.evaluate("() => plotState.plotTabManager.createTab()")
+    page.locator('#plot-header-pause-btn').click()
+    state = plot_header_state(page)
+    if not state['paused'] or not all(state['paused']):
+        failures.append(f'plot: not all tabs paused {state["paused"]}')
+    if state['label'] != 'Resume':
+        failures.append(f'plot: pause label {state["label"]!r} != Resume')
+    if state['badge'] != ['warn', 'Paused']:
+        failures.append(f'plot: badge {state["badge"]} != warn Paused')
+    shot(page, 'p4-plot-paused')
+
+    page.locator('#plot-header-pause-btn').click()
+    state = plot_header_state(page)
+    if any(state['paused']):
+        failures.append(f'plot: tabs still paused after Resume {state["paused"]}')
+    if state['label'] != 'Pause':
+        failures.append(f'plot: label {state["label"]!r} != Pause after Resume')
+    if state['badge'][1] == 'Paused':
+        failures.append(f'plot: badge still Paused after Resume {state["badge"]}')
+
+    # 탭 modebar로 하나만 멈추면 다른 탭이 돌고 있으니 Paused가 아니다
+    page.evaluate("() => plotState.plotTabManager.tabs[0].plotManager.togglePause(true)")
+    if plot_header_state(page)['badge'][1] == 'Paused':
+        failures.append('plot: badge Paused while another tab streams')
+    page.evaluate("() => plotState.plotTabManager.tabs.forEach(t => t.plotManager.togglePause(true))")
+    state = plot_header_state(page)
+    if state['badge'] != ['warn', 'Paused'] or state['label'] != 'Resume':
+        failures.append(f'plot: all tabs paused via modebar -> {state}')
+    page.evaluate("() => plotState.plotTabManager.tabs.forEach(t => t.plotManager.togglePause(false))")
+
+    seg = page.locator('#plot-header-actions #plot-window-seg')
+    if seg.get_attribute('role') != 'radiogroup':
+        failures.append('plot: #plot-window-seg role != radiogroup')
+    page.locator('#plot-window-seg [data-sec="30"]').click()
+    value = page.evaluate("() => document.getElementById('buffer-time-input').value")
+    if value != '30':
+        failures.append(f'plot: buffer-time-input {value!r} != 30')
+    checked = page.evaluate(
+        """() => [...document.querySelectorAll('#plot-window-seg [data-sec]')]
+            .filter(b => b.getAttribute('aria-checked') === 'true').map(b => b.dataset.sec)""")
+    if checked != ['30']:
+        failures.append(f'plot: aria-checked {checked} != [30]')
+    buffers = page.evaluate("() => plotState.plotTabManager.tabs.map(t => t.plotManager.bufferTime)")
+    if any(b != 30 for b in buffers):
+        failures.append(f'plot: tab bufferTime {buffers} != 30')
+    if not page.locator('details.ui-more #buffer-time-input').count():
+        failures.append('plot: #buffer-time-input not inside details.ui-more')
+    page.evaluate(
+        """() => { const i = document.getElementById('buffer-time-input');
+            i.value = '12'; i.dispatchEvent(new Event('change')); }""")
+    checked = page.evaluate(
+        "() => [...document.querySelectorAll('#plot-window-seg [aria-checked=\"true\"]')].length")
+    if checked:
+        failures.append('plot: segment still checked after custom 12 s')
+    shot(page, 'p4-plot-header')
 
 
 def check_header_actions(page, failures):
@@ -103,6 +181,10 @@ def check_fixed_frame_badge(page, failures):
     tone, text = badge_state(page)
     if not text.startswith('Fixed Frame'):
         failures.append(f'viz: badge text {text!r} does not start with Fixed Frame')
+    page.evaluate('() => uiShell.refresh()')
+    tone, text = badge_state(page)
+    if not text.startswith('Fixed Frame'):
+        failures.append(f'viz: uiShell.refresh overwrote 3D badge -> {text!r}')
     shot(page, 'p4-3d-badge-initial')
 
     page.evaluate(
@@ -140,6 +222,8 @@ def check_fixed_frame_badge(page, failures):
 def main():
     failures = []
     with open_page() as (page, errors):
+        go_screen(page, 'plot-subtab')
+        check_plot_header(page, failures)
         go_screen(page, '3d-viewer-subtab')
         page.wait_for_timeout(1000)
         check_header_actions(page, failures)

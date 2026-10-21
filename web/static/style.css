@@ -2661,6 +2661,7 @@ h3 {
     flex-shrink: 0;
     height: 10px;
     width: 10px;
+    background: var(--swatch, currentColor);
 }
 
 .slam-legend-line {
@@ -3762,9 +3763,7 @@ button[onclick*="openAddDisplayModal"]:hover {
 /* ── Category B: Primary (실행 버튼: Start / Play / Record / Run) ── */
 #bag-play-button,
 #play-button,
-#recorder-record-button,
-button[onclick*="runOptimization"],
-button[onclick*="optimizeSlam"] {
+#recorder-record-button {
     background: rgba(124,111,255,0.15) !important;
     border: 1px solid rgba(124,111,255,0.5) !important;
     color: #b0a8ff !important;
@@ -3775,9 +3774,7 @@ button[onclick*="optimizeSlam"] {
 }
 #bag-play-button:hover,
 #play-button:hover,
-#recorder-record-button:hover,
-button[onclick*="runOptimization"]:hover,
-button[onclick*="optimizeSlam"]:hover {
+#recorder-record-button:hover {
     background: rgba(124,111,255,0.28) !important;
     border-color: rgba(124,111,255,0.75) !important;
     color: #d4cfff !important;

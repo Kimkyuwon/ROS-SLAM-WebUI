@@ -165,7 +165,85 @@ const uiKit = (() => {
         });
     }
 
+    function isModalOpen(modal) {
+        return Boolean(modal.style.display) && modal.style.display !== 'none';
+    }
+
+    const MODAL_FIRST_FIELD = '.modal-body input:not([type="hidden"]):not(:disabled), .modal-body select, .modal-body textarea';
+
+    // 여는 함수가 9개라 style 변화를 보고 연 순간 첫 입력으로, 닫힌 순간 연 버튼으로 포커스를 옮긴다
+    // (여는 코드가 먼저 입력에 focus()를 줄 수 있어 연 버튼은 모달 밖 마지막 포커스로 기억한다)
+    let lastOutsideFocus = null;
+
+    function trackModalFocus(modal) {
+        let opener = null;
+        let wasOpen = isModalOpen(modal);
+        new MutationObserver(() => {
+            const open = isModalOpen(modal);
+            if (open === wasOpen) return;
+            wasOpen = open;
+            const active = document.activeElement;
+            if (open) {
+                opener = lastOutsideFocus;
+                if (modal.contains(active)) return;
+                const target = modal.querySelector(MODAL_FIRST_FIELD) || modal.querySelector('.modal-header .close');
+                if (target) target.focus();
+                return;
+            }
+            const focusLost = !active || active === document.body || modal.contains(active);
+            if (opener && opener.isConnected && focusLost) opener.focus();
+            opener = null;
+        }).observe(modal, { attributes: true, attributeFilter: ['style'] });
+    }
+
+    // 기존 .modal은 JS가 style.display로 여닫으므로 마크업·핸들러는 그대로 두고 역할·ESC·포커스만 붙인다
+    function enhanceModals() {
+        document.querySelectorAll('.modal').forEach(modal => {
+            modal.setAttribute('role', 'dialog');
+            modal.setAttribute('aria-modal', 'true');
+            const heading = modal.querySelector('.modal-header h2, .modal-header h3');
+            if (heading) {
+                if (!heading.id) heading.id = `${modal.id}-title`;
+                modal.setAttribute('aria-labelledby', heading.id);
+            }
+            modal.querySelectorAll('.modal-header .close').forEach(btn => {
+                if (btn.tagName === 'BUTTON') return;
+                btn.setAttribute('role', 'button');
+                btn.setAttribute('aria-label', '닫기');
+                btn.tabIndex = 0;
+                btn.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                    e.preventDefault();
+                    btn.click();
+                });
+            });
+            trackModalFocus(modal);
+        });
+        document.addEventListener('focusin', (e) => {
+            if (!e.target.closest('.modal, .ui-dialog-backdrop')) lastOutsideFocus = e.target;
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape' || document.querySelector('.ui-dialog-backdrop')) return;
+            const open = [...document.querySelectorAll('.modal')].filter(isModalOpen).pop();
+            if (!open) return;
+            const btn = open.querySelector('.modal-header .close, [data-dismiss]');
+            if (btn) btn.click();
+        });
+    }
+
     return { setStatusBadge, renderStepper, setEnabled, setBtnLabel, setReadonly, showToast, renderSparkline,
-        confirmDialog };
+        confirmDialog, enhanceModals };
 })();
+document.addEventListener('DOMContentLoaded', uiKit.enhanceModals);
 window.uiKit = uiKit;
+
+uiKit.inferToastTone = (text) => {
+    if (/fail|error|실패|오류|cannot|not found|invalid/i.test(text)) return 'stop';
+    if (/please|먼저|선택하세요|enter |no topics|없습니다/i.test(text)) return 'warn';
+    if (/complete|saved|success|완료|started|stopped/i.test(text)) return 'go';
+    return 'info';
+};
+window.alert = (message) => {
+    const text = String(message ?? '');
+    uiKit.showToast(text, uiKit.inferToastTone(text));
+};

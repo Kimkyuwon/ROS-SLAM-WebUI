@@ -56,7 +56,8 @@ class PlotTabManager {
         this.tabBarContainer.innerHTML = `
             <div class="ui-plot-tabs">
                 <div id="plot-tab-list" class="ui-plot-tab-list"></div>
-                <button id="plot-tab-add-btn" class="ui-plot-tab-add" title="Add new plot tab">+</button>
+                <button id="plot-tab-add-btn" class="ui-plot-tab-add" title="Add new plot tab"
+                        aria-label="Add new plot tab">+</button>
             </div>
         `;
         
@@ -71,7 +72,7 @@ class PlotTabManager {
         // 최대 탭 개수 체크
         if (this.tabs.length >= this.maxTabs) {
             console.warn(`[PlotTabManager] Maximum number of tabs reached (${this.maxTabs})`);
-            alert(`최대 ${this.maxTabs}개의 Plot 탭만 생성할 수 있습니다.`);
+            uiKit.showToast(`최대 ${this.maxTabs}개의 Plot 탭만 생성할 수 있습니다.`, 'warn');
             return null;
         }
         
@@ -143,6 +144,7 @@ class PlotTabManager {
         closeBtn.className = 'ui-plot-tab-close';
         closeBtn.textContent = '×';
         closeBtn.title = 'Close tab';
+        closeBtn.setAttribute('aria-label', 'Close tab');
 
         closeBtn.addEventListener('click', (e) => {
             e.stopPropagation();

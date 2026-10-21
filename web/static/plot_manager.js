@@ -2553,7 +2553,10 @@ class PlotlyPlotManager {
         
         console.log(`[PlotlyPlotManager] Plot ${this.isPaused ? 'PAUSED' : 'RESUMED'}`);
         this._syncPausedBadge();
-        
+        if (window.uiShell) uiShell.onPlotPauseChanged();
+        // 그래프가 아직 없는 탭(헤더 전역 Pause)은 플래그만 — createPlot()이 isPaused를 보고 dragmode를 정한다
+        if (!this.isInitialized) return;
+
         const plotDiv = document.getElementById(this.containerId);
         
         if (this.isPaused) {
