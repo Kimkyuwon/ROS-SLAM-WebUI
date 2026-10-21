@@ -1136,3 +1136,125 @@ body.ui-has-sidebar #file-playbar { left: var(--sidebar-w); }
 #multi-session-slam-subtab .ui-viewer-empty-title {
     max-width: 28rem; /* MapViewer empty title wraps inside max-w-md */
 }
+
+/* 파일 고르기 — zenity 목록 창의 배치(경로 조각, 상위, 이름·크기·수정). 색은 필드 콘솔 토큰. */
+#file-browser-modal .modal-content,
+#bag-name-browser-modal .modal-content {
+    max-width: 760px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-md);
+}
+#file-browser-modal .modal-body,
+#bag-name-browser-modal .modal-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+}
+.ui-fb-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+}
+.ui-fb-bar .ui-icon-btn {
+    flex: 0 0 32px;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+}
+.ui-fb-bar .ui-icon-btn:disabled { opacity: 0.35; }
+.ui-fb-crumbs {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    gap: 2px;
+    overflow-x: auto;
+    padding: 2px;
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+}
+.ui-fb-crumb {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
+    color: var(--color-mute);
+    font: inherit;
+    font-size: 12px;
+    line-height: 24px;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}
+.ui-fb-crumb + .ui-fb-crumb::before {
+    content: '/';
+    margin-right: 6px;
+    color: var(--color-dim);
+}
+.ui-fb-crumb[aria-current="page"] { color: var(--color-ink); }
+.ui-fb-crumb:hover { background: var(--color-raised); color: var(--color-ink); }
+.ui-fb-bar .ui-input {
+    flex: 0 0 160px;
+    height: 32px;
+    border-radius: var(--radius-sm);
+}
+.ui-fb-head,
+#file-browser-modal .directory-entry,
+#bag-name-browser-modal .directory-entry {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 88px 132px;
+    align-items: center;
+    column-gap: 8px;
+}
+.ui-fb-head {
+    padding: 0 10px;
+    color: var(--color-dim);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+}
+#file-browser-modal .directory-list,
+#bag-name-browser-modal .directory-list {
+    flex: 1;
+    min-height: 280px;
+    overflow: auto;
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-sm);
+    background: var(--color-bg);
+}
+#file-browser-modal .directory-entry,
+#bag-name-browser-modal .directory-entry {
+    padding: 0 10px;
+    height: 32px;
+    border-bottom: 1px solid var(--color-line);
+    border-radius: 0;
+    color: var(--color-ink);
+    font-size: 13px;
+    cursor: pointer;
+}
+#file-browser-modal .directory-entry::before,
+#bag-name-browser-modal .directory-entry::before { content: none; }
+#file-browser-modal .directory-entry:hover,
+#bag-name-browser-modal .directory-entry:hover { background: var(--color-raised); }
+#file-browser-modal .directory-entry.is-selected,
+#bag-name-browser-modal .directory-entry.is-selected {
+    background: color-mix(in srgb, var(--color-info) 22%, transparent);
+}
+.ui-fb-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.ui-fb-name .ui-icon { flex: 0 0 16px; width: 16px; height: 16px; color: var(--color-info); }
+.file-item .ui-fb-name .ui-icon { color: var(--color-mute); }
+.ui-fb-size, .ui-fb-mtime {
+    color: var(--color-mute);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    text-align: right;
+}
+#file-browser-modal .directory-list:focus,
+#bag-name-browser-modal .directory-list:focus { outline: var(--focus-ring); outline-offset: -1px; }
+

@@ -8839,6 +8839,26 @@ def resolve_fast_lio_config_path(config_path):
     return str(resolved) if resolved.is_file() else str(path)
 
 
+def _browse_entry(entry, name=None):
+    """목록 한 줄. 기존 필드(name, path, is_dir, is_file)는 유지하고 크기·수정일을 더한다."""
+    info = {
+        'name': entry.name if name is None else name,
+        'path': str(entry),
+        'is_dir': entry.is_dir(),
+        'is_file': entry.is_file(),
+        'size': None,
+        'mtime': None,
+    }
+    try:
+        st = entry.stat()
+        info['mtime'] = st.st_mtime
+        if entry.is_file():
+            info['size'] = st.st_size
+    except OSError:
+        pass
+    return info
+
+
 def browse_directory(start_path="/home"):
     """Get list of directories and files in the given path"""
     try:
@@ -8847,34 +8867,24 @@ def browse_directory(start_path="/home"):
 
         # Add parent directory option
         if path.parent != path:
-            entries.append({
-                'name': '..',
-                'path': str(path.parent),
-                'is_dir': True,
-                'is_file': False
-            })
+            parent = _browse_entry(path.parent, name='..')
+            parent['is_dir'] = True
+            parent['is_file'] = False
+            parent['size'] = None
+            entries.append(parent)
 
         # List directories and files (hide dotfiles / dot-directories)
         if path.exists() and path.is_dir():
             visible = sorted(
-                e for e in path.iterdir() if not e.name.startswith('.')
+                (e for e in path.iterdir() if not e.name.startswith('.')),
+                key=lambda e: e.name.casefold(),
             )
             for entry in visible:
                 if entry.is_dir():
-                    entries.append({
-                        'name': entry.name,
-                        'path': str(entry),
-                        'is_dir': True,
-                        'is_file': False
-                    })
+                    entries.append(_browse_entry(entry))
             for entry in visible:
                 if entry.is_file():
-                    entries.append({
-                        'name': entry.name,
-                        'path': str(entry),
-                        'is_dir': False,
-                        'is_file': True
-                    })
+                    entries.append(_browse_entry(entry))
 
         return {
             'success': True,

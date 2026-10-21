@@ -46,7 +46,10 @@ if (typeof window.ensureWebuiPortsReady !== 'function') {
 // Global state - grouped by functionality
 const fileBrowserState = {
     currentPath: '/home',
-    callback: null
+    callback: null,
+    entries: [],
+    filter: '',
+    selectedPath: null,
 };
 
 const bagPlayerState = {
@@ -357,13 +360,144 @@ async function apiCall(endpoint, data = null) {
 async function openFileBrowser(callback, startPath = '~') {
     fileBrowserState.callback = callback;
     fileBrowserState.currentPath = startPath;
+    fileBrowserState.filter = '';
+    fileBrowserState.selectedPath = null;
+    const filter = document.getElementById('file-browser-filter');
+    if (filter) filter.value = '';
     await loadDirectoryList(fileBrowserState.currentPath);
     domCache.get('file-browser-modal').style.display = 'block';
+    document.getElementById('directory-list')?.focus();
 }
 
 function closeFileBrowser() {
     domCache.get('file-browser-modal').style.display = 'none';
     fileBrowserState.callback = null;
+}
+
+function fbParent(path) {
+    if (!path || path === '/') return null;
+    const trimmed = path.replace(/\/+$/, '');
+    const parent = trimmed.split('/').slice(0, -1).join('/') || '/';
+    return parent === path ? null : parent;
+}
+
+function fbFormatSize(size, isDir) {
+    if (isDir || size == null) return '—';
+    const n = Number(size);
+    if (!Number.isFinite(n)) return '—';
+    if (n < 1024) return `${n} B`;
+    if (n < 1048576) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+    if (n < 1073741824) return `${(n / 1048576).toFixed(1)} MB`;
+    return `${(n / 1073741824).toFixed(1)} GB`;
+}
+
+function fbFormatMtime(mtime) {
+    const ts = Number(mtime);
+    if (!Number.isFinite(ts) || ts <= 0) return '—';
+    const d = new Date(ts * 1000);
+    if (Number.isNaN(d.getTime())) return '—';
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function fbIcon(isDir) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'ui-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', isDir ? '#icon-folder' : '#icon-file');
+    svg.appendChild(use);
+    return svg;
+}
+
+function fbRenderCrumbs(el, path, onJump) {
+    el.replaceChildren();
+    const parts = String(path || '/').split('/').filter(Boolean);
+    const make = (label, target, current) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ui-fb-crumb';
+        btn.textContent = label;
+        if (current) btn.setAttribute('aria-current', 'page');
+        btn.onclick = () => onJump(target);
+        return btn;
+    };
+    let acc = '';
+    el.appendChild(make('/', '/', parts.length === 0));
+    parts.forEach((part, i) => {
+        acc += `/${part}`;
+        el.appendChild(make(part, acc, i === parts.length - 1));
+    });
+}
+
+function fbPaintList(listEl, state, handlers) {
+    const filter = (state.filter || '').trim().toLowerCase();
+    listEl.replaceChildren();
+    (state.entries || []).forEach((entry) => {
+        if (!entry || entry.name === '..') return;
+        if (filter && !String(entry.name).toLowerCase().includes(filter)) return;
+        const row = document.createElement('div');
+        row.className = 'directory-entry' + (entry.is_dir ? ' dir-entry' : ' dir-entry file-item');
+        if (entry.path === state.selectedPath) row.classList.add('is-selected');
+        row.dataset.path = entry.path;
+        row.setAttribute('role', 'option');
+        row.setAttribute('aria-selected', entry.path === state.selectedPath ? 'true' : 'false');
+        const name = document.createElement('span');
+        name.className = 'ui-fb-name';
+        name.appendChild(fbIcon(!!entry.is_dir));
+        name.appendChild(document.createTextNode(entry.name));
+        const size = document.createElement('span');
+        size.className = 'ui-fb-size';
+        size.textContent = fbFormatSize(entry.size, !!entry.is_dir);
+        const when = document.createElement('span');
+        when.className = 'ui-fb-mtime';
+        when.textContent = fbFormatMtime(entry.mtime);
+        row.append(name, size, when);
+        row.onclick = () => {
+            state.selectedPath = entry.path;
+            listEl.querySelectorAll('.directory-entry').forEach((el) => {
+                const on = el.dataset.path === entry.path;
+                el.classList.toggle('is-selected', on);
+                el.setAttribute('aria-selected', on ? 'true' : 'false');
+            });
+            if (!entry.is_dir && handlers.onPickFile) handlers.onPickFile(entry);
+        };
+        row.ondblclick = (ev) => {
+            ev.preventDefault();
+            if (entry.is_dir) handlers.onOpenDir(entry.path);
+            else if (handlers.onActivateFile) handlers.onActivateFile(entry);
+        };
+        listEl.appendChild(row);
+    });
+    const up = document.getElementById(handlers.upId);
+    if (up) up.disabled = !fbParent(state.currentPath);
+}
+
+function paintFileBrowser() {
+    fbRenderCrumbs(
+        document.getElementById('current-path-display'),
+        fileBrowserState.currentPath,
+        (path) => loadDirectoryList(path),
+    );
+    fbPaintList(document.getElementById('directory-list'), fileBrowserState, {
+        upId: 'file-browser-up',
+        onOpenDir: (path) => loadDirectoryList(path),
+        onActivateFile: (entry) => selectFile(entry.path),
+    });
+}
+
+function paintBagNameBrowser() {
+    fbRenderCrumbs(
+        document.getElementById('bag-name-current-path'),
+        bagNameBrowserState.currentPath,
+        (path) => loadBagNameDirectory(path),
+    );
+    fbPaintList(document.getElementById('bag-name-directory-list'), bagNameBrowserState, {
+        upId: 'bag-name-up',
+        onOpenDir: (path) => loadBagNameDirectory(path),
+        onPickFile: (entry) => { document.getElementById('bag-name-input').value = entry.name; },
+        onActivateFile: (entry) => { document.getElementById('bag-name-input').value = entry.name; },
+    });
 }
 
 async function loadDirectoryList(path) {
@@ -373,28 +507,9 @@ async function loadDirectoryList(path) {
 
         if (result.success) {
             fileBrowserState.currentPath = result.current_path;
-            domCache.get('current-path-display').textContent = result.current_path;
-
-            const listElement = domCache.get('directory-list');
-            listElement.innerHTML = '';
-
-            result.entries.forEach(entry => {
-                const div = document.createElement('div');
-                div.className = 'directory-entry';
-
-                // Add icon for directories and files
-                if (entry.is_dir) {
-                    div.classList.add('dir-entry');
-                    div.textContent = '📁 ' + entry.name;
-                    div.onclick = () => loadDirectoryList(entry.path);
-                } else {
-                    div.classList.add('dir-entry', 'file-item');
-                    div.textContent = '📄 ' + entry.name;
-                    div.onclick = () => selectFile(entry.path);
-                }
-
-                listElement.appendChild(div);
-            });
+            fileBrowserState.entries = result.entries || [];
+            fileBrowserState.selectedPath = null;
+            paintFileBrowser();
         } else {
             alert('Failed to load directory: ' + (result.error || 'Unknown error'));
         }
@@ -403,6 +518,79 @@ async function loadDirectoryList(path) {
         alert('Failed to load directory');
     }
 }
+
+function filterFileBrowser(value) {
+    fileBrowserState.filter = value || '';
+    paintFileBrowser();
+}
+
+function fileBrowserUp() {
+    const parent = fbParent(fileBrowserState.currentPath);
+    if (parent) loadDirectoryList(parent);
+}
+
+function filterBagNameBrowser(value) {
+    bagNameBrowserState.filter = value || '';
+    paintBagNameBrowser();
+}
+
+function bagNameBrowserUp() {
+    const parent = fbParent(bagNameBrowserState.currentPath);
+    if (parent) loadBagNameDirectory(parent);
+}
+
+function fbListKey(e, which) {
+    if (e.target && e.target.matches && e.target.matches('input, textarea')) return;
+    const fileMode = which === 'file';
+    const state = fileMode ? fileBrowserState : bagNameBrowserState;
+    const list = document.getElementById(fileMode ? 'directory-list' : 'bag-name-directory-list');
+    if (e.key === 'Escape') {
+        e.preventDefault();
+        fileMode ? closeFileBrowser() : closeBagNameBrowser();
+        return;
+    }
+    if (e.key === 'Backspace') {
+        e.preventDefault();
+        fileMode ? fileBrowserUp() : bagNameBrowserUp();
+        return;
+    }
+    const rows = [...list.querySelectorAll('.directory-entry')];
+    if (!rows.length) return;
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Enter') return;
+    e.preventDefault();
+    let idx = rows.findIndex((row) => row.classList.contains('is-selected'));
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        if (idx < 0) idx = 0;
+        else idx = e.key === 'ArrowDown' ? Math.min(rows.length - 1, idx + 1) : Math.max(0, idx - 1);
+        state.selectedPath = rows[idx].dataset.path;
+        fileMode ? paintFileBrowser() : paintBagNameBrowser();
+        list.querySelector('.is-selected')?.scrollIntoView({ block: 'nearest' });
+        return;
+    }
+    const entry = (state.entries || []).find((item) => item.path === state.selectedPath);
+    if (!entry) return;
+    if (entry.is_dir) {
+        (fileMode ? loadDirectoryList : loadBagNameDirectory)(entry.path);
+    } else if (fileMode) {
+        selectFile(entry.path);
+    } else {
+        document.getElementById('bag-name-input').value = entry.name;
+    }
+}
+
+function bindFileBrowserKeys() {
+    const fileList = document.getElementById('directory-list');
+    const bagList = document.getElementById('bag-name-directory-list');
+    if (fileList && !fileList.dataset.keys) {
+        fileList.dataset.keys = '1';
+        fileList.addEventListener('keydown', (e) => fbListKey(e, 'file'));
+    }
+    if (bagList && !bagList.dataset.keys) {
+        bagList.dataset.keys = '1';
+        bagList.addEventListener('keydown', (e) => fbListKey(e, 'bag'));
+    }
+}
+bindFileBrowserKeys();
 
 function selectFile(filePath) {
     if (fileBrowserState.callback) {
@@ -2566,7 +2754,10 @@ async function updatePlayerState() {
 // Bag Recorder Functions
 
 const bagNameBrowserState = {
-    currentPath: '~'
+    currentPath: '~',
+    entries: [],
+    filter: '',
+    selectedPath: null,
 };
 
 async function enterBagName() {
@@ -2575,9 +2766,14 @@ async function enterBagName() {
 
 async function openBagNameBrowser() {
     bagNameBrowserState.currentPath = '~';
+    bagNameBrowserState.filter = '';
+    bagNameBrowserState.selectedPath = null;
+    const filter = document.getElementById('bag-name-filter');
+    if (filter) filter.value = '';
     domCache.get('bag-name-input').value = '';
     await loadBagNameDirectory(bagNameBrowserState.currentPath);
     domCache.get('bag-name-browser-modal').style.display = 'block';
+    document.getElementById('bag-name-directory-list')?.focus();
 }
 
 function closeBagNameBrowser() {
@@ -2592,29 +2788,9 @@ async function loadBagNameDirectory(path) {
 
         if (result.success) {
             bagNameBrowserState.currentPath = result.current_path;
-            domCache.get('bag-name-current-path').textContent = result.current_path;
-
-            const listElement = domCache.get('bag-name-directory-list');
-            listElement.innerHTML = '';
-
-            result.entries.forEach(entry => {
-                const div = document.createElement('div');
-                div.className = 'directory-entry';
-
-                if (entry.is_dir) {
-                    div.classList.add('dir-entry');
-                    div.textContent = '📁 ' + entry.name;
-                    div.onclick = () => loadBagNameDirectory(entry.path);
-                } else {
-                    div.classList.add('dir-entry', 'file-item');
-                    div.textContent = '📄 ' + entry.name;
-                    div.onclick = () => {
-                        domCache.get('bag-name-input').value = entry.name;
-                    };
-                }
-
-                listElement.appendChild(div);
-            });
+            bagNameBrowserState.entries = result.entries || [];
+            bagNameBrowserState.selectedPath = null;
+            paintBagNameBrowser();
         } else {
             alert('Failed to load directory: ' + (result.error || 'Unknown error'));
         }

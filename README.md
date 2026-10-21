@@ -1,650 +1,207 @@
 # ROS SLAM WEBUI
 
-> **An all-in-one web-based GUI for LiDAR SLAM development with ROS**
-
-ROS SLAM WEBUI brings SLAM, localization, data play/record, configuration, and real-time visualization into a single browser-based interface. Instead of running each ROS launch file and tool manually from separate terminals, you can control the full LiDAR SLAM development workflow comfortably from one web GUI on any device (such as Desktop, Tablet, Smartphone).
+Web console for LiDAR SLAM on ROS 2. One browser page runs mapping, localization, bag play and record, dataset playback, plots, and a 3D view. The current UI is the Field Console: a sidebar for the eight screens, and a live map that appears after you press Start.
 
 <p align="center">
-  <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-blue.svg" alt="ROS2 Jazzy" /></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-green.svg" alt="Python 3.10+" /></a>
+  <a href="https://docs.ros.org/en/jazzy/"><img src="https://img.shields.io/badge/ROS2-Jazzy-blue.svg" alt="ROS 2 Jazzy" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3-green.svg" alt="Python 3" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-brightgreen.svg" alt="License Apache 2.0" /></a>
 </p>
 
-<p align="center">
-  <img src="doc/SLAMWEBUI.webp" alt="ROS SLAM WEBUI"/>
-</p>
----
-
-## 🌟 Key Features
-
-### 🗺️ SLAM & Localization
-
-> **Important:** To use these features, clone the linked repositories and build them in your ROS2 workspace first.
-
-- **LiDAR SLAM** — based on [FAST-LIO Mapping](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) and [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization)
-  - Live YAML configuration editing with instant apply
-  - **Inline Live 3D Viewer** — auto-shown while mapping, with accumulated map, keyframes/trajectory, and camera follow
+- [Key Features](#key-features)
+- [Detailed Feature Guide](#detailed-feature-guide)
+- [Requirements](#requirements)
+- [Install and build](#install-and-build)
+- [Run](#run)
+- [Optional environment variables](#optional-environment-variables)
+- [License](#license)
 
 <p align="center">
-  <img src="doc/slam_live.png" alt="ROS SLAM WEBUI"/>
+  <img src="doc/web.gif" alt="Web GUI start" width="100%" />
 </p>
 
-  - **Real-time Analytics Dashboard** — sensor Hz, trajectory distance/speed, CPU/RAM usage, per-frame processing time, geometry quality (DOP), and cumulative timing stats
+## Key Features
 
-<p align="center">
-  <img src="doc/slam_dashboard.png" alt="ROS SLAM WEBUI"/>
-</p>
+- Run SLAM from the browser: start mapping, watch the live map, and save the result without a separate RViz session.
+- Save Map stays available after the sensor stream pauses or the bag ends, as long as keyframes were recorded.
+- See whether a node is running from the sidebar tag and the status badge on each screen.
+- Merge two mapping sessions into one map.
+- Play and convert ROS 1 `.bag` and ROS 2 bags (mcap or db3), and record the same formats.
+- Plot live numeric fields, and view point clouds, paths, and TF in 3D.
 
-  - **Save Map Result Viewer** — LIO Map / Optimized / Dynamic Object Removal layers, LIO & PGO trajectories with loop-closure overlays, Depth Filter (Eye-Dome Lighting), and Height Clip cross-section
+## Detailed Feature Guide
 
-<p align="center">
-  <img src="doc/slam_save.webp" alt="ROS SLAM WEBUI"/>
-</p>
+### LiDAR SLAM
 
-- **Real-time Localization** — based on [FAST-LIO Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization)
-  - Live YAML configuration editing with instant apply
-  - **Inline Live 3D Viewer** — auto-shown while running, with camera follow, Top View, and Snapshot
+<img src="doc/slam.png" alt="LiDAR SLAM while mapping" width="100%" />
 
-<p align="center">
-  <img src="doc/localization_live.png" alt="ROS SLAM WEBUI"/>
-</p>
+1. Open **LiDAR SLAM**. Check the config, or use **Config Load** / **Set Config File**.
+2. Press **Start SLAM**. The live viewer and analytics appear. The badge reads **Running**, and the sidebar shows **RUN**.
+3. When keyframes exist, **Save Map** turns on. It stays on if the data later pauses or the bag stops.
+4. After the save finishes, the result viewer opens (LIO map, optimized map, trajectories).
+5. Press **Stop SLAM** to end the run.
 
-  - **Real-time Analytics Dashboard** — same live metrics as LiDAR SLAM, plus a Map Update Rug showing recent map-update events
+The stepper is Config → Mapping → Save Map → Result. **Save Map** is the current step once there is something to save.
 
-<p align="center">
-  <img src="doc/localization_dashboard.png" alt="ROS SLAM WEBUI"/>
-</p>
+### Localization
 
-- **Multi-Session SLAM** — based on [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping)
-  - Map merging (Map 1 / Map 2) and multi-session pose graph optimization
+<img src="doc/localization.png" alt="Localization while tracking" width="100%" />
 
-<p align="center">
-  <img src="doc/result.png" alt="ROS SLAM WEBUI"/>
-</p>
+1. Open **Localization** and set `map_file_path` (or **Config Load**).
+2. Press **Start Localization**. The live viewer opens.
+3. The badge moves from initialize to **Tracking** after the map match starts.
+4. While it is running, the crosshair on the viewer (**초기 위치 지정**) lets you set the start pose. It is disabled when localization is stopped.
 
-  - **Optimization Result Viewer** — layer legend (Map 1/2, Merge Map 1/2), Check Difference overlays, loop-closure edges, Depth Filter, and Height Clip cross-section
+### Multi-Session SLAM
 
-<p align="center">
-  <img src="doc/multi_slam_result.webp" alt="ROS SLAM WEBUI"/>
-</p>
+<img src="doc/multi_session.png" alt="Multi-Session SLAM with two maps chosen" width="100%" />
 
-### 📊 Advanced Data Visualization
-- **PlotJuggler-style Real-time Plotting**
-  - Interactive time-series data visualization
-  - Multi-tab interface for organizing plots
-  - Drag-and-drop topic selection from tree view
-  - Auto-save/restore plot configurations
-  - Zoom, pan, play/pause controls
-  - Export plots (PNG)
-  - XY Plot support
+1. Pick **Map 1** and **Map 2**. Each folder must be a Save Map result (`Scans/`, `optimized_poses.txt`, `edges.txt`, `StaticMap.pcd`).
+2. Type an output folder name.
+3. Press **Multi Session Optimization**. The progress list and the result viewer follow the run.
 
-<p align="center">
-  <img src="doc/plot.png" alt="ROS SLAM WEBUI"/>
-</p>
+**Multi Session Optimization** stays disabled until both maps and a safe output name are set.
 
-- **3D Visualization**
-  - Real-time PointCloud2 and Livox CustomMsg visualization
-  - Path and odometry display
-  - TF tree visualization with Fixed Frame support
-  - Interactive camera controls (Orbit / Top-Down)
-  - Image topic streaming
-  - Snapshot export and **Fullscreen mode**
+### Bag Player
 
-<p align="center">
-  <img src="doc/3dviewer.png" alt="ROS SLAM WEBUI"/>
-</p>
+<img src="doc/bag_player.png" alt="Bag Player during playback" width="100%" />
 
-### 💾 Data Management
-- **Bag Player**
-  - Play ROS2 bag files with topic filtering
-  - Timeline control with play/pause/seek
-  - Variable playback speed (slider)
-  - **Loop mode** for continuous replay
-  - Integration with 3D visualization and Plot
-  - **ROS1 bag support**: Auto-detect `.bag` files, offline convert to ROS2, or direct real-time playback via `rosbags`
-  - Convert ROS2 bag → ROS1 `.bag` format
+1. Press **Load Bag File** and choose a ROS 2 bag folder (mcap or db3) or a ROS 1 `.bag`.
+2. Tick the topics to play. **Play** starts playback; the button label becomes **Stop**. **Pause** holds it.
+3. Drag the timeline, pick a rate (`0.5×`–`4×`), or turn on **Loop**.
+4. **Convert** writes the selected topics to the other bag format.
 
-- **Bag Recorder**
-  - Record live ROS topics to bag files in **ROS2 mcap**, **ROS2 db3**, or **ROS1 `.bag`** format
-  - Format selectable via dropdown before recording
-  - Selective topic recording
-  - Real-time recording status badge (shows active format)
+While the bag is playing, the **Hz** column is the live rate. When it is stopped, that column shows the bag's average rate, dimmed.
 
-- **File Player** — Multi-dataset direct playback
-  - Supports 5 dataset formats selectable via dropdown:
-    - **ConPR**: CSV-based trajectory/LiDAR/camera data
-    - **KITTI Raw**: Velodyne HDL-64E, 4 cameras (color/gray), IMU/GPS (OXTS), TF
-    - **KAIST Complex Urban**: VLP-16 (left/right), SICK LiDAR (back/mid), stereo camera, IMU, GPS, VRS
-    - **MulRan**: Ouster OS1-64 LiDAR, radar polar image, IMU, GPS
-    - **HeLiPR**: 4 heterogeneous LiDARs (Ouster, Velodyne, Livox Avia, Aeva) selected via `stamp.csv` timeline, xsens IMU (+ magnetic field), inspva GPS, and per-LiDAR ground-truth Odometry/TF (`LiDAR_GT/*.txt`, priority Ouster > Velodyne > Aeva > Avia)
-  - **Drive/Sequence selection** per dataset (scanned from directory)
-  - **Save Bag** in ROS2 or ROS1 format
-  - Playback controls: Loop / Skip stop section / Auto start
-  - Timeline slider for frame-accurate seeking
+### Bag Recorder
 
-### 🌐 Network Tools
-- **Latency Monitor** — real-time HTTP round-trip measurement
-  - Sequential 3-ping minimum strategy (avoids self-induced contention)
-  - Color-coded indicator: 🟢 Green < 50ms / 🟡 Yellow < 150ms / 🔴 Red ≥ 150ms
-  - Measures every 3 seconds
+<img src="doc/bag_recorder.png" alt="Bag Recorder while recording" width="100%" />
 
----
+1. Set **Bag Name** and **Format**: ROS 2 (mcap), ROS 2 (db3), or ROS 1 (`.bag`).
+2. Refresh the topic list and tick what to record.
+3. Press **Record**. The badge shows **Recording**, and time, size, and topic count update.
+4. Press the same button again to stop and save. The sidebar shows **REC** during the recording.
 
-## 🚀 Quick Start
+Topic checkboxes are locked while recording.
 
-### Prerequisites
+### File Player
 
-- **Ubuntu**: 22.04 or later
-- **ROS2**: Jazzy or later (Desktop Full recommended — includes `rclpy`, `std_msgs`, `sensor_msgs`, `geometry_msgs`, `nav_msgs`, `tf2_msgs`, `rosbag2_py`)
-  → [Installation Guide](https://docs.ros.org/en/jazzy/Installation.html)
-- **Python**: 3.10+ (included with ROS2)
-- **rosbridge_server**: required for 3D Viewer and Plot features
-- **Browser**: any modern browser (Chrome / Firefox recommended)
+<img src="doc/file_player.png" alt="File Player on a KITTI drive" width="100%" />
 
-### Installation
+1. Choose a dataset: ConPR, KITTI Raw, KAIST Complex Urban, MulRan, or HeLiPR.
+2. Press **Load** and pick the dataset folder. For KITTI, KAIST, MulRan, and HeLiPR, pick a drive or sequence.
+3. Press **Play**. **Pause** and the timeline work like the bag player. **Loop** and **Auto Start** are optional.
+4. Pick a format and press **Save Bag** to write a ROS 2 or ROS 1 bag.
 
-1. **Install rosbridge_server**
-   ```bash
-   sudo apt install ros-jazzy-rosbridge-server
-   ```
+### Plot
 
-2. **Install Python dependencies**
-   ```bash
-   pip install rosbags ruamel.yaml numpy opencv-python psutil
-   ```
-   > `rosbags`: ROS1 bag read/write and format conversion  
-   > `opencv-python`: camera image processing in File Player  
-   > `psutil` *(optional)*: CPU core count / total RAM for the SLAM & Localization Analytics Dashboards — without it, CPU/RAM widgets fall back to defaults
+<img src="doc/plot.png" alt="Plot with a few signals" width="100%" />
 
-3. **Clone SLAM-related packages**
-   The SLAM & Localization features are based on the following packages:
-   ```bash
-   cd ~/your_workspace/src
-   git clone https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization.git
-   git clone https://github.com/Kimkyuwon/Pose_Graph_Optimization.git
-   git clone https://github.com/Kimkyuwon/long_term_mapping.git
-   ```
+1. Open **Plot**. Press **Add** and pick topics. Fields show up in the topic list.
+2. Drag a numeric field onto the plot. Several fields can share one plot.
+3. **Pause** freezes the traces. **10 s / 30 s / 60 s** sets the time window.
 
-4. **Livox LiDAR support**
-   Required only if you use a Livox LiDAR sensor. Clone [livox_ros_driver2](https://github.com/Livox-SDK/livox_ros_driver2):
-   ```bash
-   git clone https://github.com/Livox-SDK/livox_ros_driver2.git
-   ```
+rosbridge must be connected or the topic list stays empty.
 
-5. **Clone and build ros_slam_webui**
-   ```bash
-   git clone https://github.com/Kimkyuwon/ROS-SLAM-WebUI.git
-   cd ~/your_workspace
-   colcon build
-   source install/setup.bash
-   ```
+### 3D Viewer
 
-### Launch
+<img src="doc/3dviewer.png" alt="3D Viewer" width="100%" />
+
+1. Open **3D Viewer**. **Fixed Frame** defaults to `map`.
+2. Press **Add** and choose a display: PointCloud2, Path, Odometry, TF, Livox, Image, or LaserScan, then a topic.
+3. **Orbit** or **TopDown** sets the camera. **Snapshot** saves the view. **Reset** clears the displays.
+
+Point clouds use the WebSocket on port 8081. Other displays use rosbridge.
+
+## Requirements
+
+Ubuntu 24.04. Install only what you use. Commands below match packages this repo actually imports or launches.
+
+**ROS 2 Jazzy.** Follow the [Jazzy install guide](https://docs.ros.org/en/jazzy/Installation.html), then:
 
 ```bash
-# Source ROS2 environment
-source /opt/ros/jazzy/setup.bash
-source ~/your_workspace/install/setup.bash
+sudo apt install ros-jazzy-desktop
+```
 
-# Launch the web server (also starts rosbridge_server by default)
+That provides the ROS dependencies in `package.xml` (`rclpy`, `std_msgs`, `std_srvs`, `sensor_msgs`, `geometry_msgs`, `rosgraph_msgs`, `rosbag2_py`, `cv_bridge`) and the extra messages `web_server.py` imports (`nav_msgs`, `tf2_msgs`).
+
+**rosbridge** (launch file starts it for Plot and the 3D viewer):
+
+```bash
+sudo apt install ros-jazzy-rosbridge-suite
+```
+
+**mcap bags.** The recorder's default format is mcap (`ros2 bag record` with no `-s` flag). db3 passes `-s sqlite3`.
+
+```bash
+sudo apt install ros-jazzy-rosbag2-storage-mcap
+```
+
+**Python packages** imported by `web_server.py` and the dataset converters. These apt names exist on Ubuntu 24.04:
+
+```bash
+sudo apt install python3-yaml python3-numpy python3-opencv python3-websockets
+```
+
+Optional, same file: `psutil` (CPU/RAM numbers) and `ruamel.yaml` (keeps YAML comments). Without them the server still starts.
+
+```bash
+sudo apt install python3-psutil python3-ruamel.yaml
+```
+
+**ROS 1 bags.** `rosbags` is not in apt. Bag Player, Recorder, and Convert import it for `.bag` read, write, and conversion:
+
+```bash
+pip install rosbags
+```
+
+**Livox, only if you use that sensor.** `package.xml` depends on `livox_ros_driver2`. It is not in the Jazzy apt archive; put that package in the workspace yourself.
+
+**SLAM stacks, only for those screens.** The server launches `fast_lio` (`mapping.launch.py`, `localization.launch.py`) and `long_term_mapping` (`lt_mapper.launch.py`), and imports `pose_graph_optimization` for Save Map.
+
+```bash
+cd ~/localization_ws/src
+git clone https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization.git
+git clone https://github.com/Kimkyuwon/Pose_Graph_Optimization.git
+git clone https://github.com/Kimkyuwon/long_term_mapping.git
+```
+
+From the workspace, after ROS is sourced:
+
+```bash
+cd ~/localization_ws
+rosdep install --from-paths src --ignore-src -r -y
+```
+
+## Install and build
+
+```bash
+cd ~/localization_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select ros_slam_webui --symlink-install
+source install/setup.bash
+```
+
+## Run
+
+```bash
 ros2 launch ros_slam_webui ros_slam_webui.launch.py
-
-# If rosbridge_server is already running elsewhere, skip launching a duplicate instance:
-ros2 launch ros_slam_webui ros_slam_webui.launch.py start_rosbridge:=false
 ```
 
-### Access Web Interface
+Open http://localhost:8080 . The launch file also starts rosbridge. If rosbridge is already running, use `start_rosbridge:=false`.
 
-Once the server starts, you'll see:
-```
-[INFO] [ros_slam_webui_node]: ======================================
-[INFO] [ros_slam_webui_node]: Web server started on port 8080
-[INFO] [ros_slam_webui_node]: Local access:   http://localhost:8080
-[INFO] [ros_slam_webui_node]: Network access: http://YOUR_IP:8080
-[INFO] [ros_slam_webui_node]: ======================================
-```
+If port 8080 is taken, set another port (below) instead of stopping a server you did not start.
 
-Open the URL in your web browser. For network access from another device (e.g. tablet or smartphone), the device must be connected to the same Wi-Fi network (AP) as the host machine.
+## Optional environment variables
 
----
+| Variable | Default | Role |
+| --- | --- | --- |
+| `WEBUI_PORT` | `8080` | Web page |
+| `WEBUI_PC2_PORT` | `8081` | Point-cloud WebSocket |
+| `WEBUI_ROSBRIDGE_PORT` | `9090` | Port shown to the page for rosbridge |
 
-## 📖 Detailed Feature Guide
+Set them in the same shell before `ros2 launch`. The page reads the values from the server.
 
-### 🗺️ LiDAR SLAM
+## License
 
-1. **Load Configuration**
-   - Click "Config Load" to browse for your SLAM config file
-   - Default location is auto-detected from `FAST_LIO_Localization_and_Mapping/config/mapping_config.yaml` in the same ROS workspace
-   - Edit parameters in real-time using the web interface
-
-2. **Start SLAM**
-   - Click "Start SLAM" button
-   - Monitor real-time terminal output in the web UI
-   - Green status indicator shows running state
-   - **SLAM Live Viewer** appears inline automatically:
-     - Live-streamed accumulated map (`/PGO_map`) plus the current scan, keyframe nodes (`/kf_node`), LIO/Pose Graph trajectories, and loop-closure lines
-     - **Follow** button toggles camera tracking of the robot pose
-     - **Top View**, **Snapshot**, and **Fullscreen** buttons in the bottom-right corner
-   - **SLAM Analytics Dashboard** appears below the viewer:
-     - Sensor Frequency (IMU/LiDAR Hz), Trajectory (distance/uptime/avg speed), CPU/RAM usage gauges
-     - Per-frame Processing Time (stacked area) and Geometry Quality/DOP charts, plus Cumulative Timing Statistics table
-     - "Full Statistics" toggle expands detailed IESEKF/Feature Matching/Residual/IMU/Keyframe fields
-
-3. **Save Map**
-   - Click "Save Map" to trigger pose graph optimization
-   - Async operation — progress status shown while saving (Live Viewer/Dashboard are hidden during this step)
-   - Click "Cancel Save Map" to abort if needed
-   - Map is saved to configured output directory
-   - **Save Map Result Viewer** *(auto-shown on completion)*:
-     - **LIO Map** (raw), **Optimized**, and **Dynamic Object Removal** point cloud layers, toggleable via legend
-     - **LIO** / **PGO** trajectories with **Loop Closure** edge lines
-     - **Depth Filter** (Eye-Dome Lighting shading) and **Height Clip** (draggable vertical slider for a Z-height cross-section) toolbar buttons
-     - **Top View**, **Point Size** slider, **Reset View**, **Snapshot**, and **Fullscreen**
-
-4. **Stop SLAM**
-   - Click "Stop SLAM" button
-   - Process terminates gracefully (SIGINT → SIGTERM → SIGKILL)
-
-### 🔗 Multi-Session SLAM
-
-1. **Set Inputs**
-   - Click "Set Map 1" and "Set Map 2" to select two map directories
-   - Click "Set Output" to set output path
-
-2. **Run Optimization**
-   - Click "Multi Session Optimization"
-   - Real-time log stream appears in the status area with spinner
-   - Click "Cancel" to stop at any time
-
-3. **Completion**
-   - Status banner turns green on success, red on failure
-   - Button label changes to "Exit" after completion — click to reset UI
-
-4. **Optimization Result Viewer** *(auto-shown on completion)*
-   - Inline Three.js 3D viewer shows Map1 / Map2 accumulated point clouds (individually re-projected from each session's scans), the merged **Merge Map 1** / **Merge Map 2** static map (split by source via intensity), and pose trajectory nodes
-   - **Layer legend**: click any legend item to toggle that layer's visibility on/off
-   - **Check Difference**: toggle to load and display difference PCD layers — Positive Differences (PD, orange), Negative Differences (ND, purple), First Unexplored area (FirstUE, hot-pink), Second Unexplored area (SecondUE, lime)
-   - **Loop Closure**: thick edge lines drawn between non-adjacent pose nodes
-   - **Depth Filter** (Eye-Dome Lighting shading) and **Height Clip** (draggable vertical slider for a Z-height cross-section) toolbar buttons
-   - **Top View** toggle, **Point Size** slider, **Reset View** button
-   - **Snapshot** (📷): exports current 3D view as a high-resolution PNG (2× render scale)
-   - **Fullscreen** (⛶): expand viewer to full screen
-
-### 📡 Localization Live Viewer
-
-When you click **Start Localization**, an inline 3D viewer appears automatically beneath the controls panel.
-
-| Element | Description |
-|---|---|
-| **Display panel** (left) | Toggle individual topic layers on/off via checkboxes |
-| **3D canvas** (right) | Real-time Three.js visualization |
-| **Follow** button | Toggle camera tracking of the robot pose |
-| **Top View** toggle | Switch between perspective and top-down view |
-| **Snapshot** button | Export current 3D view as a PNG |
-| **Fullscreen** button | Expand canvas to full screen |
-| **Reset View** button | Return camera to default position |
-
-### 📊 Analytics Dashboards
-
-Both **Start SLAM** and **Start Localization** show a live analytics dashboard beneath their respective viewer, subscribed to the `/lio_analytics` (`fast_lio/msg/LioAnalytics`) or `/loc_analytics` (`fast_lio/msg/LocAnalytics`) topic:
-
-| Widget | Description |
-|---|---|
-| **Sensor Frequency** | IMU / LiDAR message rate (Hz) |
-| **Trajectory** | Cumulative distance, uptime, and average speed |
-| **CPU / RAM Usage** | Gauge + donut charts (via `/api/system/info`) |
-| **Per-frame Processing Time** | Stacked-area chart of the last 10 seconds |
-| **Geometry Quality (DOP)** | Scan/matching Dilution-of-Precision, lower is better |
-| **Cumulative Timing Statistics** | Mean/Max table per pipeline component |
-| **Map Update Rug** *(Localization only)* | Canvas strip showing the last 200 map-update events plus an "Initialized" status badge |
-| **Full Statistics** toggle | Expands detailed Scan/Map, Feature Matching, Residual, IESEKF, IMU State, and Keyframe fields |
-
-### 📊 Real-time Plotting
-
-The Plot feature provides PlotJuggler-style visualization directly in your browser:
-
-1. **Navigate to Plot Tab**
-   - Click "Visualization" → "Plot" in the main navigation
-
-2. **Browse Topics**
-   - Currently published topics are listed in the tree view (topic → message fields)
-   - Click a topic to subscribe and expand its message fields
-   - **Ctrl+click** to select multiple topics simultaneously
-
-3. **Create Plots**
-   - Drag leaf nodes (data fields) from tree to plot area
-   - Each drag creates a new trace in the plot
-   - Multiple traces can be added to a single plot
-   - **XY Plot**: Ctrl+click to select 2 leaf fields → right-click → "Create XY Plot"
-
-4. **Manage Tabs**
-   - Click "+" to create new plot tabs
-   - Double-click tab title to rename
-   - Click "×" to close tabs (minimum 1 tab)
-   - Each tab maintains independent plots
-
-5. **Plot Controls**
-   - **Play/Pause**: Toggle real-time data updates
-   - **t0 Mode**: Show relative time from first data point (enabled by default)
-   - **Buffer Time**: Adjust visible time window (1-100 seconds)
-
-6. **Interact with Plots**
-   - **Zoom**: Scroll wheel (when paused)
-   - **Auto Scale**: Right-click on plot → "Auto Scale"
-   - **Delete Plot**: Right-click on trace or legend → "Delete plot"
-   - **Clear Plot**: Right-click on plot → "Clear Plot"
-   - **Export PNG**: Right-click on plot → "Export as PNG"
-   - **Auto-save**: Plot configurations save automatically to browser storage
-   - **Auto-restore**: Plots restore after page refresh
-
-7. **Filters** (right-click on a trace → "Apply Filter")
-   - **Derivative**: Rate of change
-   - **Moving Average**: Smoothing
-   - **Moving RMS**: Root mean square
-   - **Moving Variance**: Variance over window
-   - **Scale + Offset**: Linear transform (y = scale × x + offset)
-
-### 🎥 Bag Recorder
-
-1. **Enter Bag Name**
-   - Click "Enter Bag Name" to open a file browser dialog 
-   - Type the bag name in the filename field at the bottom
-   - Click "Save" to confirm — the "Bag Name" field displays the full path (read-only)
-
-2. **Select Format**
-   - Use the **Format** dropdown to choose the output format:
-     - **ROS2 (mcap)** — default; single `.mcap` file, fast write, native compression support *(ROS2 Iron / Jazzy or later)*
-     - **ROS2 (db3)** — SQLite3 based; classic ROS2 bag format (folder + `.db3` + `metadata.yaml`). Use this if your ROS2 version is older than Iron (e.g. Humble or earlier)
-     - **ROS1 (.bag)** — direct ROS1 `.bag` recording via `rosbags`; `.bag` extension is appended to the bag name automatically
-   - The Bag Name display updates automatically when switching between ROS1 and ROS2 formats
-
-3. **Select Topics**
-   - Click "Select Topic" button
-   - Choose topics to record from the list (requires bag name to be set first)
-   - Click "Confirm"
-
-4. **Record**
-   - Click "Record" to start recording
-   - A badge shows the active recording format (ROS1 .bag / ROS2 db3 / ROS2 mcap)
-   - Click "Stop" to finish recording
-   - Bag file is saved to the directory selected in step 1
-
-### 🎮 Bag Player
-
-1. **Load Bag**
-   - Click "Load Bag File" to open a file browser (starts from your home directory)
-   - ROS2 bags (`.db3` directory or single-file `.mcap`) and ROS1 `.bag` files are all supported
-   - A badge (ROS1 Bag / ROS2 Bag) shows the detected format
-
-2. **Select Topics**
-   - Click "Select Topic" to filter which topics to play
-   - All topics are played by default if none selected
-
-3. **Playback**
-   - Click "Play" to start playback
-   - Use timeline slider for seeking
-   - Use the speed slider to adjust playback rate (applies to both ROS1 and ROS2 bags)
-   - Toggle **Loop** checkbox to replay automatically when finished
-   - Click "Stop" to stop playback
-   - ROS1 bag messages are decoded/converted on a background prefetch thread ahead of publishing, keeping playback timing stable even under CPU load (e.g. while SLAM is running concurrently)
-
-4. **Format Conversion**
-   - **ROS1 bag loaded**: "Convert to ROS2" button appears — converts offline using `rosbags-convert`
-   - **ROS2 bag loaded**: "Convert to ROS1" button appears — converts to `.bag` format
-   - Direct playback without conversion is available for both formats
-   - Conversion always requires at least one topic selected in step 2 — only the **Selected Topics** are written to the converted bag (`rosbags-convert --include-topic`)
-
-### 📂 File Player
-
-The File Player supports direct playback of five dataset formats without conversion.
-
-1. **Select Dataset Format**
-   - Use the "Dataset" dropdown to choose: ConPR / KITTI Raw / KAIST Complex Urban / MulRan / HeLiPR
-
-2. **Load Directory**
-   - Click "Load" to open a file browser (starts from your home directory)
-   - Navigate to and select the dataset root directory
-   - For KITTI: select the base directory containing drive folders (`2011_09_26_drive_*`)
-   - For KAIST: select the directory containing sequence folders (`urban00`, `urban01`, …)
-   - For MulRan: select the directory containing sequence folders (`Riverside01`, `KAIST01`, …)
-   - For HeLiPR: select the top-level directory containing sequence folders (each with `stamp.csv` and a `LiDAR/` — or flat `Ouster`/`Velodyne`/`Avia`/`Aeva` — layout); both directory layouts used by official HeLiPR releases are auto-detected
-
-3. **Select Drive/Sequence** *(KITTI / KAIST / MulRan / HeLiPR only)*
-   - A dropdown is populated with detected drives or sequences
-   - Select the desired entry to load it (for HeLiPR, a single detected sequence auto-loads)
-
-4. **Play**
-   - Click "▶ Play" to start publishing sensor data to ROS2 topics
-   - Click "⏸ Pause" to pause; click again to resume
-   - Use the **timeline slider** to seek to any position
-
-5. **Playback Options**
-   | Option | Description |
-   |---|---|
-   | **Loop** | Restart from beginning when playback reaches the end |
-   | **Skip stop section** | Skip long gaps between sensor events (on by default) |
-   | **Auto start** | Begin playback automatically after loading |
-
-6. **Save Bag**
-   - Choose output format — **ROS2 (mcap)**, **ROS2 (db3)**, or **ROS1 (.bag)** — from the dropdown next to the "Save Bag" button
-   - Click "Save Bag" to convert the current dataset to a bag file
-   - Progress bar shows conversion progress
-
-#### Published Topics by Dataset
-
-| Dataset | Topics |
-|---|---|
-| **ConPR** | `/livox/lidar`, `/camera/image_raw`, `/imu/data`, `/gps/fix`, `/pose` |
-| **KITTI Raw** | `/kitti/velo/pointcloud`, `/kitti/camera_*/image_raw`, `/kitti/imu`, `/kitti/gps/fix`, `/tf` |
-| **KAIST Complex Urban** | `/velodyne_left/points`, `/velodyne_right/points`, `/sick_back/points`, `/sick_mid/points`, `/stereo/left/image_raw`, `/imu/data`, `/gps/fix`, `/vrs_gps/fix`, `/tf` |
-| **MulRan** | `/os1_points`, `/radar/polar`, `/imu/data_raw`, `/gps/fix`, `/tf` |
-| **HeLiPR** | `/ouster/points`, `/velodyne/points`, `/avia/points` (Livox `CustomMsg`), `/aeva/points`, `/imu/data_raw`, `/imu/mag`, `/gps/fix`, `/gt`, `/tf` |
-
-### 🌐 3D Visualization
-
-#### Layout
-
-The 3D Viewer is divided into three panels:
-- **Displays** (left): manage active topic subscriptions and Fixed Frame
-- **3D View** (center): Three.js canvas
-- **Views** (right): camera type and view controls
-
-Each side panel can be collapsed with the **▶** button.
-
-#### 1. Add Display
-
-Click **"+ Add"** in the Displays panel to open the Add Display dialog.  
-Select a display type and choose a topic to start visualizing:
-
-| Display Type | ROS Message Type | Description |
-|---|---|---|
-| **PointCloud2** | `sensor_msgs/PointCloud2` | Colored point cloud |
-| **Path** | `nav_msgs/Path` | Connected line segments |
-| **Odometry** | `nav_msgs/Odometry` | Arrow + optional trajectory trail |
-| **TF** | `tf2_msgs/TFMessage` | Coordinate frame axes |
-| **LivoxLidar** | `livox_ros_driver2/CustomMsg` | Livox custom point cloud (By Line / Tag Filter) |
-| **Image** | `sensor_msgs/Image` | Live video panels below the 3D view |
-| **LaserScan** | `sensor_msgs/LaserScan` | 2D scan points in 3D space |
-
-#### 2. Display Settings
-
-Click a display item in the Displays panel to expand its settings:
-
-- **PointCloud2 / LivoxLidar**
-  - **Color Mode**: `Rainbow` (field value → gradient), `By Line` (Livox only), `Solid` (single color), `RGB`
-  - **Color Field**: `intensity`, `x`, `y`, `z`, `reflectivity`, …
-  - **Point Size**: point rendering size
-  - **Decay Time**: seconds before old points are removed (0 = keep latest frame only)
-- **Odometry**
-  - **Trajectory**: toggle trail on/off, set max trail length
-- **TF**
-  - Show/hide individual coordinate frames
-
-#### 3. Fixed Frame
-
-- Type or select the reference TF frame in the **Fixed Frame** combo box (default: `map`)
-- Click **▾** to show available TF frames detected at runtime
-- TF transformations are applied automatically to all displays
-
-#### 4. Camera Controls (3D View)
-
-| Action | Control |
-|---|---|
-| Rotate | Left mouse drag |
-| Zoom | Mouse scroll wheel |
-| Pan | Right mouse drag |
-
-#### 5. Views Panel
-
-- **Type**: `Orbit` (free rotation around center) or `TopDown` (bird's-eye view)
-- **Zero**: reset camera to default position
-
-#### 6. Image Viewer
-
-- Select an `Image` topic via **+ Add → Image**
-- Image panels appear below the 3D canvas; multiple topics can be displayed simultaneously
-- Frames stream via binary WebSocket (port 8081) with GPU-accelerated JPEG decoding
-- Resize the image panel by dragging the separator bar
-
-#### 7. Snapshot, Fullscreen & Reset
-
-- **Snapshot**: saves the current 3D view as a PNG file
-- **Fullscreen** (⛶): expands the 3D canvas to full screen; click again or press Escape to exit
-- **Reset**: removes all active displays and clears the scene
-
----
-
-## 🔧 Configuration
-
-### ROS2 Environment Variables
-
-The service automatically sets:
-```bash
-ROS_DOMAIN_ID=0
-ROS_LOCALHOST_ONLY=1
-```
-
-For manual ROS2 commands in other terminals, set the same variables:
-```bash
-export ROS_DOMAIN_ID=0
-export ROS_LOCALHOST_ONLY=1
-source /opt/ros/jazzy/setup.bash
-```
-
-### Change Server Port
-
-The web server port (default: `8080`) and the PC2 binary WebSocket port (default: `8081`, used for PointCloud2/Path/Image streaming) are defined in `ros_slam_webui/web_server.py`. Update **both** occurrences to keep them in sync:
-
-```python
-# 1. WebGUINode.__init__ — exposed to the frontend via GET /api/server_config
-self.web_port = 8080
-self.pc2_ws_port = 8081
-
-# 2. main() — actual HTTP server bind port (must match self.web_port above)
-web_thread = threading.Thread(target=run_web_server, args=(_ros_node, 8080), daemon=True)
-```
-
-The frontend (`webui_ports.js`) reads the active ports from `/api/server_config` at page load, so no JavaScript files need to be edited — only the two Python values above.
-
-Then rebuild:
-```bash
-colcon build --packages-select ros_slam_webui
-```
-
----
-
-## 🏗️ Project Structure
-
-```
-ros_slam_webui/
-├── ros_slam_webui/
-│   ├── web_server.py              # Main HTTP server, ROS2 node & binary WebSocket (port 8081)
-│   ├── kitti_converter.py         # KITTI Raw dataset → ROS2 message converter
-│   ├── kaist_converter.py         # KAIST Complex Urban dataset → ROS2 message converter
-│   ├── mulran_converter.py        # MulRan dataset → ROS2 message converter
-│   ├── helipr_converter.py        # HeLiPR dataset (4 heterogeneous LiDARs + IMU/GPS/GT) → ROS2 message converter
-│   └── __init__.py
-├── web/
-│   ├── index.html                 # Main web interface
-│   └── static/
-│       ├── script.js              # Main UI logic, API calls & live viewers/dashboards (SlamLiveViewer, SlamResultViewer, Analytics Dashboards, etc.)
-│       ├── plot_manager.js        # Plotly.js plot management
-│       ├── plot_tab_manager.js    # Plot tab management
-│       ├── plot_tree.js           # PlotJuggler-style tree view
-│       ├── threejs_display.js     # Three.js 3D visualization (general-purpose Display tab)
-│       ├── pc2_stream_worker.js   # Web Worker for binary PointCloud2 streaming
-│       ├── img_stream_worker.js   # Web Worker for binary Image streaming (JPEG/GPU decode)
-│       ├── latency_ping_worker.js # Web Worker for Latency Monitor round-trip pings
-│       ├── webui_ports.js         # Reads web/PC2 WS/rosbridge ports from /api/server_config
-│       ├── vendor/                # Locally bundled Three.js, roslibjs, Plotly.js (no CDN dependency)
-│       └── style.css              # UI styling (dark theme)
-├── launch/
-│   └── ros_slam_webui.launch.py  # ROS2 launch configuration
-├── package.xml                    # ROS2 package manifest
-├── setup.py                       # Python package setup
-├── README.md                      # This file
-└── LICENSE                        # Apache 2.0 License
-```
-
----
-
-## 📚 Related Projects
-
-### SLAM & Localization
-- [FAST-LIO Mapping & Localization](https://github.com/Kimkyuwon/fast_lio2_mapping_and_localization) - LiDAR-Inertial SLAM package with DOP-based scan matching confidence evaluation, supporting both Mapping and Localization modes
-- [Pose Graph Optimization](https://github.com/Kimkyuwon/Pose_Graph_Optimization) -  LiDAR-based pose graph optimization backend with loop closure detection and dynamic object removal
-- [long_term_mapping](https://github.com/Kimkyuwon/long_term_mapping) - Multi-session LiDAR SLAM for long-term map maintenance with structural change detection
-
-### Dataset & Tools
-- [ConPR](https://github.com/dongjae0107/ConPR) - ConPR dataset format
-- [KITTI](https://www.cvlibs.net/datasets/kitti/) - KITTI Raw dataset
-- [KAIST Complex Urban](https://irap.kaist.ac.kr/dataset/) - KAIST Urban dataset
-- [MulRan](https://sites.google.com/view/mulran-pr) - MulRan dataset
-- [HeLiPR](https://sites.google.com/view/heliprdataset) - Heterogeneous LiDAR dataset (Ouster/Velodyne/Livox/Aeva) for inter-LiDAR place recognition; converter references [HeLiPR-File-Player](https://github.com/minwoo0611/HeLiPR-File-Player)
-- [PlotJuggler](https://github.com/facontidavide/PlotJuggler) - Inspiration for plot UI
-
-### Visualization
-- [Three.js](https://threejs.org/) - 3D graphics library
-- [Plotly.js](https://plotly.com/javascript/) - Interactive plotting library
-- [rosbridge_suite](https://github.com/RobotWebTools/rosbridge_suite) - WebSocket interface to ROS
-
----
-
-## 📄 License
-
-This project is licensed under the **Apache License 2.0** - see the [LICENSE](LICENSE) file for details.
-
-### Third-Party Notices
-
-The following JavaScript libraries are bundled locally under `web/static/vendor/` (no CDN dependency, works fully offline):
-
-| Library | Version | License | Usage |
-|---|---|---|---|
-| [Three.js](https://github.com/mrdoob/three.js) | 0.128.0 | MIT | 3D rendering |
-| [Plotly.js](https://github.com/plotly/plotly.js) | 2.27.0 | MIT | Interactive plots |
-| [roslibjs](https://github.com/RobotWebTools/roslibjs) | 1.1.0 | BSD-3-Clause | ROS WebSocket bridge |
-| Fira Sans / [Fira Code](https://github.com/tonsky/FiraCode) | 4.203 / 5.002 | SIL OFL 1.1 (`web/static/vendor/fonts/OFL.txt`) | UI fonts |
-
-The following is a separate ROS2 package dependency (not bundled):
-
-| Package | Version | License | Usage |
-|---|---|---|---|
-| [rosbridge_suite](https://github.com/RobotWebTools/rosbridge_suite) | — | BSD-3-Clause | ROS WebSocket server |
-
-The following Python packages are installed separately as runtime dependencies:
-
-| Package | License |
-|---|---|
-| [rosbags](https://gitlab.com/ternaris/rosbags) | Apache 2.0 |
-| [ruamel.yaml](https://sourceforge.net/p/ruamel-yaml) | MIT |
-| [numpy](https://numpy.org) | BSD |
-| [opencv-python](https://github.com/opencv/opencv-python) | MIT / Apache 2.0 |
-
-### Design Inspiration
-
-- **[PlotJuggler](https://github.com/facontidavide/PlotJuggler)** (LGPL v3.0) — The `PlotJugglerTree` component is an **independent JavaScript implementation** inspired by PlotJuggler's tree-view UI concept. No source code from PlotJuggler is copied or derived. LGPL does not apply to independently re-implemented works.
-- **KITTI / KAIST / MulRan / ConPR** — The File Player implements **file format parsers** for these dataset formats. The dataset files themselves are not included or redistributed; their respective dataset licenses apply only to the data.
-
----
-
-**Made with ❤️ for the ROS2 community**
+Apache License 2.0. See [LICENSE](LICENSE).

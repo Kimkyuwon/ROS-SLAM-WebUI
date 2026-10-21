@@ -28,6 +28,8 @@
         <symbol id="icon-play-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></symbol>
         <symbol id="icon-record" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/></symbol>
         <symbol id="icon-folder" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
+        <symbol id="icon-file" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/></symbol>
+        <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></symbol>
         <symbol id="icon-chart" viewBox="0 0 24 24"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="m19 9-5 5-4-4-3 3"/></symbol>
         <symbol id="icon-box" viewBox="0 0 24 24"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></symbol>
         <symbol id="icon-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></symbol>
@@ -1599,11 +1601,15 @@
                 <span class="close" onclick="closeFileBrowser()">&times;</span>
             </div>
             <div class="modal-body">
-                <div class="current-path">
-                    <strong>Current Path:</strong> <span id="current-path-display">/home</span>
+                <div class="ui-fb-bar">
+                    <button type="button" class="ui-icon-btn" id="file-browser-up" aria-label="상위 폴더" title="상위 폴더" onclick="fileBrowserUp()">
+                        <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up"></use></svg>
+                    </button>
+                    <nav id="current-path-display" class="ui-fb-crumbs" aria-label="현재 경로">/home</nav>
+                    <input id="file-browser-filter" class="ui-input" type="search" placeholder="이름 검색" aria-label="이름 검색" oninput="filterFileBrowser(this.value)">
                 </div>
-                <div class="directory-list" id="directory-list">
-                    <!-- Directory and file entries will be loaded here -->
+                <div class="ui-fb-head" aria-hidden="true"><span>이름</span><span>크기</span><span>수정</span></div>
+                <div class="directory-list ui-fb-list" id="directory-list" role="listbox" tabindex="0" aria-label="폴더와 파일">
                 </div>
             </div>
             <div class="modal-footer">
@@ -1621,11 +1627,15 @@
                 <span class="close" onclick="closeBagNameBrowser()">&times;</span>
             </div>
             <div class="modal-body">
-                <div class="current-path">
-                    <strong>Current Path:</strong> <span id="bag-name-current-path">/home</span>
+                <div class="ui-fb-bar">
+                    <button type="button" class="ui-icon-btn" id="bag-name-up" aria-label="상위 폴더" title="상위 폴더" onclick="bagNameBrowserUp()">
+                        <svg class="ui-icon" aria-hidden="true"><use href="#icon-arrow-up"></use></svg>
+                    </button>
+                    <nav id="bag-name-current-path" class="ui-fb-crumbs" aria-label="현재 경로">/home</nav>
+                    <input id="bag-name-filter" class="ui-input" type="search" placeholder="이름 검색" aria-label="이름 검색" oninput="filterBagNameBrowser(this.value)">
                 </div>
-                <div class="directory-list" id="bag-name-directory-list">
-                    <!-- Directory entries loaded here -->
+                <div class="ui-fb-head" aria-hidden="true"><span>이름</span><span>크기</span><span>수정</span></div>
+                <div class="directory-list ui-fb-list" id="bag-name-directory-list" role="listbox" tabindex="0" aria-label="저장 폴더">
                 </div>
             </div>
             <div class="bag-name-modal-footer">
