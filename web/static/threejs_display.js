@@ -639,6 +639,9 @@ function switchViewType(type) {
     // UI 동기화: view-type-select 드롭다운 값 업데이트
     const sel = document.getElementById('view-type-select');
     if (sel && sel.value !== type) sel.value = type;
+    document.querySelectorAll('#view-type-seg [data-view]').forEach((btn) => {
+        btn.setAttribute('aria-checked', String(btn.dataset.view === type));
+    });
 
     // 뷰 타입별 파라미터 UI 갱신
     renderViewsPanel();
@@ -1228,147 +1231,6 @@ const _pc2FrameCounts = new Map(); // topicName → frameCount (BoundingSphere �
 // 메인 스레드는 canvas.drawImage(bitmap) 만 수행 → 픽셀 루프 / atob 완전 제거
 let _imgStreamWorker = null;
 
-/**
- * PointCloud2 메시지 고성능 파싱 (단일 패스, 재사용 버퍼)
- * @param {Object} message       - rosbridge PointCloud2 메시지
- * @param {Object} [settings]    - 색상 설정 { colorMode, colorField, solidColor, pointSize }
- * @param {number} [prevMin]     - 이전 프레임 rainbow 최솟값 (적응형 범위)
- * @param {number} [prevMax]     - 이전 프레임 rainbow 최댓값
- * @returns {{ count: number, newMin: number, newMax: number }}
- *   결과는 _pc2PosBuffer / _pc2ColBuffer 에 0..count*3-1 범위로 기록됨
- */
-function parsePointCloud2(message, settings, prevMin, prevMax) {
-    const colorMode = (settings && settings.colorMode) || 'rainbow';
-    const colorField = (settings && settings.colorField) || 'intensity';
-    const solidColor = (settings && settings.solidColor) || '#ffffff';
-
-    // Field 오프셋 탐색
-    let xOffset = -1, yOffset = -1, zOffset = -1, rgbOffset = -1, colorFieldOffset = -1;
-    for (const field of message.fields) {
-        if (field.name === 'x')                              xOffset = field.offset;
-        if (field.name === 'y')                              yOffset = field.offset;
-        if (field.name === 'z')                              zOffset = field.offset;
-        if (field.name === 'rgb' || field.name === 'rgba')  rgbOffset = field.offset;
-        if (field.name === colorField)                       colorFieldOffset = field.offset;
-    }
-
-    if (xOffset === -1 || yOffset === -1 || zOffset === -1) {
-        console.error('[PC2] Missing x/y/z fields in PointCloud2');
-        return { count: 0, newMin: 0, newMax: 1 };
-    }
-
-    const pointStep = message.point_step;
-    const numPoints = Math.min(message.width * message.height, PC2_MAX_POINTS);
-
-    // ── 최적화 base64 디코딩: 필요한 바이트만 디코딩 ──
-    // PC2_MAX_POINTS 캡으로 실제 사용하는 바이트는 numPoints × point_step 만큼이다.
-    // base64는 3바이트 → 4문자 단위이므로, ceil(needed/3)*4 문자만 잘라서 atob().
-    // 예) Ouster 131K pt: 7.6MB 전체 → 50K pt: 2.9MB = 디코딩 71% 절감.
-    const bytesNeeded  = numPoints * pointStep;
-    const charsNeeded  = Math.ceil(bytesNeeded / 3) * 4;  // 항상 4의 배수 → 유효한 base64
-    const b64Slice     = (charsNeeded < message.data.length)
-        ? message.data.substring(0, charsNeeded)
-        : message.data;
-    const binaryString = atob(b64Slice);
-    const len          = binaryString.length;
-    const data         = new Uint8Array(len);
-
-    // 4× 루프 언롤링: charCodeAt 배치 처리 (JIT 최적화 유도)
-    let _j = 0;
-    for (; _j + 3 < len; _j += 4) {
-        data[_j]     = binaryString.charCodeAt(_j);
-        data[_j + 1] = binaryString.charCodeAt(_j + 1);
-        data[_j + 2] = binaryString.charCodeAt(_j + 2);
-        data[_j + 3] = binaryString.charCodeAt(_j + 3);
-    }
-    for (; _j < len; _j++) data[_j] = binaryString.charCodeAt(_j);
-
-    const view = new DataView(data.buffer);
-
-    // ── Solid 색상 사전 파싱 ──
-    let solidR = 1, solidG = 1, solidB = 1;
-    if (colorMode === 'solid') {
-        const hex = solidColor.replace('#', '');
-        solidR = parseInt(hex.substring(0, 2), 16) / 255;
-        solidG = parseInt(hex.substring(2, 4), 16) / 255;
-        solidB = parseInt(hex.substring(4, 6), 16) / 255;
-    }
-
-    // ── Rainbow 범위: 이전 프레임 값으로 단일 패스 실현 (적응형) ──
-    const rangeMin  = (isFinite(prevMin) ? prevMin : 0);
-    const rangeMax  = (isFinite(prevMax) && prevMax > rangeMin) ? prevMax : (rangeMin + 1);
-    const rangeSpan = rangeMax - rangeMin;
-
-    let newMin = Infinity, newMax = -Infinity;
-    let count = 0;
-
-    // ── 단일 패스: XYZ + 색상 동시 처리 ──
-    for (let i = 0; i < numPoints; i++) {
-        const base = i * pointStep;
-
-        const x = view.getFloat32(base + xOffset, true);
-        const y = view.getFloat32(base + yOffset, true);
-        const z = view.getFloat32(base + zOffset, true);
-        if (isNaN(x) || isNaN(y) || isNaN(z)) continue;
-
-        const ptr3 = count * 3;
-        _pc2PosBuffer[ptr3]     = x;
-        _pc2PosBuffer[ptr3 + 1] = y;
-        _pc2PosBuffer[ptr3 + 2] = z;
-
-        if (colorMode === 'rainbow') {
-            // 색상 필드 값 읽기
-            let fv = (colorFieldOffset !== -1)
-                ? view.getFloat32(base + colorFieldOffset, true)
-                : z;
-            if (isNaN(fv)) fv = rangeMin;
-
-            // min/max 갱신 (다음 프레임 적응형 범위)
-            if (fv < newMin) newMin = fv;
-            if (fv > newMax) newMax = fv;
-
-            // ── HSV Rainbow 인라인 (s=1,v=1 특수화 → 객체/함수 생성 없음) ──
-            // t: 0.0(빨강) → 1.0(보라)
-            const t   = rangeSpan > 0 ? Math.min(1.0, Math.max(0.0, (fv - rangeMin) / rangeSpan)) : 0.5;
-            const hue = t * 0.75;                    // 빨강(0.0) → 보라(0.75)
-            const h6  = hue * 6;
-            const hi  = h6 | 0;                     // Math.floor 대체
-            const f   = h6 - hi;
-            let cr, cg, cb;
-            switch (hi % 6) {
-                case 0: cr = 1;     cg = f;     cb = 0;     break;
-                case 1: cr = 1 - f; cg = 1;     cb = 0;     break;
-                case 2: cr = 0;     cg = 1;     cb = f;     break;
-                case 3: cr = 0;     cg = 1 - f; cb = 1;     break;
-                case 4: cr = f;     cg = 0;     cb = 1;     break;
-                default: cr = 1;   cg = 0;     cb = 1 - f; break;
-            }
-            _pc2ColBuffer[ptr3]     = cr;
-            _pc2ColBuffer[ptr3 + 1] = cg;
-            _pc2ColBuffer[ptr3 + 2] = cb;
-
-        } else if (colorMode === 'rgb' && rgbOffset !== -1) {
-            const rgb = view.getUint32(base + rgbOffset, true);
-            _pc2ColBuffer[ptr3]     = ((rgb >> 16) & 0xFF) / 255;
-            _pc2ColBuffer[ptr3 + 1] = ((rgb >>  8) & 0xFF) / 255;
-            _pc2ColBuffer[ptr3 + 2] = ( rgb        & 0xFF) / 255;
-
-        } else {
-            // solid 또는 fallback
-            _pc2ColBuffer[ptr3]     = solidR;
-            _pc2ColBuffer[ptr3 + 1] = solidG;
-            _pc2ColBuffer[ptr3 + 2] = solidB;
-        }
-
-        count++;
-    }
-
-    return {
-        count,
-        newMin: isFinite(newMin) ? newMin : 0,
-        newMax: isFinite(newMax) ? newMax : 1,
-    };
-}
 
 // =============================================
 // Livox LiDAR CustomMsg 고성능 파싱
@@ -6747,8 +6609,8 @@ function updateViewerLayoutColumns() {
     const viewsPanel = document.getElementById('viewer-views-panel');
     const displayCollapsed = displayPanel && displayPanel.classList.contains('collapsed');
     const viewsCollapsed = viewsPanel && viewsPanel.classList.contains('collapsed');
-    const left = displayCollapsed ? '28px' : '260px';
-    const right = viewsCollapsed ? '28px' : '200px';
+    const left = displayCollapsed ? '40px' : '276px';
+    const right = viewsCollapsed ? '40px' : '276px';
     layout.style.gridTemplateColumns = `${left} 1fr ${right}`;
 }
 

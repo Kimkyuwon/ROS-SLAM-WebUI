@@ -41,17 +41,19 @@
         if (s.starting) return view('info', 'Starting…', 1, locked);
         if (s.saving) return view('info', 'Saving Map…', 2, locked);
         const canSave = s.kfCount > 0;
-        if (s.isRunning && s.stale) return view('warn', 'Running · 데이터 없음', 1, { start: false, stop: true, saveMap: false });
-        if (s.isRunning && s.imuHz === 0) return view('warn', 'Running · IMU 끊김', 1, { start: false, stop: true, saveMap: canSave });
-        if (s.isRunning && s.lidHz === 0) return view('warn', 'Running · LiDAR 끊김', 1, { start: false, stop: true, saveMap: canSave });
+        // 저장할 키프레임이 있으면 Save Map 단계. 데이터가 끊겨도(일시정지·종료) 누적 수가 있으면 저장은 연다.
+        const mapStep = canSave ? 2 : 1;
+        if (s.isRunning && s.stale) return view('warn', 'Running · 데이터 없음', mapStep, { start: false, stop: true, saveMap: canSave });
+        if (s.isRunning && s.imuHz === 0) return view('warn', 'Running · IMU 끊김', mapStep, { start: false, stop: true, saveMap: canSave });
+        if (s.isRunning && s.lidHz === 0) return view('warn', 'Running · LiDAR 끊김', mapStep, { start: false, stop: true, saveMap: canSave });
         if (s.isRunning && s.justSaved) {
             return view('info', 'Map Saved · SLAM 계속 실행 중', 3, { start: false, stop: true, saveMap: canSave });
         }
         if (s.isRunning) {
             const text = s.elapsed ? `Running · ${s.elapsed}` : 'Running';
-            return view('go', text, 1, { start: false, stop: true, saveMap: canSave });
+            return view('go', text, mapStep, { start: false, stop: true, saveMap: canSave });
         }
-        if (s.resultVisible) return view('idle', 'Ready · 저장된 지도 표시 중', 3, { start: true, stop: false, saveMap: false });
+        if (s.resultVisible) return view('idle', 'Ready · 저장된 지도 표시 중', 4, { start: true, stop: false, saveMap: false });
         return view('idle', 'Ready', 0, { start: true, stop: false, saveMap: false });
     }
 

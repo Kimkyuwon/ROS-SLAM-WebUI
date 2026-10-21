@@ -20,10 +20,8 @@
 }
 
 body {
-    font-family: "Inter", "Noto Sans KR", Arial, sans-serif;
-    background: radial-gradient(120% 120% at 30% 20%, rgba(74, 214, 255, 0.08), transparent),
-                radial-gradient(100% 100% at 80% 0%, rgba(111, 227, 180, 0.08), transparent),
-                var(--bg);
+    font-family: var(--font-sans), "Noto Sans KR", Arial, sans-serif;
+    background: var(--color-bg, #0B0E11);
     color: var(--text);
     padding: 28px;
 }
@@ -31,74 +29,6 @@ body {
 .page-shell {
     max-width: 1400px;
     margin: 0 auto 60px auto;
-}
-
-.topbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 16px 20px;
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    margin-bottom: 18px;
-}
-
-.brand {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-weight: 700;
-    letter-spacing: 0.3px;
-}
-
-.brand-dot {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    box-shadow: 0 0 16px rgba(74, 214, 255, 0.7);
-}
-
-.topbar-status {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-}
-
-.chip {
-    padding: 6px 12px;
-    border-radius: 999px;
-    background: rgba(74, 214, 255, 0.12);
-    color: var(--text);
-    font-size: 12px;
-    border: 1px solid rgba(74, 214, 255, 0.35);
-}
-
-.chip-soft {
-    background: rgba(255, 255, 255, 0.05);
-    border-color: rgba(255, 255, 255, 0.12);
-    color: var(--muted);
-}
-
-.chip-connected {
-    background: rgba(76, 175, 80, 0.15);
-    border-color: #4CAF50;
-    color: #4CAF50;
-}
-
-.chip-disconnected {
-    background: rgba(244, 67, 54, 0.15);
-    border-color: #F44336;
-    color: #F44336;
-}
-
-.chip-reconnecting {
-    background: rgba(255, 193, 7, 0.15);
-    border-color: #FFC107;
-    color: #FFC107;
 }
 
 .card {
@@ -591,8 +521,8 @@ h3 {
     padding: 10px 14px;
     margin: 0 0 14px 0;
     border-radius: 10px;
-    border: 1px solid rgba(124, 111, 255, 0.3);
-    background: rgba(124, 111, 255, 0.08);
+    border: 1px solid var(--color-line2);
+    background: var(--color-surface);
     color: var(--text);
     font-weight: 600;
     box-shadow: var(--shadow);
@@ -1169,8 +1099,9 @@ h3 {
 
 /* 미리보기 Plot 영역 */
 #filter-preview-plot {
-    height: 200px;
-    min-height: 200px;
+    width: 100%;
+    height: 240px;
+    min-height: 160px;
     border-bottom: 1px solid var(--border);
     background: rgba(0, 0, 0, 0.2);
     flex-shrink: 0;
@@ -2103,34 +2034,6 @@ h3 {
     margin-bottom: 4px;
 }
 
-/* 통합 Add 버튼 스타일 (3D Viewer Displays / Plot 토픽 패널 공통) */
-#viewer-add-display-btn,
-#plot-add-topics-btn {
-    background: linear-gradient(135deg, #1f3a56, #1b3046);
-    color: var(--text);
-    border: 1px solid var(--border);
-    padding: 7px 12px;
-    cursor: pointer;
-    border-radius: 8px;
-    font-size: 12px;
-    font-weight: 600;
-    transition: all 0.2s ease;
-    text-align: left;
-    width: 100%;
-}
-
-#viewer-add-display-btn:hover,
-#plot-add-topics-btn:hover {
-    border-color: rgba(74, 214, 255, 0.5);
-    box-shadow: 0 4px 16px rgba(74, 214, 255, 0.18);
-}
-
-#viewer-add-display-btn:disabled,
-#plot-add-topics-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-}
-
 /* ======================================
    Add Display Modal (RViz 스타일)
    ====================================== */
@@ -2478,17 +2381,6 @@ h3 {
     background: #1a7abf;
 }
 
-/* Convert 버튼 — bag player 변환 */
-#convert-bag-btn {
-    background: linear-gradient(135deg, #1a5276, #154360);
-    border-color: rgba(74, 180, 255, 0.4);
-    color: #7ec8e3;
-}
-#convert-bag-btn:hover {
-    border-color: rgba(74, 180, 255, 0.7);
-    box-shadow: 0 6px 20px rgba(74, 180, 255, 0.25);
-    color: #aedff7;
-}
 
 @keyframes spin {
     to { transform: rotate(360deg); }
@@ -2731,7 +2623,7 @@ h3 {
 
 .height-clip-value {
     color: #aaa;
-    font-family: var(--mono-font, 'JetBrains Mono', monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
     line-height: 1;
     text-align: center;
@@ -3516,7 +3408,7 @@ h3 {
 .cfg-param-input:focus { border-color: #7ecff4; background: #1a2240; }
 .cfg-param-input.cfg-input-wide {
     width: 240px;
-    text-align: left;
+    text-align: right;
     font-family: 'Consolas', 'Courier New', monospace;
     font-size: 12px;
 }
@@ -3679,10 +3571,7 @@ input[type="text"].mono, .log-box,
     font-weight: 700 !important;
     letter-spacing: 0.12em !important;
     text-transform: uppercase !important;
-    background: linear-gradient(135deg, var(--accent), var(--accent-2)) !important;
-    -webkit-background-clip: text !important;
-    -webkit-text-fill-color: transparent !important;
-    background-clip: text !important;
+    color: var(--color-ink) !important;
 }
 
 /* ── 섹션 h2 중앙 정렬 ── */
@@ -3700,158 +3589,84 @@ input[type="text"].mono, .log-box,
 
 /* ── 탭 버튼 active: 보라 그라디언트 ── */
 .tab-button.active {
-    background: linear-gradient(135deg, rgba(124,111,255,0.18), rgba(29,233,182,0.12)) !important;
-    border-color: rgba(124,111,255,0.65) !important;
-    box-shadow: 0 6px 20px rgba(124,111,255,0.22) !important;
+    background: linear-gradient(135deg, rgba(108, 182, 255,0.18), rgba(63, 208, 122,0.12)) !important;
+    border-color: rgba(108, 182, 255,0.65) !important;
+    box-shadow: 0 6px 20px rgba(108, 182, 255,0.22) !important;
     color: var(--accent) !important;
 }
 .tab-button:hover {
-    border-color: rgba(124,111,255,0.45) !important;
+    border-color: rgba(108, 182, 255,0.45) !important;
 }
 
 /* ── 서브탭 버튼 active ── */
 .subtab-button.active {
-    background: linear-gradient(135deg, rgba(124,111,255,0.22), rgba(29,233,182,0.1)) !important;
-    border-color: rgba(124,111,255,0.7) !important;
+    background: linear-gradient(135deg, rgba(108, 182, 255,0.22), rgba(63, 208, 122,0.1)) !important;
+    border-color: rgba(108, 182, 255,0.7) !important;
     color: var(--accent) !important;
-    box-shadow: 0 3px 12px rgba(124,111,255,0.2) !important;
+    box-shadow: 0 3px 12px rgba(108, 182, 255,0.2) !important;
 }
 
 /* ╔══════════════════════════════════════════════════════════════╗
    ║  통일 버튼 시스템 — 3 Category (Default / Primary / Destructive) ║
    ╚══════════════════════════════════════════════════════════════╝ */
 
-/* ── Category A: Default (대부분의 버튼) ── */
-.form-group button,
-.bag-control-buttons button,
-.player-actions button,
-.modal-footer button,
-.primary-button,
-#viewer-add-display-btn,
-#plot-add-topics-btn,
-button[onclick*="selectTopics"],
-button[onclick*="selectRecorderTopics"],
-button[onclick*="loadPlayerPath"],
-button[onclick*="enterBagName"],
-button[onclick*="openAddDisplayModal"] {
-    background: #16192c !important;
-    border: 1px solid #2e3358 !important;
-    color: #c8cde8 !important;
-    border-radius: 8px !important;
-    font-weight: 600 !important;
+/* ── 옛 마크업 버튼(.ui-btn이 아닌 것): 목업 보조 버튼 모양 ── */
+.form-group button:not(.ui-btn):not(.ui-icon-btn),
+.bag-control-buttons button:not(.ui-btn):not(.ui-icon-btn),
+.player-actions button:not(.ui-btn):not(.ui-icon-btn),
+.modal-footer button:not(.ui-btn):not(.ui-icon-btn),
+.primary-button:not(.ui-btn):not(.ui-icon-btn),
+button[onclick*="selectTopics"]:not(.ui-btn):not(.ui-icon-btn),
+button[onclick*="selectRecorderTopics"]:not(.ui-btn):not(.ui-icon-btn),
+button[onclick*="loadPlayerPath"]:not(.ui-btn):not(.ui-icon-btn),
+button[onclick*="enterBagName"]:not(.ui-btn):not(.ui-icon-btn),
+button[onclick*="openAddDisplayModal"]:not(.ui-btn):not(.ui-icon-btn) {
+    background: transparent !important;
+    border: 1px solid var(--color-line2) !important;
+    color: var(--color-ink) !important;
+    border-radius: var(--radius-sm) !important;
+    font-weight: 500 !important;
     box-shadow: none !important;
-    transition: all 0.18s ease !important;
+    transition: background-color var(--dur-fast) !important;
 }
-.form-group button:hover,
-.bag-control-buttons button:hover,
-.player-actions button:hover,
-.modal-footer button:hover,
-.primary-button:hover,
-#viewer-add-display-btn:hover,
-#plot-add-topics-btn:hover,
-button[onclick*="selectTopics"]:hover,
-button[onclick*="selectRecorderTopics"]:hover,
-button[onclick*="loadPlayerPath"]:hover,
-button[onclick*="enterBagName"]:hover,
-button[onclick*="openAddDisplayModal"]:hover {
-    background: #1b1f38 !important;
-    border-color: rgba(124,111,255,0.5) !important;
-    color: var(--text) !important;
-    box-shadow: 0 0 0 1px rgba(124,111,255,0.25), 0 4px 16px rgba(124,111,255,0.18) !important;
-}
-
-/* ── Category B: Primary (실행 버튼: Start / Play / Record / Run) ── */
-#bag-play-button,
-#play-button,
-#recorder-record-button {
-    background: rgba(124,111,255,0.15) !important;
-    border: 1px solid rgba(124,111,255,0.5) !important;
-    color: #b0a8ff !important;
-    border-radius: 8px !important;
-    font-weight: 600 !important;
+.form-group button:not(.ui-btn):not(.ui-icon-btn):hover,
+.bag-control-buttons button:not(.ui-btn):not(.ui-icon-btn):hover,
+.player-actions button:not(.ui-btn):not(.ui-icon-btn):hover,
+.modal-footer button:not(.ui-btn):not(.ui-icon-btn):hover,
+.primary-button:not(.ui-btn):not(.ui-icon-btn):hover,
+button[onclick*="selectTopics"]:not(.ui-btn):not(.ui-icon-btn):hover,
+button[onclick*="selectRecorderTopics"]:not(.ui-btn):not(.ui-icon-btn):hover,
+button[onclick*="loadPlayerPath"]:not(.ui-btn):not(.ui-icon-btn):hover,
+button[onclick*="enterBagName"]:not(.ui-btn):not(.ui-icon-btn):hover,
+button[onclick*="openAddDisplayModal"]:not(.ui-btn):not(.ui-icon-btn):hover {
+    background: var(--color-raised) !important;
+    border-color: var(--color-line2) !important;
+    color: var(--color-ink) !important;
     box-shadow: none !important;
-    transition: all 0.18s ease !important;
-}
-#bag-play-button:hover,
-#play-button:hover,
-#recorder-record-button:hover {
-    background: rgba(124,111,255,0.28) !important;
-    border-color: rgba(124,111,255,0.75) !important;
-    color: #d4cfff !important;
-    box-shadow: 0 0 0 1px rgba(124,111,255,0.35), 0 4px 18px rgba(124,111,255,0.32) !important;
-}
-
-/* ── Category C: Destructive (중지 버튼: Stop / Pause) ── */
-#bag-stop-button,
-#bag-pause-button,
-#pause-button {
-    background: rgba(240,98,146,0.1) !important;
-    border: 1px solid rgba(240,98,146,0.4) !important;
-    color: #f48db0 !important;
-    border-radius: 8px !important;
-    font-weight: 600 !important;
-    box-shadow: none !important;
-    transition: all 0.18s ease !important;
-}
-#bag-stop-button:hover,
-#bag-pause-button:hover,
-#pause-button:hover {
-    background: rgba(240,98,146,0.2) !important;
-    border-color: rgba(240,98,146,0.7) !important;
-    color: #f8a8c4 !important;
-    box-shadow: 0 0 0 1px rgba(240,98,146,0.3), 0 4px 16px rgba(240,98,146,0.25) !important;
 }
 :root {
-    --bg:            #0b0d18;
-    --panel:         #111426;
-    --panel-strong:  #171b30;
-    --border:        #252a47;
-    --text:          #dde1f5;
-    --muted:         #7b82ab;
-    --accent:        #7c6fff;
-    --accent-2:      #1de9b6;
-    --danger:        #f06292;
-    --warning:       #ffb74d;
-    --shadow:        0 8px 32px rgba(0,0,0,0.55);
-    --radius:        10px;
-    --bg-base:       #0b0d18;
-    --bg-card:       #111426;
-    --bg-section:    #171b30;
-    --bg-input:      #1e2238;
-    --bg-hover:      #252a47;
-    --border-light:  #333966;
-    --accent-dim:    rgba(124,111,255,0.13);
-    --teal:          #1de9b6;
-    --teal-dim:      rgba(29,233,182,0.11);
-    --text-primary:  #dde1f5;
-    --text-secondary:#7b82ab;
-    --text-muted:    #454d70;
-    --success:       #1de9b6;
-    --font-mono:     'Courier New', 'Consolas', monospace;
+    --shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
 }
 
 body {
-    background:
-        radial-gradient(120% 120% at 30% 20%, rgba(124,111,255,0.07), transparent),
-        radial-gradient(100% 100% at 80% 0%,  rgba(29,233,182,0.06), transparent),
-        var(--bg) !important;
+    background: var(--color-bg) !important;
     color: var(--text) !important;
 }
 
 .brand-dot {
-    background: linear-gradient(135deg, var(--accent), var(--teal)) !important;
-    box-shadow: 0 0 16px rgba(124,111,255,0.65) !important;
+    background: var(--color-info) !important;
+    box-shadow: none !important;
 }
 
 .chip {
-    background: rgba(124,111,255,0.12) !important;
-    border-color: rgba(124,111,255,0.35) !important;
+    background: rgba(108, 182, 255,0.12) !important;
+    border-color: rgba(108, 182, 255,0.35) !important;
 }
 
 .tab-button.active {
     color: var(--accent) !important;
     border-bottom-color: var(--accent) !important;
-    background: rgba(124,111,255,0.08) !important;
+    background: rgba(108, 182, 255,0.08) !important;
 }
 
 .subtab-button.active {
@@ -3876,7 +3691,7 @@ body {
 .cfg-param-row input[type="number"],
 .cfg-param-row input:not([type="checkbox"]):not([type="radio"]) {
     font-family: var(--font-mono) !important;
-    color: var(--teal) !important;
+    color: var(--color-ink) !important;
     background: transparent !important;
     border-color: transparent !important;
 }
@@ -3895,16 +3710,16 @@ body {
 
 .log-box, .output-log,
 [id$="-log"], [id$="-output"]:not(#slam-output) {
-    background: #06080e !important;
+    background: var(--color-bg) !important;
     border-color: var(--border) !important;
-    color: var(--teal) !important;
+    color: var(--color-mute) !important;
     font-family: var(--font-mono) !important;
     font-size: 12px !important;
 }
 
 @keyframes pulse {
-    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(29,233,182,0.4); }
-    50%       { opacity: 0.7; box-shadow: 0 0 0 4px rgba(29,233,182,0); }
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63, 208, 122,0.4); }
+    50%       { opacity: 0.7; box-shadow: 0 0 0 4px rgba(63, 208, 122,0); }
 }
 .status-dot {
     border-radius: 50% !important;
@@ -3917,7 +3732,7 @@ body {
 
 #3d-viewer-container, #loc-viewer-canvas-container,
 #slam-result-canvas-container, .viewer-canvas-area {
-    background: #06080e !important;
+    background: var(--color-viewer) !important;
     border-color: var(--border) !important;
 }
 
@@ -3930,68 +3745,68 @@ body {
    ║  Analytics Dashboard — 보라/인디고 accent 기반 재스타일         ║
    ╚══════════════════════════════════════════════════════════════╝ */
 .analytics-dashboard-header {
-    border-bottom: 1px solid rgba(124,111,255,0.2) !important;
+    border-bottom: 1px solid rgba(108, 182, 255,0.2) !important;
 }
 .analytics-dashboard-title {
-    color: #c0b8ff !important;
+    color: var(--color-mute) !important;
     font-size: 13px !important;
     letter-spacing: 0.06em !important;
     text-transform: uppercase !important;
 }
 .analytics-live-badge {
     background: transparent !important;
-    border: 1px solid rgba(29,233,182,0.6) !important;
-    color: #1de9b6 !important;
+    border: 1px solid rgba(63, 208, 122,0.6) !important;
+    color: var(--color-go) !important;
     animation: analytics-pulse 2s infinite !important;
 }
 
 .analytics-card {
-    background: #0e1122 !important;
-    border: 1px solid rgba(124,111,255,0.2) !important;
-    border-radius: 10px !important;
+    background: var(--color-surface) !important;
+    border: 1px solid rgba(108, 182, 255,0.2) !important;
+    border-radius: 4px !important;
     backdrop-filter: blur(4px) !important;
 }
 .analytics-card-title {
-    color: rgba(192,184,255,0.8) !important;
+    color: rgba(139, 149, 161,0.8) !important;
     font-size: 10px !important;
     letter-spacing: 0.1em !important;
 }
 
 .analytics-hz-item {
-    background: rgba(124,111,255,0.07) !important;
-    border: 1px solid rgba(124,111,255,0.15) !important;
+    background: rgba(108, 182, 255,0.07) !important;
+    border: 1px solid rgba(108, 182, 255,0.15) !important;
 }
 .analytics-hz-value.analytics-hz-ok {
-    color: #1de9b6 !important;
+    color: var(--color-go) !important;
 }
 .analytics-hz-value.analytics-hz-warn {
-    color: #ffb74d !important;
+    color: var(--color-warn) !important;
 }
 .analytics-hz-value.analytics-hz-err {
-    color: #f06292 !important;
+    color: var(--color-stop) !important;
 }
 
 .analytics-traj-item {
-    background: rgba(124,111,255,0.06) !important;
-    border: 1px solid rgba(124,111,255,0.12) !important;
+    background: rgba(108, 182, 255,0.06) !important;
+    border: 1px solid rgba(108, 182, 255,0.12) !important;
 }
 .analytics-traj-value {
-    color: #ffd166 !important;
+    color: var(--color-ink) !important;
 }
 .analytics-traj-derived {
-    color: #b0a8ff !important;
+    color: var(--color-info) !important;
 }
 
 .analytics-cpu-percent {
-    color: #ffb74d !important;
+    color: var(--color-warn) !important;
 }
 .analytics-cpu-bar-bg {
     background: rgba(255,255,255,0.05) !important;
 }
 
 .analytics-cumul-table th {
-    color: rgba(192,184,255,0.5) !important;
-    border-bottom-color: rgba(124,111,255,0.2) !important;
+    color: rgba(139, 149, 161,0.5) !important;
+    border-bottom-color: rgba(108, 182, 255,0.2) !important;
 }
 
 /* ── 토글 스위치 ── */
@@ -4022,8 +3837,8 @@ body {
     display: block;
     width: 36px;
     height: 20px;
-    background: #16192c;
-    border: 1px solid #2e3358;
+    background: var(--color-line2);
+    border: 1px solid var(--color-line2);
     border-radius: 10px;
     position: relative;
     transition: background 0.2s, border-color 0.2s;
@@ -4035,17 +3850,17 @@ body {
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: #454d70;
+    background: var(--color-ink);
     transition: left 0.2s, background 0.2s;
 }
 .toggle-switch input:checked ~ .toggle-track {
-    background: rgba(124,111,255,0.2);
-    border-color: rgba(124,111,255,0.6);
+    background: rgba(108, 182, 255,0.2);
+    border-color: rgba(108, 182, 255,0.6);
 }
 .toggle-switch input:checked ~ .toggle-track .toggle-thumb {
     left: 19px;
-    background: #7c6fff;
-    box-shadow: 0 0 6px rgba(124,111,255,0.5);
+    background: var(--color-info);
+    box-shadow: 0 0 6px rgba(108, 182, 255,0.5);
 }
 
 /* ── 모달 공통 (flex center) ── */
@@ -4053,7 +3868,7 @@ body {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(11,13,24,0.82) !important;
+    background: rgba(0, 0, 0, 0.6) !important;
     z-index: 1000;
     align-items: center;
     justify-content: center;
@@ -4071,13 +3886,13 @@ body {
 .dir-entry {
     padding: 8px 14px !important;
     font-size: 13px !important;
-    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    font-family: var(--font-mono) !important;
     cursor: pointer !important;
     border-radius: 5px !important;
     transition: background 0.12s !important;
     color: var(--text) !important;
 }
-.dir-entry:hover { background: rgba(124,111,255,0.1) !important; color: #b0a8ff !important; }
+.dir-entry:hover { background: rgba(108, 182, 255,0.1) !important; color: var(--color-info) !important; }
 .dir-entry.file-item { color: var(--muted) !important; }
 
 /* 동적 생성 topic-item (토픽 선택 모달) */
@@ -4087,14 +3902,14 @@ body {
     gap: 8px !important;
     padding: 6px 10px !important;
     font-size: 12px !important;
-    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    font-family: var(--font-mono) !important;
     color: var(--muted) !important;
     cursor: pointer !important;
     border-radius: 4px !important;
     transition: background 0.1s !important;
 }
-.topic-item:hover { background: rgba(124,111,255,0.08) !important; color: var(--text) !important; }
-.topic-item input[type="checkbox"] { accent-color: #7c6fff !important; width: 14px !important; height: 14px !important; }
+.topic-item:hover { background: rgba(108, 182, 255,0.08) !important; color: var(--text) !important; }
+.topic-item input[type="checkbox"] { accent-color: var(--color-info) !important; width: 14px !important; height: 14px !important; }
 
 /* 동적 생성 add-display-type-row (3D Viewer Add Display) */
 .add-display-type-row {
@@ -4107,59 +3922,38 @@ body {
     transition: background 0.12s !important;
     font-size: 13px !important;
 }
-.add-display-type-row:hover { background: rgba(124,111,255,0.1) !important; }
+.add-display-type-row:hover { background: rgba(108, 182, 255,0.1) !important; }
 .add-display-type-row.selected {
-    background: rgba(124,111,255,0.18) !important;
-    border-left: 3px solid #7c6fff !important;
+    background: rgba(108, 182, 255,0.18) !important;
+    border-left: 3px solid var(--color-info) !important;
 }
 .add-display-type-row.active {
-    background: rgba(124,111,255,0.18) !important;
-    border-left: 3px solid #7c6fff !important;
+    background: rgba(108, 182, 255,0.18) !important;
+    border-left: 3px solid var(--color-info) !important;
 }
 .add-display-icon { font-size: 16px !important; width: 20px !important; text-align: center !important; }
 .add-display-name { flex: 1 !important; color: var(--text) !important; font-weight: 500 !important; }
-.add-display-topic { font-size: 11px !important; font-family: monospace !important; color: var(--muted) !important; }
+.add-display-topic { font-size: 11px !important; font-family: var(--font-mono) !important; color: var(--muted) !important; }
 
 /* selected-topics-display 스타일 */
 .topics-display-styled {
-    background: #0e1020 !important;
-    border: 1px solid rgba(124,111,255,0.25) !important;
+    background: var(--color-bg) !important;
+    border: 1px solid rgba(108, 182, 255,0.25) !important;
     border-radius: 6px !important;
     padding: 7px 12px !important;
     font-size: 12px !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    color: #1de9b6 !important;
+    font-family: var(--font-mono) !important;
+    color: var(--color-go) !important;
     min-height: 30px !important;
     line-height: 1.6 !important;
-}
-
-/* Plot Display Toolbar 버튼 */
-.plot-display-toolbar button,
-button[onclick*="expandAllPlotTree"],
-button[onclick*="collapseAllPlotTree"] {
-    background: #16192c !important;
-    border: 1px solid #2e3358 !important;
-    color: #8b90b8 !important;
-    border-radius: 5px !important;
-    font-size: 11px !important;
-    padding: 3px 10px !important;
-    font-family: 'Space Grotesk', sans-serif !important;
-    letter-spacing: 0.03em !important;
-    transition: all 0.15s !important;
-}
-.plot-display-toolbar button:hover,
-button[onclick*="expandAllPlotTree"]:hover,
-button[onclick*="collapseAllPlotTree"]:hover {
-    border-color: rgba(124,111,255,0.5) !important;
-    color: #b0a8ff !important;
 }
 
 /* Collapse/Expand 화살표 버튼 */
 .views-collapse-btn {
     background: transparent !important;
-    border: 1px solid rgba(124,111,255,0.2) !important;
+    border: 1px solid rgba(108, 182, 255,0.2) !important;
     border-radius: 4px !important;
-    color: #6c72a0 !important;
+    color: var(--color-dim) !important;
     width: 20px !important;
     height: 20px !important;
     padding: 0 !important;
@@ -4172,18 +3966,18 @@ button[onclick*="collapseAllPlotTree"]:hover {
     cursor: pointer !important;
 }
 .views-collapse-btn:hover {
-    background: rgba(124,111,255,0.12) !important;
-    border-color: rgba(124,111,255,0.5) !important;
-    color: #b0a8ff !important;
+    background: rgba(108, 182, 255,0.12) !important;
+    border-color: rgba(108, 182, 255,0.5) !important;
+    color: var(--color-info) !important;
 }
 
 /* × (닫기) 버튼 스타일 */
 .modal-header .close,
 span.close {
     background: transparent !important;
-    border: 1px solid rgba(240,98,146,0.2) !important;
+    border: 1px solid rgba(240, 97, 109,0.2) !important;
     border-radius: 4px !important;
-    color: #8b90b8 !important;
+    color: var(--color-mute) !important;
     width: 24px !important;
     height: 24px !important;
     display: inline-flex !important;
@@ -4196,9 +3990,9 @@ span.close {
 }
 .modal-header .close:hover,
 span.close:hover {
-    background: rgba(240,98,146,0.15) !important;
-    border-color: rgba(240,98,146,0.5) !important;
-    color: #f06292 !important;
+    background: rgba(240, 97, 109,0.15) !important;
+    border-color: rgba(240, 97, 109,0.5) !important;
+    color: var(--color-stop) !important;
 }
 
 /* ── status label 좌측 간격 ── */

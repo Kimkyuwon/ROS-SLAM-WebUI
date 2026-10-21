@@ -105,7 +105,7 @@ const heliprState = {
 };
 
 // bag-format select 공통 라벨 (Bag Recorder, File Player 데이터셋 변환 공통 사용)
-const BAG_FORMAT_LABELS = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
+const BAG_FORMAT_LABELS = { ros1: 'ROS1 (.bag)', ros2_db3: 'ROS2 (db3)', ros2_mcap: 'ROS2 (mcap)' };
 const LOC_RESTORE_HOLDOFF_MS = 3000;  // DDS 퍼블리셔 수 반영 지연 동안 재출현 방지 (실측 필요)
 
 // Cached DOM elements
@@ -535,11 +535,20 @@ function _showOptStatus(message, running) {
     if (window.uiShell) uiShell.refresh();
 }
 
+function setOptRunLabel(text) {
+    const runBtn = domCache.get('slam-opt-run-btn');
+    if (!runBtn) return;
+    if (window.uiKit) uiKit.setBtnLabel(runBtn, text);
+    else runBtn.textContent = text;
+    const icon = runBtn.querySelector('.ui-icon use');
+    if (icon) icon.setAttribute('href', (text === 'Exit' || text === 'Exiting...') ? '#icon-x' : '#icon-play');
+}
+
 function _resetOptBtn() {
     _optComplete = false;
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = false;
-    runBtn.textContent = 'Multi Session Optimization';
+    setOptRunLabel('Multi Session Optimization');
     if (window.uiShell) uiShell.refresh();
 }
 
@@ -557,7 +566,7 @@ function _showOptSuccess() {
     _optComplete = true;
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = false;
-    runBtn.textContent = 'Exit';
+    setOptRunLabel('Exit');
     if (window.uiShell) uiShell.refresh();
 
     slamResultViewer.show().finally(() => {
@@ -660,7 +669,7 @@ async function cancelOptimization() {
 async function exitOptimization() {
     const runBtn = domCache.get('slam-opt-run-btn');
     runBtn.disabled = true;
-    runBtn.textContent = 'Exiting...';
+    setOptRunLabel('Exiting...');
 
     await apiCall('/api/slam/cancel_optimization', {});
 
@@ -699,7 +708,7 @@ async function updateSlamState() {
         if (!_optRunning && !_optViewerDismissed && state.status === 'Optimization complete!') {
             _optComplete = true;
             const runBtn = domCache.get('slam-opt-run-btn');
-            if (runBtn) runBtn.textContent = 'Exit';
+            if (runBtn) setOptRunLabel('Exit');
             const viewerEl = document.getElementById('slam-result-viewer');
             if (viewerEl && viewerEl.style.display === 'none') {
                 slamResultViewer.show();
@@ -799,7 +808,10 @@ function applyBagPlayerInfo(path, result, opts = {}) {
     const ros1Badge = domCache.get('bag-ros1-badge');
     const ros2Badge = domCache.get('bag-ros2-badge');
     if (ros1Badge) ros1Badge.style.display = isRos1 ? 'inline' : 'none';
-    if (ros2Badge) ros2Badge.style.display = !isRos1 ? 'inline' : 'none';
+    if (ros2Badge) {
+        ros2Badge.style.display = !isRos1 ? 'inline' : 'none';
+        ros2Badge.textContent = BAG_FORMAT_LABELS[bagPlayerState.bagFormat] || 'ROS2';
+    }
     const convertControls = domCache.get('bag-convert-controls');
     if (convertControls) convertControls.style.display = path ? '' : 'none';
     updatePlayerFormatSelectDefault();
@@ -808,14 +820,15 @@ function applyBagPlayerInfo(path, result, opts = {}) {
 
     if (resetSlider) {
         updatePlaybackRate(document.getElementById('bag-playback-rate')?.value ?? 10);
-        updateBagTimeLabel(0, bagPlayerState.bagDuration);
     }
+    // 재생 중이면 바로 뒤 updateBagState 폴링이 현재 위치로 덮는다
+    updateBagTimeLabel(0, bagPlayerState.bagDuration);
     bagPlayerState.topicDetails = result.topic_details || [];
     const durEl = document.getElementById('bag-meta-duration');
     const topicEl = document.getElementById('bag-meta-topics');
     if (durEl) {
         const sec = Math.max(0, Math.round(bagPlayerState.bagDuration || 0));
-        durEl.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+        durEl.textContent = `길이 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
     }
     if (topicEl) topicEl.textContent = `${bagPlayerState.availableTopics.length} topics`;
     updateSelectedTopicsDisplay();
@@ -888,7 +901,10 @@ function formatTime(seconds) {
 
 function updateBagTimeLabel(current, total) {
     const label = domCache.get('bag-time-label');
-    label.textContent = `${formatTime(current)} / ${formatTime(total)}`;
+    const totalEl = document.createElement('span');
+    totalEl.className = 'ui-playbar-total';
+    totalEl.textContent = `/ ${formatTime(total)}`;
+    label.replaceChildren(`${formatTime(current)} `, totalEl);
 }
 
 async function selectTopics() {
@@ -993,6 +1009,26 @@ function updateSelectedTopicsDisplay() {
     }
 }
 
+function bagTopicHzShown(name, avgText) {
+    const playing = !!(bagPlayerState.playing && !bagPlayerState.paused);
+    if (!playing) return { text: avgText, idle: true };
+    const live = bagPlayerState.topicHz && bagPlayerState.topicHz[name];
+    const hz = Number(live);
+    if (!Number.isFinite(hz)) return { text: '–', idle: false };
+    const text = hz < 0.1 ? '<0.1' : hz.toFixed(hz >= 20 ? 0 : 1);
+    return { text, idle: false };
+}
+
+function refreshBagTopicHz() {
+    document.querySelectorAll('#bag-topic-table tbody tr').forEach((tr) => {
+        const td = tr.querySelector('[data-col="hz"]');
+        if (!td) return;
+        const shown = bagTopicHzShown(tr.dataset.topic, td.dataset.avg || '–');
+        td.textContent = shown.text;
+        td.classList.toggle('ui-hz-idle', shown.idle);
+    });
+}
+
 function renderBagTopicTable() {
     const tbody = document.querySelector('#bag-topic-table tbody');
     if (!tbody) return;
@@ -1020,21 +1056,43 @@ function renderBagTopicTable() {
             updateSelectedTopicsDisplay();
             renderBagTopicTableMeta();
         };
+        const hz = count !== null && duration > 0 ? count / duration : null;
+        let avgText = '–';
+        if (hz !== null) avgText = hz < 0.1 ? '<0.1' : hz.toFixed(hz >= 20 ? 0 : 1);
+        const shown = bagTopicHzShown(name, avgText);
         const cells = [
-            name + (publishable ? '' : ' (not publishable)'),
+            name,
             type,
-            count !== null && duration > 0 ? (count / duration).toFixed(1) : '–',
+            shown.text,
             count !== null ? count.toLocaleString() : '–',
         ];
+        const cellClass = ['ui-cell-topic', 'ui-cell-type', 'ui-num', 'ui-num ui-cell-type'];
         const tdBox = document.createElement('td');
         tdBox.appendChild(box);
         tr.appendChild(tdBox);
+        tr.dataset.topic = name;
         cells.forEach((text, i) => {
             const td = document.createElement('td');
             td.textContent = text;
-            if (i >= 2) td.className = 'ui-num';
+            td.className = cellClass[i];
+            if (i === 2) {
+                td.dataset.col = 'hz';
+                td.dataset.avg = avgText;
+                if (shown.idle) td.classList.add('ui-hz-idle');
+            }
             tr.appendChild(td);
         });
+        if (!publishable) {
+            const note = document.createElement('span');
+            note.className = 'ui-cell-note';
+            note.textContent = '(not publishable)';
+            tr.children[1].appendChild(note);
+        }
+        tr.onclick = (e) => {
+            if (e.target === box || box.disabled) return;
+            box.checked = !box.checked;
+            box.onchange();
+        };
         if (!publishable) tr.dataset.disabled = 'true';
         return tr;
     }));
@@ -1052,6 +1110,8 @@ function renderBagTopicTableMeta() {
     const hint = document.getElementById('bag-topic-table-hint');
     const play = domCache.get('bag-play-button');
     if (hint) hint.hidden = !play || play.textContent.trim() !== 'Stop';
+    const ros1Hint = document.getElementById('bag-topic-table-ros1-hint');
+    if (ros1Hint) ros1Hint.hidden = !(bagPlayerState.bagType === 'ros1' && bagPlayerState.availableTopics.length);
 }
 
 function setAllBagTopics(checked) {
@@ -1181,6 +1241,7 @@ async function updateBagState() {
     if (state?.path && state.duration > 0 && bagPlayerState.bagDuration <= 0) {
         bagPlayerState.bagDuration = state.duration;
     }
+    bagPlayerState.topicHz = (state && state.topic_hz) || {};
     const isRos1 = bagPlayerState.bagType === 'ros1'
         || !!(state?.path && state.path.endsWith('.bag'));
     if (isRos1) bagPlayerState.bagType = 'ros1';
@@ -1190,6 +1251,9 @@ async function updateBagState() {
         const ros1State = await apiCall('/api/bag/ros1_play_status');
         if (ros1State) {
             const { status, elapsed_sec, total_sec } = ros1State;
+            bagPlayerState.playing = status === 'playing';
+            bagPlayerState.paused = status === 'paused';
+            refreshBagTopicHz();
 
             // 버튼 상태 업데이트 (슬라이더 리셋 전에 먼저 처리)
             const playButton = domCache.get('bag-play-button');
@@ -1260,6 +1324,9 @@ async function updateBagState() {
 
     // ROS2 bag: 기존 폴링 유지
     if (state) {
+        bagPlayerState.playing = !!(state.playing && !state.paused);
+        bagPlayerState.paused = !!state.paused;
+        refreshBagTopicHz();
         // Update play button state (슬라이더 리셋 전에 먼저 처리)
         const playButton = domCache.get('bag-play-button');
         if (state.playing) {
@@ -1325,7 +1392,7 @@ function updatePlaybackRate(sliderValue) {
     bagPlayerState.playbackRate = rate;
     const label = domCache.get('playback-rate-label');
     if (label) {
-        label.textContent = `${rate.toFixed(1)}x`;
+        label.textContent = `${rate.toFixed(1)}×`;
     }
 
     // 재생 중(Play → Stop 버튼) 또는 일시정지 중이면 즉시 배속 변경 API 호출
@@ -1704,50 +1771,6 @@ async function onKittiDriveChange(driveIdx) {
         const errMsg = result ? (result.message || result.error || 'Unknown') : 'No response';
         domCache.get('player-path-label').textContent = 'Load failed';
         console.error('[KITTI] Drive auto-load failed:', errMsg);
-    }
-}
-
-/**
- * KITTI drive 디렉토리를 File Player에 직접 로드한다 (변환 없이 파일에서 직접 재생).
- * drive의 data_path를 load_data API에 전달 → 백엔드가 timestamps를 읽어 data_stamp 구축.
- */
-async function loadKittiDrive() {
-    const sel = domCache.get('kitti-drive-select');
-    const driveIdx = sel.value;
-    if (driveIdx === '' || driveIdx === null) {
-        alert('Please select a drive first.');
-        return;
-    }
-    if (!kittiState.baseDir) {
-        alert('Please load a KITTI directory first.');
-        return;
-    }
-
-    const drive = kittiState.drives[parseInt(driveIdx)];
-    if (!drive) {
-        alert('Invalid drive selection.');
-        return;
-    }
-
-    const btn = domCache.get('kitti-convert-btn');
-    btn.disabled = true;
-    btn.textContent = 'Loading…';
-
-    domCache.get('player-path-label').textContent = 'Loading...';
-
-    const result = await apiCall('/api/player/load_data', { path: drive.data_path });
-
-    btn.disabled = false;
-    btn.textContent = 'Load';
-
-    if (result && result.success) {
-        applyPlayerLoadDataViewerSync(result);
-        domCache.get('player-path-label').textContent = drive.data_path;
-        console.log('[KITTI] Drive loaded:', drive.data_path);
-    } else {
-        const errMsg = result ? (result.message || result.error || 'Unknown error') : 'No response';
-        domCache.get('player-path-label').textContent = 'Load failed';
-        alert('Failed to load KITTI drive: ' + errMsg);
     }
 }
 
@@ -2753,14 +2776,13 @@ async function recordBag() {
     });
     if (result.success) {
         const button = domCache.get('recorder-record-button');
-        uiKit.setBtnLabel(button, result.recording ? 'Stop' : 'Record');
+        setRecorderButtonState(button, result.recording);
         console.log('Recording:', result.recording ? 'started' : 'stopped');
 
         // 녹화 중 모드 배지 표시
         const badge = domCache.get('recorder-mode-badge');
         badge.style.display = result.recording ? 'inline' : 'none';
-        const modeLabels = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
-        badge.textContent = modeLabels[result.mode] || 'ROS2 mcap';
+        badge.textContent = BAG_FORMAT_LABELS[result.mode] || BAG_FORMAT_LABELS.ros2_mcap;
 
         if (result.recording) {
             const displayPath = format === 'ros1' ? bagRecorderState.bagName + '.bag' : bagRecorderState.bagName;
@@ -2773,19 +2795,23 @@ async function recordBag() {
     }
 }
 
+function setRecorderButtonState(button, recording) {
+    uiKit.setBtnLabel(button, recording ? '녹화 멈추고 저장' : 'Record');
+    button.dataset.active = String(Boolean(recording));
+}
+
 async function updateRecorderState() {
     const state = await apiCall('/api/recorder/state');
     if (state) {
         // Update button state
         const button = domCache.get('recorder-record-button');
-        if (button) uiKit.setBtnLabel(button, state.recording ? 'Stop' : 'Record');
+        if (button) setRecorderButtonState(button, state.recording);
 
         // 모드 배지 업데이트
         const badge = domCache.get('recorder-mode-badge');
         if (badge) {
             badge.style.display = state.recording ? 'inline' : 'none';
-            const modeLabels = { ros1: 'ROS1 .bag', ros2_db3: 'ROS2 db3', ros2_mcap: 'ROS2 mcap' };
-            badge.textContent = modeLabels[state.mode] || 'ROS2 mcap';
+            badge.textContent = BAG_FORMAT_LABELS[state.mode] || BAG_FORMAT_LABELS.ros2_mcap;
         }
         if (window.uiShell) uiShell.onRecorderState(state);
     }
@@ -2801,8 +2827,7 @@ function renderRecorderTopicTable(topics) {
     const tbody = document.querySelector('#recorder-topic-table tbody');
     if (!tbody) return;
     const selected = new Set(bagRecorderState.selectedTopics.map(t => (typeof t === 'object' ? t.name : t)));
-    const recording = (document.getElementById('recorder-record-button') || {}).textContent;
-    const locked = recording && recording.trim() === 'Stop';
+    const locked = (document.getElementById('recorder-record-button') || {dataset: {}}).dataset.active === 'true';
     tbody.replaceChildren(...(topics || []).map((entry) => {
         const name = typeof entry === 'object' ? entry.name : entry;
         const type = typeof entry === 'object' ? (entry.type || '') : '';
@@ -2829,7 +2854,14 @@ function renderRecorderTopicTable(topics) {
         tdName.textContent = name;
         const tdType = document.createElement('td');
         tdType.textContent = type;
+        tdName.className = 'ui-cell-topic';
+        tdType.className = 'ui-cell-type';
         tr.append(tdBox, tdName, tdType);
+        tr.onclick = (e) => {
+            if (e.target === box || box.disabled) return;
+            box.checked = !box.checked;
+            box.onchange();
+        };
         return tr;
     }));
 }
@@ -2885,12 +2917,12 @@ class ConfigManager {
                 // 파일명 배지 업데이트
                 this._updateFileBadge(this.defaultPath);
 
-                // 초기 상태: collapsed
+                // 초기 상태: 목업처럼 펼쳐 둔다
                 const parametersDiv = domCache.get(this.containerIds.parameters);
                 const toggleBtn = domCache.get(this.containerIds.toggleBtn);
-                parametersDiv.style.display = 'none';
-                toggleBtn.classList.remove('open');
-                this.collapsed = true;
+                parametersDiv.style.display = '';
+                toggleBtn.classList.add('open');
+                this.collapsed = false;
             } else {
                 console.error(`Failed to load default ${this.name} config:`, result.message);
             }
@@ -3656,6 +3688,15 @@ async function startSlamMapping() {
 }
 
 async function stopSlamMapping() {
+    if (window.uiShell && uiShell.shouldConfirmSlamStop && uiShell.shouldConfirmSlamStop()) {
+        const ok = await uiKit.confirmDialog({
+            title: '저장하지 않고 멈출까요?',
+            message: '저장하지 않고 멈추면 이번 지도는 다음 Start 때 지워집니다.',
+            okText: '저장 없이 Stop',
+            tone: 'stop',
+        });
+        if (!ok) return;
+    }
     // SLAM 중지 시 이전 Save Map 결과 뷰어 숨김
     if (typeof saveMapResultViewer !== 'undefined' && saveMapResultViewer) {
         saveMapResultViewer.hideAndReset();
@@ -4018,8 +4059,6 @@ const LIVE_PGO_MAP_UPDATE_MS = 500;
 const LIVE_LASER_MAP_UPDATE_MS = 2000;
 /** SLAM Live Viewer /kf_node InstancedMesh 갱신 상한 */
 const LIVE_KF_NODE_UPDATE_MS = 500;
-const LIVE_PATH_REBUILD_MS = 400;
-const LIVE_PATH_MAX_CTRL_POINTS = 250;
 const VIEWER_BG_COLOR = 0x07090c;  // ui_theme.css --color-viewer
 const LIVE_PATH_MAX_TUBE_SEGMENTS = 200;
 
@@ -4061,67 +4100,12 @@ function _mergePathSnapshot(bufferState, xyz, count, maxPoses) {
     return bufferState;
 }
 
-/**
- * 키프레임 전체 스냅샷(예: /kf_node PointCloud2)으로 path 버퍼를 교체.
- * 최근 maxPoses개만 유지 — 시각화 tube rebuild 시 오래된 구간 자동 제거.
- */
-function _setPathFromKeyframeSnapshot(bufferState, positions, maxPoses) {
-    const count = (positions && positions.length) ? (positions.length / 3) : 0;
-    if (count < 1) {
-        bufferState.xyz = null;
-        bufferState.count = 0;
-        bufferState.lastMsgCount = 0;
-        return bufferState;
-    }
-    const keep = Math.min(count, maxPoses);
-    const start = (count - keep) * 3;
-    bufferState.xyz = positions.slice(start, count * 3);
-    bufferState.count = keep;
-    bufferState.lastMsgCount = count;
-    return bufferState;
-}
-
 function _clearPathBufferState(viewer, bufferKey, timerKey) {
     viewer[bufferKey] = { xyz: null, count: 0, lastMsgCount: 0 };
     if (viewer[timerKey]) {
         clearTimeout(viewer[timerKey]);
         viewer[timerKey] = null;
     }
-}
-
-function _schedulePathTubeRebuild(viewer, timerKey, rebuildFn) {
-    if (viewer[timerKey]) return;
-    viewer[timerKey] = setTimeout(() => {
-        viewer[timerKey] = null;
-        rebuildFn();
-    }, LIVE_PATH_REBUILD_MS);
-}
-
-/** 버퍼 XYZ → TubeGeometry Mesh 생성 (제어점 서브샘플로 CPU 스톨 방지) */
-function _buildPathTubeFromBuffer(THREE, bufferState, color, tubeRadius, radialSegments = 5) {
-    const count = bufferState.count;
-    if (count < 2) return null;
-
-    const xyz = bufferState.xyz;
-    const step = Math.max(1, Math.ceil(count / LIVE_PATH_MAX_CTRL_POINTS));
-    const points3d = [];
-    for (let i = 0; i < count; i += step) {
-        points3d.push(new THREE.Vector3(xyz[i * 3], xyz[i * 3 + 1], xyz[i * 3 + 2]));
-    }
-    const last = count - 1;
-    if (last % step !== 0) {
-        points3d.push(new THREE.Vector3(xyz[last * 3], xyz[last * 3 + 1], xyz[last * 3 + 2]));
-    }
-    if (points3d.length < 2) return null;
-
-    const curve = new THREE.CatmullRomCurve3(points3d);
-    const segments = Math.min(points3d.length * 2, LIVE_PATH_MAX_TUBE_SEGMENTS);
-    const geo = new THREE.TubeGeometry(curve, segments, tubeRadius, radialSegments, false);
-    const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.visible = true;
-    mesh.frustumCulled = false;
-    return mesh;
 }
 
 /** SLAM Live path 선 두께 (px). LineBasicMaterial linewidth는 WebGL에서 무시되므로 Line2 사용 */
@@ -4373,22 +4357,6 @@ function _ensureLatencyPingWorker() {
             const { type, ms } = e.data || {};
             if (type !== 'latency') return;
             if (window.uiShell) uiShell.onLatency(ms);
-            const latencyElement = document.getElementById('latency-indicator');
-            if (!latencyElement) return;
-            if (ms == null || !isFinite(ms)) {
-                latencyElement.textContent = 'latency: N/A';
-                latencyElement.style.color = '#888';
-                return;
-            }
-            const latency = Math.round(ms);
-            latencyElement.textContent = `latency: ${latency}ms`;
-            if (latency < 50) {
-                latencyElement.style.color = '#4CAF50';
-            } else if (latency < 150) {
-                latencyElement.style.color = '#FFC107';
-            } else {
-                latencyElement.style.color = '#F44336';
-            }
         };
         _latencyPingWorker.onerror = (e) => {
             console.warn('[latency] ping worker error:', e);
@@ -4413,10 +4381,6 @@ async function updateRosDomainId() {
         const result = await apiCall('/api/ros_domain_id');
         if (result.success && result.domain_id !== undefined) {
             if (window.uiShell) uiShell.onDomainId(result.domain_id);
-            const chip = domCache.get('ros-domain-chip');
-            if (chip) {
-                chip.textContent = `ROS DOMAIN ID: ${result.domain_id}`;
-            }
         }
     } catch (error) {
         console.error('Failed to get ROS DOMAIN ID:', error);
@@ -4471,11 +4435,6 @@ window.addEventListener('load', async () => {
     }, 500);
 });
 
-// Simple status banner updater
-// Simple status banner updater (deprecated - status banner removed)
-function setRunStatus(message, level = 'success') {
-    // Status banner removed - this function is kept for compatibility but does nothing
-}
 // Close modal when clicking outside
 window.onclick = function(event) {
     const fileBrowserModal = domCache.get('file-browser-modal');
@@ -4578,11 +4537,6 @@ function _ensurePlotValueFlush() {
         if (latest.size === 0) return;
         if (plotState.tree) {
             latest.forEach((value, path) => plotState.tree.updateValue(path, value));
-        }
-        if (plotState.plotTabManager) {
-            plotState.plotTabManager.tabs.forEach((tab) => {
-                if (tab.plotManager) tab.plotManager.setCurrentValues(latest);
-            });
         }
         latest.clear();
     }, 250);
@@ -4919,24 +4873,7 @@ function createTopicNodes() {
  * @param {'connected'|'disconnected'|'reconnecting'} state - 연결 상태
  */
 function updateRosbridgeStatusChip(state) {
-    const chip = document.getElementById('rosbridge-status-chip');
     if (window.uiShell) uiShell.onRosbridgeState(state);
-    if (!chip) return;
-
-    // 상태별 클래스/텍스트 맵
-    const stateMap = {
-        connected:    { cls: 'chip-connected',    text: 'rosbridge: connected' },
-        disconnected: { cls: 'chip-disconnected',  text: 'rosbridge: error' },
-        reconnecting: { cls: 'chip-reconnecting',  text: 'rosbridge: reconnecting...' }
-    };
-
-    const config = stateMap[state];
-    if (!config) return;
-
-    // 기존 상태 클래스 제거 후 새 클래스 적용
-    chip.classList.remove('chip-soft', 'chip-connected', 'chip-disconnected', 'chip-reconnecting');
-    chip.classList.add(config.cls);
-    chip.textContent = config.text;
 }
 window.updateRosbridgeStatusChip = updateRosbridgeStatusChip;
 
@@ -6630,7 +6567,7 @@ function updateFilterPreview() {
     }
 
     const previewLayout = {
-        height: 200,
+        autosize: true,
         margin: { t: 10, b: 30, l: 50, r: 10 },
         paper_bgcolor: '#1e1e2e',
         plot_bgcolor: '#1e1e2e',
@@ -6744,7 +6681,7 @@ window.openFilterDialog = function(plotId, traceIndex) {
                 xData = xData.map(t => t - plotManager.firstTimestamp);
             }
             const initLayout = {
-                height: 200,
+                autosize: true,
                 margin: { t: 10, b: 30, l: 50, r: 10 },
                 paper_bgcolor: '#1e1e2e',
                 plot_bgcolor: '#1e1e2e',
@@ -6765,7 +6702,7 @@ window.openFilterDialog = function(plotId, traceIndex) {
         } else {
             // 데이터 없으면 빈 차트 표시
             Plotly.react('filter-preview-plot', [], {
-                height: 200,
+                autosize: true,
                 margin: { t: 10, b: 30, l: 50, r: 10 },
                 paper_bgcolor: '#1e1e2e',
                 plot_bgcolor: '#1e1e2e',
@@ -6780,6 +6717,12 @@ window.openFilterDialog = function(plotId, traceIndex) {
     if (modal) {
         modal.style.display = 'flex';
     }
+    requestAnimationFrame(() => {
+        const el = document.getElementById('filter-preview-plot');
+        if (el && window.Plotly && Plotly.Plots) {
+            try { Plotly.Plots.resize(el); } catch (err) { /* 빈 칸 */ }
+        }
+    });
 };
 
 /**
@@ -6867,7 +6810,7 @@ function togglePlotDisplayPanel() {
     const container = document.getElementById('plot-container');
     if (!panel || !container) return;
     const isCollapsed = panel.classList.toggle('collapsed');
-    container.style.gridTemplateColumns = isCollapsed ? '28px 1fr' : '300px 1fr';
+    container.style.gridTemplateColumns = isCollapsed ? '40px 1fr' : '360px 1fr';
     const btn = document.getElementById('plot-display-collapse-btn');
     if (btn) btn.textContent = isCollapsed ? '◀' : '▶';
     // 그리드 transition(0.2s) 이후 Plotly가 실제 너비를 반영하도록 리사이즈
@@ -11433,10 +11376,6 @@ function resetSlamResultView() {
     slamResultViewer.resetView();
 }
 
-function toggleSlamPCDs(visible) {
-    slamResultViewer.togglePCDs(visible);
-}
-
 function toggleSlamTopView(checked) {
     slamResultViewer.toggleTopView(checked);
 }
@@ -11551,10 +11490,6 @@ function resetLocViewer()              { locLiveViewer.resetView(); }
 function toggleLocTopView(checked)     { locLiveViewer.toggleTopView(checked); }
 function toggleLocViewerFullscreen()   { locLiveViewer.toggleFullscreen(); }
 function takeLocSnapshot()             { locLiveViewer.takeSnapshot(2); }
-function onLocFixedFrameFocus()        { locLiveViewer.onFixedFrameFocus(); }
-function onLocFixedFrameInput(value)   { locLiveViewer.onFixedFrameInput(value); }
-function onLocFixedFrameBlur(event)    { locLiveViewer.onFixedFrameBlur(event); }
-function toggleLocFixedFrameDropdown() { locLiveViewer.toggleFixedFrameDropdown(); }
 
 function _updateLocFullscreenIcon(isFullscreen) {
     const expand   = document.getElementById('loc-fullscreen-icon-expand');
@@ -11660,14 +11595,7 @@ document.addEventListener('webkitfullscreenchange', () => {
 document.addEventListener('DOMContentLoaded', () => {
     console.log('[DOMContentLoaded] Page loaded');
 
-    ensureWebuiPortsReady().then((cfg) => {
-        const webChip = document.getElementById('web-port-chip');
-        const pc2Chip = document.getElementById('pc2-ws-port-chip');
-        const rosChip = document.getElementById('rosbridge-status-chip');
-        if (webChip) webChip.textContent = `Web: ${cfg.webPort}`;
-        if (pc2Chip) pc2Chip.textContent = `PC2 WS: ${cfg.pc2WsPort}`;
-        if (rosChip) rosChip.textContent = `rosbridge: ${cfg.rosbridgePort || 9090}`;
-    });
+    ensureWebuiPortsReady();
 
     // PC2 WebSocket은 Plot 탭 여부와 무관하게 항상 연결 유지
     // (KITTI 변환 진행률 등 전역 백엔드 이벤트 수신에 필요)
@@ -12327,6 +12255,7 @@ class SlamAnalyticsDashboard {
         document.querySelectorAll('#slam-analytics-detail [id^="ad-"]').forEach((el) => {
             el.textContent = '—';
         });
+        if (window.uiShell && uiShell.resetSlamKeyframeCount) uiShell.resetSlamKeyframeCount();
         const textIds = [
             'analytics-imu-hz',
             'analytics-lid-hz',

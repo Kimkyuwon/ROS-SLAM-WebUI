@@ -297,6 +297,38 @@ def _patch_rosbag2_tf_static_qos(output_dir: str, logger) -> None:
             logger.warning(f'[convert_ros1] metadata.yaml tf_static patch skipped: {exc}')
 
 
+class TopicHzWindow:
+    """최근 window_sec 동안 도착한 메시지 수 / 창 길이 = Hz. 메시지 본문은 보관하지 않는다."""
+
+    def __init__(self, window_sec=1.0):
+        self.window_sec = window_sec
+        self._stamps = {}
+
+    def note(self, topic, now):
+        q = self._stamps.setdefault(topic, [])
+        q.append(now)
+        self._trim(topic, now)
+
+    def _trim(self, topic, now):
+        q = self._stamps.get(topic) or []
+        cut = now - self.window_sec
+        i = 0
+        while i < len(q) and q[i] < cut:
+            i += 1
+        if i:
+            del q[:i]
+
+    def snapshot(self, now):
+        out = {}
+        for topic in list(self._stamps):
+            self._trim(topic, now)
+            out[topic] = len(self._stamps[topic]) / self.window_sec
+        return out
+
+    def clear(self):
+        self._stamps.clear()
+
+
 class Ros1BagPlayerThread(threading.Thread):
     """ROS1 .bag 파일을 rosbags로 읽어 rclpy Publisher로 실시간 ROS2 publish하는 스레드.
 
@@ -2610,6 +2642,9 @@ class WebGUINode(Node):
         self.recorder_started_at = None    # 녹화 시작 시각 (time.time())
         self.recorder_output_path = ''     # 녹화 결과 파일/폴더 (크기 집계용)
         self.bag_topics = []
+        self.bag_topic_types = {}
+        self._bag_hz = TopicHzWindow()
+        self._bag_hz_subs = []
         self.bag_selected_topics = []
         self.bag_duration = 0.0  # Duration in seconds
         self.bag_current_time = 0.0  # Current playback time in seconds
@@ -2730,8 +2765,9 @@ class WebGUINode(Node):
 
         # ── PC2 Binary WebSocket 서버 (포트 8081) ─────────────────────────────
         # rosbridge를 우회해 PointCloud2를 Python에서 직접 처리 후 binary 전송
-        self.web_port = 8080
-        self.pc2_ws_port = 8081
+        self.web_port = int(os.environ.get('WEBUI_PORT', '8080'))
+        self.pc2_ws_port = int(os.environ.get('WEBUI_PC2_PORT', '8081'))
+        self.rosbridge_port = int(os.environ.get('WEBUI_ROSBRIDGE_PORT', '9090'))
         self.pc2_ws_server = PC2WebSocketServer(self, port=self.pc2_ws_port)
         self.pc2_ws_server.start()
 
@@ -6494,6 +6530,7 @@ class WebGUINode(Node):
                 self.get_logger().info(f'  Found topic: {detail["name"]}')
 
             self.bag_topics = topics
+            self.bag_topic_types = {d['name']: d.get('type', '') for d in parsed['topic_details']}
             self.bag_duration = duration
             self.get_logger().info(f'Bag info: {len(topics)} topics, duration: {duration}s')
             self.get_logger().info(f'Topics: {topics}')
@@ -6586,6 +6623,7 @@ class WebGUINode(Node):
 
             # 기존 호환 상태 변수 업데이트 (이름 목록)
             self.bag_topics = topic_names
+            self.bag_topic_types = {d['name']: d.get('type', '') for d in topic_details}
             self.bag_duration = duration
 
             publishable_count = sum(1 for t in topic_dicts if t['publishable'])
@@ -6647,6 +6685,7 @@ class WebGUINode(Node):
         self.ros1_player_thread = Ros1BagPlayerThread(bag_path, topics, rate, self)
         self.ros1_player_thread.set_loop(self.bag_player_loop)
         self.ros1_player_thread.start()
+        self._sync_bag_topic_hz(True, topics)
         self.get_logger().info(
             f'[ROS1 Player] Started: {bag_path}, topics={topics or "ALL"}, rate={rate}x'
         )
@@ -6665,10 +6704,12 @@ class WebGUINode(Node):
         status = thread.get_status()
         if status['status'] == 'paused':
             thread.resume()
+            self._sync_bag_topic_hz(True, self.bag_selected_topics)
             self.get_logger().info('[ROS1 Player] Resumed')
             return {'paused': False}
         else:
             thread.pause()
+            self._sync_bag_topic_hz(False)
             self.get_logger().info('[ROS1 Player] Paused')
             return {'paused': True}
 
@@ -6684,6 +6725,7 @@ class WebGUINode(Node):
             thread.join(timeout=5.0)
             self.get_logger().info('[ROS1 Player] Stopped')
         self.ros1_player_thread = None
+        self._sync_bag_topic_hz(False)
         return True
 
     def get_ros1_playback_status(self):
@@ -7102,6 +7144,7 @@ class WebGUINode(Node):
             self.bag_current_time = 0.0
             self.bag_start_real_time = 0.0
             self._bag_stop_pause_offset = None
+            self._sync_bag_topic_hz(False)
         else:
             # Start playback using ros2 bag play
             self.get_logger().info(f'Starting bag playback: {self.bag_path}')
@@ -7146,6 +7189,7 @@ class WebGUINode(Node):
                 self.bag_playing = True
                 self.bag_paused = False
                 self.bag_start_real_time = time.time()
+                self._sync_bag_topic_hz(True, selected_topics)
                 self.get_logger().info('Bag playback started successfully')
 
                 # Start thread to read output
@@ -7319,6 +7363,7 @@ class WebGUINode(Node):
                 self.bag_paused = False
                 pause_duration = time.time() - self.bag_pause_time
                 self.bag_start_real_time += pause_duration
+                self._sync_bag_topic_hz(True, self.bag_selected_topics)
             return success
 
         else:
@@ -7363,6 +7408,7 @@ class WebGUINode(Node):
             if success:
                 self.bag_paused = True
                 self.bag_pause_time = time.time()
+                self._sync_bag_topic_hz(False)
             return success
 
     def _start_bag_process_at_offset(self, start_offset: float):
@@ -7521,6 +7567,61 @@ class WebGUINode(Node):
             self.get_logger().info(f'[ROS1 set_rate] Stored rate={rate}x (not playing)')
             return {'success': True, 'rate': rate, 'message': 'Rate stored for next playback'}
 
+    def _normalize_ros_type(self, type_str):
+        if not type_str:
+            return None
+        if type_str in ('tf/tfMessage', 'tf/msg/tfMessage'):
+            return 'tf2_msgs/msg/TFMessage'
+        parts = type_str.split('/')
+        if len(parts) == 2:
+            return f'{parts[0]}/msg/{parts[1]}'
+        if len(parts) == 3 and parts[1] == 'msg':
+            return type_str
+        return None
+
+    def _bag_hz_stop(self):
+        for sub in self._bag_hz_subs:
+            try:
+                self.destroy_subscription(sub)
+            except Exception:
+                pass
+        self._bag_hz_subs = []
+        self._bag_hz.clear()
+
+    def _bag_hz_start(self, topics):
+        """재생 중인 토픽만 raw 구독해서 1초 창의 수신 횟수를 센다. 본문은 버린다."""
+        self._bag_hz_stop()
+        names = list(topics or [])
+        if not names:
+            names = list(self.bag_topic_types.keys())
+        if not names:
+            return
+        try:
+            from rosidl_runtime_py.utilities import get_message
+        except Exception as e:
+            self.get_logger().warn(f'[bag hz] type loader unavailable: {e}')
+            return
+        for name in names:
+            type_name = self._normalize_ros_type(self.bag_topic_types.get(name, ''))
+            if not type_name:
+                continue
+            try:
+                cls = get_message(type_name)
+
+                def _cb(_msg, topic=name):
+                    self._bag_hz.note(topic, time.monotonic())
+
+                sub = self.create_subscription(cls, name, _cb, 10, raw=True)
+                self._bag_hz_subs.append(sub)
+            except Exception as e:
+                self.get_logger().warn(f'[bag hz] skip {name}: {e}')
+
+    def _sync_bag_topic_hz(self, playing, topics=None):
+        if playing:
+            self._bag_hz_start(topics)
+        else:
+            self._bag_hz_stop()
+
     def get_bag_state(self):
         """Get current bag player state"""
         bag_type = None
@@ -7537,6 +7638,7 @@ class WebGUINode(Node):
             'loop': self.bag_player_loop,
             'bag_type': bag_type,
             'playback_rate': self.bag_playback_rate,
+            'topic_hz': self._bag_hz.snapshot(time.monotonic()),
         }
 
     def playback_worker(self):
@@ -8805,7 +8907,7 @@ class WebRequestHandler(SimpleHTTPRequestHandler):
             self.send_json_response({
                 'web_port': getattr(self.node, 'web_port', 8080),
                 'pc2_ws_port': getattr(self.node, 'pc2_ws_port', 8081),
-                'rosbridge_port': 9090,
+                'rosbridge_port': getattr(self.node, 'rosbridge_port', 9090),
             })
             return
         elif parsed_path.path == '/api/system/info':
@@ -9697,12 +9799,14 @@ def main(args=None):
     _ros_node = WebGUINode()
 
     # Start web server in a separate thread
-    web_thread = threading.Thread(target=run_web_server, args=(_ros_node, 8080), daemon=True)
+    web_thread = threading.Thread(
+        target=run_web_server, args=(_ros_node, _ros_node.web_port), daemon=True)
     web_thread.start()
 
     local_ip = get_local_ip()
     _ros_node.get_logger().info(f'Web GUI is running with full ROS2 integration.')
-    _ros_node.get_logger().info(f'Open http://localhost:8080 or http://{local_ip}:8080 in your browser.')
+    _ros_node.get_logger().info(
+        f'Open http://localhost:{_ros_node.web_port} or http://{local_ip}:{_ros_node.web_port} in your browser.')
 
     from rclpy.executors import SingleThreadedExecutor
     # SingleThreaded: MultiThreadedExecutor는 Python GIL 경합을 키워

@@ -91,12 +91,29 @@ const uiShell = (() => {
         refresh();
     }
 
+    // 이번 실행에서 본 키프레임 수의 최댓값. 화면 숫자가 끊기면(—·0) 줄지 않는다.
+    let slamKfMax = 0;
+
+    function resetSlamKeyframeCount() {
+        slamKfMax = 0;
+    }
+
+    function slamKeyframeCount(input) {
+        if (input.starting || !input.isRunning) {
+            slamKfMax = 0;
+            return 0;
+        }
+        const live = readNumber(SLAM_KF_COUNT_ID);
+        if (live != null && live > slamKfMax) slamKfMax = live;
+        return slamKfMax;
+    }
+
     function saveMapLockReason(input) {
         if (!input.isRunning) return 'SLAM 실행 중에만 저장할 수 있습니다';
         if (input.stopping) return 'SLAM을 종료하는 중입니다';
         if (input.saving) return '지도를 저장하는 중입니다';
         if (!(input.kfCount > 0)) return '키프레임이 아직 없습니다';
-        return '데이터 수신이 멈춰 저장할 수 없습니다';
+        return '';
     }
 
     const SLAM_EMPTY_PARTS = {
@@ -113,6 +130,7 @@ const uiShell = (() => {
     };
     let slamEmptyDefault = null;
     let slamRestoreFailed = false;
+    let slamSavedSinceStart = false;
     let saveStartedAt = 0;
     let saveElapsedTimer = null;
 
@@ -191,21 +209,35 @@ const uiShell = (() => {
             justSaved: Boolean(window._slamMapJustSaved),
             resultVisible: Boolean(resultEl && resultEl.style.display !== 'none'),
             elapsed: runTime && /\d/.test(runTime.textContent) ? runTime.textContent.trim() : '',
-            kfCount: readNumber(SLAM_KF_COUNT_ID),
+            kfCount: 0,
             stale: isAnalyticsStale('slam'),
             imuHz: readNumber('analytics-imu-hz'),
             lidHz: readNumber('analytics-lid-hz'),
         };
+        input.kfCount = slamKeyframeCount(input);
         const v = UiStatusLogic.deriveSlamView(input);
+        if (input.starting) slamSavedSinceStart = false;
+        if (input.justSaved) slamSavedSinceStart = true;
         uiKit.setStatusBadge(document.getElementById('lidar-slam-header-badge'), v.tone, v.text);
         uiKit.renderStepper(document.getElementById('lidar-slam-stepper'), UiStatusLogic.SLAM_STEPS, v.step);
         uiKit.setEnabled(document.getElementById('slam-start-button'), v.buttons.start);
         uiKit.setEnabled(document.getElementById('slam-stop-button'), v.buttons.stop);
         uiKit.setEnabled(document.getElementById('slam-save-map-button'), v.buttons.saveMap, saveMapLockReason(input));
+        const startHint = document.getElementById('lidar-slam-start-hint');
+        if (startHint) startHint.hidden = !(v.buttons.start && !input.resultVisible);
+        const liveBadge = document.getElementById('slam-live-badge');
+        if (liveBadge) {
+            liveBadge.dataset.tone = input.stale ? 'warn' : 'go';
+            liveBadge.textContent = input.stale ? 'NO DATA' : 'LIVE';
+        }
         const empty = document.getElementById('lidar-slam-viewer-empty');
         if (empty) renderSlamEmpty(empty, input, liveEl, resultEl);
         if (input.resultVisible) renderSaveMapResultDir();
         renderConfigLock('slam-config-container', input.isRunning || input.starting || input.stopping);
+    }
+
+    function shouldConfirmSlamStop() {
+        return !slamSavedSinceStart;
     }
 
     // 노드는 원점에서 스스로 초기화를 시도하므로, 이 시간이 지나도 Not Init이면 안내를 보인다 (임의 값)
@@ -263,6 +295,11 @@ const uiShell = (() => {
         const live = document.getElementById('localization-live-viewer');
         const empty = document.getElementById('localization-viewer-empty');
         if (empty) empty.hidden = Boolean(live && live.style.display !== 'none');
+        const locBadge = document.getElementById('loc-live-badge');
+        if (locBadge) {
+            locBadge.dataset.tone = input.stale ? 'warn' : 'go';
+            locBadge.textContent = input.stale ? 'NO DATA' : 'LIVE';
+        }
         renderConfigLock('localization-config-container', input.isRunning || input.starting || input.stopping);
 
         const notInit = isRunning && !input.initialized && !input.external && !input.stale
@@ -396,6 +433,11 @@ const uiShell = (() => {
             errEl.hidden = !err;
             errEl.textContent = err;
         }
+        const loaded = document.getElementById('multi-session-map1-loaded');
+        if (loaded) {
+            loaded.hidden = !map1.trim();
+            loaded.textContent = map1.trim() ? `Map 1 loaded · ${map1.trim()}` : '';
+        }
         const inputsReady = Boolean(map1.trim() && map2.trim() && output && !err);
         const running = Boolean(typeof _optRunning !== 'undefined' && _optRunning);
         if (running && !multiSawRunning) multiLoopCount = null;
@@ -464,6 +506,20 @@ const uiShell = (() => {
         });
     }
 
+    // 숨은 #view-type-select 값을 바꿔 기존 switchViewType 핸들러를 그대로 부른다
+    function initViewTypeSeg() {
+        const seg = document.getElementById('view-type-seg');
+        if (!seg || seg.dataset.bound) return;
+        seg.dataset.bound = '1';
+        seg.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-view]');
+            const select = document.getElementById('view-type-select');
+            if (!btn || !select) return;
+            select.value = btn.dataset.view;
+            select.dispatchEvent(new Event('change'));
+        });
+    }
+
     function renderBag() {
         const dir = document.getElementById('bag-directory');
         const loaded = Boolean(dir && dir.value.trim());
@@ -487,6 +543,19 @@ const uiShell = (() => {
         const loop = document.getElementById('bag-player-loop');
         if (loop) loop.disabled = !loaded;
         if (convert && !converting) uiKit.setEnabled(convert, v.buttons.convert);
+        const panel = document.getElementById('bag-convert-controls');
+        if (panel) panel.dataset.converting = String(converting);
+        if (play) {
+            play.classList.toggle('ui-btn-go', !playing);
+            play.classList.toggle('ui-btn-stop', playing);
+            play.dataset.active = String(playing);
+        }
+        document.querySelectorAll('#bag-player-subtab [onclick^="setAllBagTopics"]').forEach((btn) => {
+            btn.disabled = !loaded || converting;
+        });
+        document.querySelectorAll('#bag-player-subtab [onclick="loadBagFile()"]').forEach((btn) => {
+            btn.disabled = converting;
+        });
         syncBagRateSeg();
     }
 
@@ -529,6 +598,17 @@ const uiShell = (() => {
         }
         const topics = document.getElementById('recorder-stat-topics');
         if (topics) topics.textContent = String(bagRecorderState.selectedTopics.length);
+        const title = document.getElementById('recorder-topic-table-title');
+        const total = document.querySelectorAll('#recorder-topic-table tbody tr').length;
+        if (title) title.textContent = `Selected Topics · ${bagRecorderState.selectedTopics.length}/${total}`;
+        const refreshBtn = document.querySelector('#bag-recorder-subtab [onclick="refreshRecorderTopics()"]');
+        if (refreshBtn) refreshBtn.disabled = !v.buttons.edit;
+        // 녹화 중이 아니면 고른 형식을 미리 보여 준다 (녹화 중 표시는 서버 mode 기준으로 script.js가 쓴다)
+        const modeBadge = document.getElementById('recorder-mode-badge');
+        if (modeBadge && v.buttons.edit && fmt) {
+            modeBadge.style.display = 'inline';
+            modeBadge.textContent = fmt.options[fmt.selectedIndex].text;
+        }
     }
 
     function initFileDatasetSeg() {
@@ -569,13 +649,25 @@ const uiShell = (() => {
             paused,
             converting,
             savingBag: Boolean(fp.saving_bag),
-            progress: 0,
+            progress: parseFloat((document.getElementById(`${ds}-progress-fill`) || { style: {} }).style.width) || 0,
         });
         uiKit.setStatusBadge(document.getElementById('file-player-header-badge'), v.tone, v.text);
-        if (play) uiKit.setEnabled(play, v.buttons.play);
+        if (play) {
+            uiKit.setEnabled(play, v.buttons.play);
+            play.classList.toggle('ui-btn-go', !playing);
+            play.classList.toggle('ui-btn-stop', playing);
+            play.dataset.active = String(playing);
+        }
+        if (pause) uiKit.setEnabled(pause, playing || paused);
         document.querySelectorAll('#file-player-dataset-seg [data-dataset]').forEach((btn) => {
             btn.disabled = !v.buttons.load;
         });
+        const screen = document.getElementById('file-player-subtab');
+        if (screen) screen.dataset.dataset = ds;
+        const title = document.getElementById('file-player-load-title');
+        if (title && select) title.textContent = `${select.options[select.selectedIndex].text} · 불러오기`;
+        const load = document.querySelector('#file-player-subtab [onclick="loadPlayerPath()"]');
+        if (load) load.disabled = !v.buttons.load;
     }
 
     function refresh() {
@@ -654,35 +746,55 @@ const uiShell = (() => {
         reconnecting: ['warn', 'rosbridge 재연결 중…'],
     };
 
+    let rosbridgeTone = 'idle';
+
     function onRosbridgeState(state) {
         const conf = ROSBRIDGE_TEXT[state];
         if (conf) uiKit.setStatusBadge(document.getElementById('ui-conn-rosbridge'), conf[0], conf[1]);
+        if (conf) rosbridgeTone = conf[0];
     }
 
     function onLatency(ms) {
-        const el = document.getElementById('ui-conn-latency');
-        if (!el) return;
-        el.textContent = (ms == null || !isFinite(ms)) ? 'N/A' : `${Math.round(ms)} ms`;
-        el.dataset.tone = (ms == null) ? 'idle' : (ms < 50 ? 'go' : (ms < 150 ? 'warn' : 'stop'));
+        const text = (ms == null || !isFinite(ms)) ? 'N/A' : `${Math.round(ms)} ms`;
+        const tone = (ms == null) ? rosbridgeTone : (ms < 50 ? 'go' : (ms < 150 ? 'warn' : 'stop'));
+        for (const id of ['ui-conn-latency', 'latency-indicator']) {
+            const el = document.getElementById(id);
+            if (!el) continue;
+            el.textContent = text;
+            el.dataset.tone = tone;
+        }
     }
 
     function onDomainId(id) {
-        const el = document.getElementById('ui-conn-domain');
-        if (el) el.textContent = String(id);
+        const text = String(id);
+        for (const elId of ['ui-conn-domain', 'ros-domain-chip']) {
+            const el = document.getElementById(elId);
+            if (el) el.textContent = text;
+        }
     }
 
     function onBackendWsState(state) {
         const el = document.getElementById('ui-conn-port-pc2');
+        const legacy = document.getElementById('pc2-ws-port-chip');
         const ports = window.ROS_SLAM_WEBUI || {};
-        if (el) el.textContent = `${ports.pc2WsPort || '-'}${state === 'connected' ? '' : ' (끊김)'}`;
+        const text = `${ports.pc2WsPort || '-'}${state === 'connected' ? '' : ' (끊김)'}`;
+        const tone = state === 'connected' ? 'idle' : 'warn';
+        for (const node of [el, legacy]) {
+            if (!node) continue;
+            node.textContent = text;
+            node.dataset.tone = tone;
+        }
     }
 
     function renderPorts() {
         const ports = window.ROS_SLAM_WEBUI || {};
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v ?? '-'; };
         set('ui-conn-port-web', ports.webPort);
+        set('web-port-chip', ports.webPort);
         set('ui-conn-port-pc2', ports.pc2WsPort);
+        set('pc2-ws-port-chip', ports.pc2WsPort);
         set('ui-conn-port-rosbridge', ports.rosbridgePort);
+        set('rosbridge-status-chip', ports.rosbridgePort);
     }
 
     const NODE_LOG_POLL_MS = 3000;
@@ -796,6 +908,7 @@ const uiShell = (() => {
         initBadgeLogLink();
         initPlotHeader();
         initBagRateSeg();
+        initViewTypeSeg();
         initFileDatasetSeg();
         setInterval(healthTick, HEALTH_TICK_MS);
         document.body.classList.add('ui-has-sidebar');
@@ -812,8 +925,9 @@ const uiShell = (() => {
 
     return {
         SCREENS, showScreen, onScreenChanged, refresh, init, onSlamState, onLocState, noteAnalytics, onSaveMapRestoreFailed,
+        resetSlamKeyframeCount,
         onRosbridgeState, onLatency, onDomainId, onBackendWsState, openNodeLog, onLocStartRequested,
-        onRecorderState, onOptStatus,
+        onRecorderState, onOptStatus, shouldConfirmSlamStop,
         setPlotPaused, togglePlotPause, setPlotWindow, onPlotPauseChanged,
         get lastSummary() { return lastSummary; },
     };

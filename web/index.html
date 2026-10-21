@@ -48,6 +48,14 @@
         <symbol id="icon-collapse" viewBox="0 0 24 24"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="21" y1="3" x2="14" y2="10"/></symbol>
         <symbol id="icon-layers-edl" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></symbol>
         <symbol id="icon-diff" viewBox="0 0 24 24"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></symbol>
+        <symbol id="icon-x" viewBox="0 0 24 24"><line x1="18" x2="6" y1="6" y2="18"/><line x1="6" x2="18" y1="6" y2="18"/></symbol>
+        <symbol id="icon-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></symbol>
+        <symbol id="icon-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
+        <symbol id="icon-folder-input" viewBox="0 0 24 24"><path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"/><path d="M2 13h10"/><path d="m9 16 3-3-3-3"/></symbol>
+        <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+        <symbol id="icon-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></symbol>
+        <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+        <symbol id="icon-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></symbol>
     </svg>
     <div class="ui-app-shell">
         <aside class="ui-sidebar" id="ui-sidebar">
@@ -127,6 +135,13 @@
                     <dt>PC2 WS</dt><dd id="ui-conn-port-pc2">-</dd>
                     <dt>rosbridge</dt><dd id="ui-conn-port-rosbridge">-</dd>
                 </dl>
+                <div hidden>
+                    <span id="ros-domain-chip"></span>
+                    <span id="web-port-chip"></span>
+                    <span id="pc2-ws-port-chip"></span>
+                    <span id="rosbridge-status-chip"></span>
+                    <span id="latency-indicator"></span>
+                </div>
             </div>
         </aside>
         <main class="ui-main">
@@ -135,34 +150,8 @@
                 <svg class="ui-icon" aria-hidden="true"><use href="#icon-menu"></use></svg>
             </button>
     <div class="page-shell">
-        <header class="topbar">
-            <div class="brand">
-                <span class="brand-dot"></span>
-                <span class="brand-title">ROS SLAM WEBUI</span>
-            </div>
-            <div class="topbar-status">
-                <span class="chip" id="ros-domain-chip">ROS DOMAIN ID: 0</span>
-                <span class="chip chip-soft" id="web-port-chip">Web: 8080</span>
-                <span class="chip chip-soft" id="pc2-ws-port-chip">PC2 WS: 8081</span>
-                <span class="chip chip-soft" id="rosbridge-status-chip">rosbridge: 9090</span>
-                <span class="chip chip-soft" id="latency-indicator">latency: --ms</span>
-            </div>
-        </header>
-
-        <div class="tab-navigation card">
-            <button class="tab-button active" onclick="openTab('slam-tab')">SLAM/Localization</button>
-            <button class="tab-button" onclick="openTab('player-tab')">Data Player/Recorder</button>
-            <button class="tab-button" onclick="openTab('visualization-tab')">Visualization</button>
-        </div>
-
         <!-- SLAM/Localization Tab -->
         <div id="slam-tab" class="tab-content active">
-            <div class="subtab-navigation card">
-                <button class="subtab-button active" onclick="openSubTab('lidar-slam-subtab')">LiDAR SLAM</button>
-                <button class="subtab-button" onclick="openSubTab('localization-subtab')">Localization</button>
-                <button class="subtab-button" onclick="openSubTab('multi-session-slam-subtab')">Multi-Session SLAM</button>
-            </div>
-
             <!-- LiDAR SLAM Sub-Tab -->
             <div id="lidar-slam-subtab" class="subtab-content active">
                 <header class="ui-screen-header" data-screen-header>
@@ -195,7 +184,10 @@
                             <span class="ui-btn-label">Start SLAM</span>
                         </button>
                     </div>
-                    <ol class="ui-stepper" id="lidar-slam-stepper" aria-label="진행 단계"></ol>
+                    <div class="ui-stepper-row">
+                        <ol class="ui-stepper" id="lidar-slam-stepper" aria-label="진행 단계"></ol>
+                        <p class="ui-hint" id="lidar-slam-start-hint" hidden>Start하면 저장하지 않은 이전 지도는 지워집니다</p>
+                    </div>
                 </header>
                 <div class="section card">
                     <h2>LiDAR SLAM</h2>
@@ -216,6 +208,7 @@
                                     <div class="loc-viewer-canvas-panel">
                                         <div id="slam-live-canvas-container">
                                             <canvas id="slam-live-canvas"></canvas>
+                                            <span class="ui-tag ui-viewer-tag" id="slam-live-badge" data-tone="go">LIVE</span>
                                             <div id="slam-live-viewer-loading">rosbridge 연결 대기중...</div>
                                             <!-- 우측 상단 범례 -->
                                             <div id="slam-live-legend">
@@ -495,7 +488,7 @@
                             <div id="slam-config-container" class="cfg-panel">
                                 <div class="cfg-header" onclick="toggleSlamConfig()">
                                     <div class="cfg-header-left">
-                                        <span class="cfg-header-title">SLAM Configuration Parameters</span>
+                                        <span class="cfg-header-title">Configuration</span>
                                     <svg class="ui-icon ui-readonly-only" aria-hidden="true"><use href="#icon-lock"></use></svg>
                                         <span class="cfg-header-badge" id="slam-cfg-file-badge"></span>
                                     </div>
@@ -506,8 +499,14 @@
                                     <!-- Parameters will be dynamically loaded here -->
                                 </div>
                                 <div class="ui-panel-footer">
-                                    <button class="ui-btn" onclick="loadSlamConfig()">Config Load</button>
-                                    <button class="ui-btn" id="slam-save-button" onclick="saveSlamConfig()">Set Config File</button>
+                                    <button class="ui-btn" onclick="loadSlamConfig()">
+                                        <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                                        <span class="ui-btn-label">Config Load</span>
+                                    </button>
+                                    <button class="ui-btn" id="slam-save-button" onclick="saveSlamConfig()">
+                                        <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                        <span class="ui-btn-label">Set Config File</span>
+                                    </button>
                                     <p class="ui-hint">mapping_config.yaml에 적용됩니다</p>
                                 </div>
                             </div>
@@ -570,6 +569,12 @@
                                 <div class="loc-viewer-canvas-panel">
                                     <div id="loc-viewer-canvas-container">
                                         <canvas id="loc-viewer-canvas"></canvas>
+                                        <span class="ui-tag ui-viewer-tag" id="loc-live-badge" data-tone="go">LIVE</span>
+                                        <div id="loc-viewer-legend">
+                                            <span data-swatch="prior"><span class="ui-legend-swatch"></span>Prior Map</span>
+                                            <span data-swatch="scan"><span class="ui-legend-swatch"></span>Current Scan</span>
+                                            <span data-swatch="traj"><span class="ui-legend-swatch"></span>Trajectory</span>
+                                        </div>
                                         <div id="loc-viewer-loading">rosbridge 연결 대기중...</div>
                                         <div id="loc-viewer-actions">
                                             <button class="slam-action-btn ui-icon-btn" id="loc-reset-btn"
@@ -786,7 +791,7 @@
                             <div id="localization-config-container" class="cfg-panel">
                                 <div class="cfg-header" onclick="toggleLocalizationConfig()">
                                     <div class="cfg-header-left">
-                                        <span class="cfg-header-title">Localization Configuration Parameters</span>
+                                        <span class="cfg-header-title">Configuration</span>
                                     <svg class="ui-icon ui-readonly-only" aria-hidden="true"><use href="#icon-lock"></use></svg>
                                         <span class="cfg-header-badge" id="localization-cfg-file-badge"></span>
                                     </div>
@@ -797,8 +802,14 @@
                                     <!-- Parameters will be dynamically loaded here -->
                                 </div>
                                 <div class="ui-panel-footer">
-                                    <button class="ui-btn" onclick="loadLocalizationConfig()">Config Load</button>
-                                    <button class="ui-btn" id="localization-save-button" onclick="saveLocalizationConfig()">Set Config File</button>
+                                    <button class="ui-btn" onclick="loadLocalizationConfig()">
+                                        <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
+                                        <span class="ui-btn-label">Config Load</span>
+                                    </button>
+                                    <button class="ui-btn" id="localization-save-button" onclick="saveLocalizationConfig()">
+                                        <svg class="ui-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                                        <span class="ui-btn-label">Set Config File</span>
+                                    </button>
                                     <p class="ui-hint">localization_config.yaml에 적용됩니다</p>
                                 </div>
                             </div>
@@ -828,7 +839,10 @@
                         <button id="multi-session-header-cancel-btn" class="ui-btn ui-btn-stop" type="button"
                                 onclick="cancelOptimization()" hidden>Cancel</button>
                         <button id="slam-opt-run-btn" class="ui-btn ui-btn-go" type="button"
-                                onclick="handleOptBtnClick()">Multi Session Optimization</button>
+                                onclick="handleOptBtnClick()">
+                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-play"></use></svg>
+                            <span class="ui-btn-label">Multi Session Optimization</span>
+                        </button>
                     </div>
                     <ol class="ui-stepper" id="multi-session-stepper" aria-label="진행 단계"></ol>
                 </header>
@@ -838,14 +852,14 @@
                     <div class="ui-screen-grid">
                         <div class="ui-col-main">
                             <section class="ui-panel">
+                                <div class="ui-panel-header"><h3 class="ui-panel-title">Inputs</h3></div>
                                 <div class="ui-panel-body">
-                                    <h3 class="ui-panel-title">Inputs</h3>
                                     <div class="ui-field">
                                         <label class="ui-field-label" for="slam-map1">Map 1</label>
                                         <div class="ui-field-control">
                                             <input type="text" class="ui-input" id="slam-map1" placeholder="Click Load Map 1 to browse" readonly>
                                             <button type="button" class="ui-icon-btn" onclick="loadMap1()" aria-label="Map 1 폴더 선택" title="Map 1 폴더 선택">
-                                                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                                <svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
                                             </button>
                                         </div>
                                         <p class="ui-hint">Save Map으로 만든 세션 폴더 (Scans/·optimized_poses.txt·edges.txt·StaticMap.pcd 필요)</p>
@@ -856,7 +870,7 @@
                                         <div class="ui-field-control">
                                             <input type="text" class="ui-input" id="slam-map2" placeholder="Click Load Map 2 to browse" readonly>
                                             <button type="button" class="ui-icon-btn" onclick="loadMap2()" aria-label="Map 2 폴더 선택" title="Map 2 폴더 선택">
-                                                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                                <svg class="ui-icon" aria-hidden="true"><use href="#icon-folder"></use></svg>
                                             </button>
                                         </div>
                                         <p class="ui-hint">합칠 두 번째 세션</p>
@@ -870,11 +884,13 @@
                                         <p class="ui-hint">결과 폴더 이름 — long_term_mapping/&lt;이름&gt;/에 만들어지고, 같은 이름의 폴더는 지워집니다</p>
                                         <p class="ui-hint ui-error" id="multi-session-output-error" hidden></p>
                                     </div>
+                                    <p class="ui-hint">실행 버튼 하나가 세 값을 같이 보냅니다</p>
+                                    <p class="ui-mono ui-hint" id="multi-session-map1-loaded" hidden></p>
                                 </div>
                             </section>
                             <section class="ui-panel">
+                                <div class="ui-panel-header"><h3 class="ui-panel-title">Progress</h3></div>
                                 <div class="ui-panel-body">
-                                    <h3 class="ui-panel-title">Progress</h3>
                                     <ol class="ui-progress-list" id="multi-session-progress"></ol>
                                 </div>
                             </section>
@@ -882,15 +898,15 @@
                         </div>
                         <div class="ui-col-side">
                             <div class="ui-viewer-empty" id="multi-session-viewer-empty">
-                                <p class="ui-viewer-empty-eyebrow">RESULT</p>
-                                <p class="ui-viewer-empty-title">최적화가 끝나면 합친 지도가 여기에 그려집니다</p>
-                                <p class="ui-viewer-empty-body">Map 1·Map 2와 결과 폴더 이름을 넣은 뒤 실행하세요.</p>
+                                <p class="ui-viewer-empty-eyebrow">RESULT VIEWER</p>
+                                <p class="ui-viewer-empty-title">두 세션 지도를 합칩니다</p>
+                                <p class="ui-viewer-empty-body">왼쪽 칸을 채우고 Multi Session Optimization을 누르면, 합친 지도와 두 결과가 여기에 겹쳐 나옵니다.</p>
                             </div>
                     <div id="slam-opt-status-area" class="status-banner ui-viewer-overlay" style="display:none; margin-top: 14px;">
                         <div style="display:flex; align-items:center; gap:10px;">
                             <span id="slam-opt-spinner" style="display:none; width:12px; height:12px; border:2px solid var(--accent); border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; flex-shrink:0;"></span>
                             <span id="slam-opt-msg" style="flex:1; font-size:13px; color:var(--text);"></span>
-                            <button id="slam-opt-cancel-btn" onclick="cancelOptimization()" style="display:none; padding:6px 14px; min-width:auto; background:rgba(255,95,109,0.15); border:1px solid rgba(255,95,109,0.5); color:var(--danger); border-radius:8px; cursor:pointer; font-size:12px; font-weight:600; transition:all 0.2s;">Cancel</button>
+                            <button id="slam-opt-cancel-btn" class="ui-btn ui-btn-stop" type="button" onclick="cancelOptimization()" style="display:none;">Cancel</button>
                         </div>
                     </div>
 
@@ -945,22 +961,22 @@
                                 <span id="slam-point-size-label">0.05 m</span>
                             </div>
                             <div id="slam-viewer-actions">
-                                <button class="slam-action-btn" id="slam-reset-btn" onclick="resetSlamResultView()" title="Reset View">
+                                <button class="slam-action-btn ui-icon-btn" id="slam-reset-btn" onclick="resetSlamResultView()" title="Reset View" aria-label="Reset View">
                                     <svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg>
                                 </button>
-                                <button class="slam-action-btn" id="slam-fs-topview-btn" onclick="toggleSlamTopView(!slamResultViewer._topView)" title="Top View">
+                                <button class="slam-action-btn ui-icon-btn" id="slam-fs-topview-btn" onclick="toggleSlamTopView(!slamResultViewer._topView)" title="Top View" aria-label="Top View" aria-pressed="false">
                                     <svg class="ui-icon" aria-hidden="true"><use href="#icon-topview"></use></svg>
                                 </button>
-                                <button class="slam-action-btn" id="slam-fs-edl-btn" onclick="toggleSlamEDL(!slamResultViewer._edlEnabled)" title="Depth Filter">
+                                <button class="slam-action-btn ui-icon-btn" id="slam-fs-edl-btn" onclick="toggleSlamEDL(!slamResultViewer._edlEnabled)" title="Depth Filter" aria-label="Depth Filter" aria-pressed="false">
                                     <svg class="ui-icon" aria-hidden="true"><use href="#icon-layers-edl"></use></svg>
                                 </button>
                                 <button class="slam-action-btn ui-icon-btn" id="slam-fs-diff-btn" onclick="toggleSlamDiff(!slamResultViewer._diffEnabled)" title="Check Difference" aria-label="Check Difference">
                                     <svg class="ui-icon" aria-hidden="true"><use href="#icon-diff"></use></svg>
                                 </button>
-                                <button class="slam-action-btn" id="slam-snapshot-btn" onclick="takeSlamSnapshot()" title="스냅샷 저장">
+                                <button class="slam-action-btn ui-icon-btn" id="slam-snapshot-btn" onclick="takeSlamSnapshot()" title="스냅샷 저장" aria-label="스냅샷 저장">
                                     <svg class="ui-icon" aria-hidden="true"><use href="#icon-camera"></use></svg>
                                 </button>
-                                <button class="slam-action-btn" id="slam-fullscreen-btn" onclick="toggleSlamFullscreen()" title="풀스크린">
+                                <button class="slam-action-btn ui-icon-btn" id="slam-fullscreen-btn" onclick="toggleSlamFullscreen()" title="풀스크린" aria-label="풀스크린">
                                     <svg class="ui-icon" aria-hidden="true" id="slam-fullscreen-icon-expand"><use href="#icon-expand"></use></svg>
                                     <svg class="ui-icon" aria-hidden="true" id="slam-fullscreen-icon-collapse" style="display:none;"><use href="#icon-collapse"></use></svg>
                                 </button>
@@ -975,12 +991,6 @@
 
         <!-- Data Player/Recorder Tab -->
         <div id="player-tab" class="tab-content">
-            <div class="subtab-navigation card">
-                <button class="subtab-button active" onclick="openSubTab('bag-player-subtab')">Bag Player</button>
-                <button class="subtab-button" onclick="openSubTab('bag-recorder-subtab')">Bag Recorder</button>
-                <button class="subtab-button" onclick="openSubTab('file-player-subtab')">File Player</button>
-            </div>
-
             <!-- Bag Player Sub-Tab -->
             <div id="bag-player-subtab" class="subtab-content active">
                 <header class="ui-screen-header" data-screen-header>
@@ -993,51 +1003,43 @@
                             </span>
                         </div>
                     </div>
-                    <div class="ui-screen-actions" id="bag-player-header-actions"></div>
+                    <div class="ui-screen-actions" id="bag-player-header-actions">
+                        <button type="button" class="ui-btn" id="bag-load-header-btn" onclick="loadBagFile()"><svg class="ui-icon" aria-hidden="true"><use href="#icon-upload"></use></svg><span class="ui-btn-label">Load Bag File</span></button>
+                    </div>
                 </header>
                 <div class="section card">
                     <h2>Bag Player</h2>
-
-                    <div class="form-group">
-                        <label>Bag Directory:</label>
-                        <input type="text" id="bag-directory" placeholder="Click Load Bag File to browse" readonly>
-                        <button onclick="loadBagFile()">Load Bag File</button>
-                    </div>
-                    <p class="ui-hint">
-                        <span id="bag-ros1-badge" style="display:none;" class="ui-tag">ROS1 Bag</span>
-                        <span id="bag-ros2-badge" style="display:none;" class="ui-tag">ROS2 Bag</span>
-                        <span id="bag-meta-duration" class="ui-tag ui-mono"></span>
-                        <span id="bag-meta-topics" class="ui-tag"></span>
-                    </p>
-
-                    <section id="bag-convert-controls" class="ui-panel" style="display:none;">
+                    <div class="ui-screen-grid ui-has-playbar">
+                    <div class="ui-col-main">
+                    <section class="ui-panel">
+                        <div class="ui-panel-header"><h3 class="ui-panel-title">Bag</h3></div>
                         <div class="ui-panel-body">
-                            <h3 class="ui-panel-title">형식 변환 (CONVERT)</h3>
-                            <label class="ui-field-label" for="player-format-select">Format</label>
-                            <select id="player-format-select" class="ui-select">
-                                <option value="ros2_mcap">ROS2 (mcap)</option>
-                                <option value="ros2_db3">ROS2 (db3)</option>
-                                <option value="ros1">ROS1 (.bag)</option>
-                            </select>
-                            <button id="convert-bag-btn" class="ui-btn" type="button" onclick="convertBag()">Convert</button>
-                            <div class="ui-progress ui-progress-indeterminate"></div>
-                            <p class="ui-hint">선택한 토픽만 변환됩니다</p>
+                            <div class="ui-field-control">
+                                <input type="text" class="ui-input" id="bag-directory" placeholder="Bag 폴더를 골라 주세요" readonly aria-label="Bag 폴더">
+                                <button type="button" class="ui-icon-btn" onclick="loadBagFile()" aria-label="Bag 폴더 고르기" title="Bag 폴더 고르기">
+                                    <svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-input"></use></svg>
+                                </button>
+                            </div>
+                            <p class="ui-tag-row">
+                                <span id="bag-ros1-badge" style="display:none;" class="ui-tag" data-tone="info">ROS1 (.bag)</span>
+                                <span id="bag-ros2-badge" style="display:none;" class="ui-tag" data-tone="info">ROS2</span>
+                                <span id="bag-meta-duration" class="ui-tag ui-mono"></span>
+                                <span id="bag-meta-topics" class="ui-tag"></span>
+                            </p>
                         </div>
                     </section>
 
                     <div class="form-group" hidden>
                         <label>Selected Topics:</label>
-                        <div id="bag-selected-topics-display" hidden style="padding: 5px; background: #3a3a3a; border-radius: 4px; margin-bottom: 10px; min-height: 25px;">
-                            <span style="color: #888;">No topics selected</span>
-                        </div>
+                        <div id="bag-selected-topics-display" hidden></div>
                     </div>
 
                     <section class="ui-panel">
                         <div class="ui-panel-header">
                             <h3 class="ui-panel-title" id="bag-topic-table-title">SELECTED TOPICS · 0/0</h3>
-                            <div>
-                                <button type="button" class="ui-btn ui-btn-ghost" onclick="setAllBagTopics(true)">모두 선택</button>
-                                <button type="button" class="ui-btn ui-btn-ghost" onclick="setAllBagTopics(false)">모두 해제</button>
+                            <div class="ui-panel-actions">
+                                <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" onclick="setAllBagTopics(true)">모두 선택</button>
+                                <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" onclick="setAllBagTopics(false)">모두 해제</button>
                             </div>
                         </div>
                         <div class="ui-panel-body">
@@ -1053,30 +1055,61 @@
                                 </thead>
                                 <tbody></tbody>
                             </table>
-                            <p class="ui-hint" id="bag-topic-table-hint" hidden>재생 중 바꾼 선택은 다음 Play부터 적용됩니다</p>
+                            <p class="ui-table-empty">Load Bag File로 bag 폴더를 먼저 불러오세요</p>
+                            <p class="ui-hint ui-hint-warn" id="bag-topic-table-hint" hidden>재생 중 바꾼 선택은 다음 Play부터 적용됩니다</p>
+                            <p class="ui-hint" id="bag-topic-table-ros1-hint" hidden>ROS1 bag은 메시지 수를 읽지 못해 Hz·Msgs가 “–”로 표시됩니다.</p>
                         </div>
                     </section>
 
                     <button onclick="selectTopics()" hidden>Select Topic</button>
-
+                    </div>
+                    <aside class="ui-col-side">
+                    <section id="bag-convert-controls" class="ui-panel">
+                        <div class="ui-panel-header"><h3 class="ui-panel-title">형식 변환 (CONVERT)</h3></div>
+                        <div class="ui-panel-body">
+                            <div class="ui-field">
+                                <label class="ui-field-label" for="player-format-select">Format</label>
+                                <select id="player-format-select" class="ui-select">
+                                    <option value="ros2_mcap">ROS2 (mcap)</option>
+                                    <option value="ros2_db3">ROS2 (db3)</option>
+                                    <option value="ros1">ROS1 (.bag)</option>
+                                </select>
+                                <p class="ui-hint">선택한 토픽만 변환됩니다</p>
+                            </div>
+                            <button id="convert-bag-btn" class="ui-btn ui-btn-block" type="button" onclick="convertBag()">Convert</button>
+                            <div class="ui-convert-busy">
+                                <div class="ui-progress ui-progress-indeterminate"></div>
+                                <p class="ui-hint">변환 중… (동기 요청이라 진행률은 알 수 없습니다)</p>
+                            </div>
+                        </div>
+                    </section>
+                    </aside>
+                    </div>
                 </div>
-                <div class="ui-playbar" id="bag-playbar">
-                    <button id="bag-play-button" class="ui-btn ui-btn-go" type="button" onclick="playBag()"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><polygon points="6 4 20 12 6 20 6 4"/></svg><span class="ui-btn-label">Play</span></button>
-                    <button id="bag-pause-button" class="ui-btn ui-btn-ghost" type="button" onclick="pauseBag()"><span class="ui-btn-label">Pause</span></button>
-                    <span id="bag-time-label" class="ui-mono">0:00 / 0:00</span>
-                    <input type="range" id="bag-slider" min="0" max="10000" value="0" onchange="setBagPosition(this.value)">
+                <div class="ui-playbar" id="bag-playbar" role="group" aria-label="재생 바">
+                    <button id="bag-play-button" class="ui-btn ui-btn-go ui-btn-play" type="button" onclick="playBag()"><svg class="ui-icon ui-icon-fill ui-icon-when-idle" aria-hidden="true"><use href="#icon-play"></use></svg><svg class="ui-icon ui-icon-fill ui-icon-when-active" aria-hidden="true"><use href="#icon-square"></use></svg><span class="ui-btn-label">Play</span></button>
+                    <button id="bag-pause-button" class="ui-btn ui-btn-play" type="button" onclick="pauseBag()"><svg class="ui-icon ui-icon-fill" aria-hidden="true"><use href="#icon-pause"></use></svg><span class="ui-btn-label">Pause</span></button>
+                    <span id="bag-time-label" class="ui-mono ui-playbar-time">0:00 / 0:00</span>
+                    <input type="range" id="bag-slider" class="ui-playbar-seek" min="0" max="10000" value="0" onchange="setBagPosition(this.value)" aria-label="재생 위치">
                     <div class="ui-seg" role="radiogroup" aria-label="재생 속도" id="bag-rate-seg">
                         <button type="button" class="ui-seg-option" data-rate="0.5" role="radio" aria-checked="false">0.5×</button>
                         <button type="button" class="ui-seg-option" data-rate="1" role="radio" aria-checked="true">1×</button>
                         <button type="button" class="ui-seg-option" data-rate="2" role="radio" aria-checked="false">2×</button>
                         <button type="button" class="ui-seg-option" data-rate="4" role="radio" aria-checked="false">4×</button>
                     </div>
-                    <label class="ui-hint"><input type="checkbox" id="bag-player-loop" onchange="setBagPlayerLoop(this.checked)"> Loop</label>
-                    <details class="ui-more" id="ros1-playback-controls">
-                        <summary>세밀 조절</summary>
-                        <input type="range" id="bag-playback-rate" min="1" max="40" value="10" oninput="updatePlaybackRate(this.value)">
-                        <span id="playback-rate-label" class="ui-mono">1.0x</span>
+                    <details class="ui-more ui-rate-more" id="ros1-playback-controls">
+                        <summary>세밀 조절 <span id="playback-rate-label" class="ui-mono">1.0×</span></summary>
+                        <div class="ui-popover">
+                            <p class="ui-popover-head">재생 속도 (0.1 단위)</p>
+                            <input type="range" id="bag-playback-rate" min="1" max="40" value="10" oninput="updatePlaybackRate(this.value)" aria-label="재생 속도 세밀 조절">
+                        </div>
                     </details>
+                    <label class="toggle-switch ui-toggle">
+                        <svg class="ui-icon ui-toggle-lead" aria-hidden="true"><use href="#icon-repeat"></use></svg>
+                        <input type="checkbox" id="bag-player-loop" onchange="setBagPlayerLoop(this.checked)">
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        <span class="ui-toggle-text">Loop</span>
+                    </label>
                 </div>
             </div>
 
@@ -1090,7 +1123,7 @@
                             <span class="ui-status-badge" id="bag-recorder-header-badge" data-tone="idle" role="status">
                                 <span class="ui-dot" aria-hidden="true"></span><span class="ui-status-text">Ready</span>
                             </span>
-                            <span id="recorder-mode-badge" class="ui-tag" style="display:none;"></span>
+                            <span id="recorder-mode-badge" class="ui-tag ui-mono" data-tone="info" style="display:none;"></span>
                         </div>
                     </div>
                     <div class="ui-screen-actions" id="bag-recorder-header-actions"></div>
@@ -1098,39 +1131,40 @@
                 <div class="section card">
                     <h2>Bag Recorder</h2>
 
-                    <div class="ui-screen-grid">
+                    <div class="ui-screen-grid ui-grid-side-first">
                         <section class="ui-panel">
+                            <div class="ui-panel-header"><h3 class="ui-panel-title">Record</h3></div>
                             <div class="ui-panel-body">
-                                <h3 class="ui-panel-title">Record</h3>
                                 <div class="ui-field">
                                     <label class="ui-field-label" for="recorder-bag-name">Bag Name</label>
                                     <div class="ui-field-control">
-                                        <input type="text" class="ui-input" id="recorder-bag-name" placeholder="Enter bag name" readonly>
-                                        <button type="button" class="ui-icon-btn" onclick="enterBagName()" aria-label="Bag 이름">
-                                            <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+                                        <input type="text" class="ui-input" id="recorder-bag-name" placeholder="폴더 아이콘으로 이름을 정하세요" readonly>
+                                        <button type="button" class="ui-icon-btn" onclick="enterBagName()" aria-label="Bag 저장 위치·이름 정하기" title="Bag 저장 위치·이름 정하기">
+                                            <svg class="ui-icon" aria-hidden="true"><use href="#icon-folder-input"></use></svg>
                                         </button>
                                     </div>
                                 </div>
                                 <div class="ui-field">
                                     <label class="ui-field-label" for="recorder-format-select">Format</label>
-                                    <select id="recorder-format-select" class="ui-select">
+                                    <select id="recorder-format-select" class="ui-select" onchange="uiShell.refresh()">
                                         <option value="ros2_mcap">ROS2 (mcap)</option>
                                         <option value="ros2_db3">ROS2 (db3)</option>
                                         <option value="ros1">ROS1 (.bag)</option>
                                     </select>
                                 </div>
-                                <button id="recorder-record-button" class="ui-btn ui-btn-record" type="button" onclick="recordBag()"><span class="ui-btn-label">Record</span></button>
-                                <div class="ui-screen-grid" id="recorder-stats">
-                                    <div class="ui-kpi"><span class="ui-kpi-hint">Time</span><span class="ui-kpi-value" id="recorder-stat-time">0:00</span></div>
-                                    <div class="ui-kpi"><span class="ui-kpi-hint">Size</span><span class="ui-kpi-value" id="recorder-stat-size">0 MB</span></div>
-                                    <div class="ui-kpi"><span class="ui-kpi-hint">Topics</span><span class="ui-kpi-value" id="recorder-stat-topics">0</span></div>
-                                </div>
+                                <button id="recorder-record-button" class="ui-btn ui-btn-record" type="button" onclick="recordBag()"><svg class="ui-icon ui-icon-fill ui-icon-when-idle" aria-hidden="true"><use href="#icon-circle"></use></svg><svg class="ui-icon ui-icon-fill ui-icon-when-active" aria-hidden="true"><use href="#icon-square"></use></svg><span class="ui-btn-label">Record</span></button>
+                                <dl class="ui-rec-stats" id="recorder-stats">
+                                    <div><dt>시간</dt><dd class="ui-mono" id="recorder-stat-time">0:00</dd></div>
+                                    <div><dt>크기</dt><dd class="ui-mono" id="recorder-stat-size">0 MB</dd></div>
+                                    <div><dt>토픽</dt><dd class="ui-mono" id="recorder-stat-topics">0</dd></div>
+                                </dl>
+                                <p class="ui-hint ui-rec-lock-hint">녹화 중에는 이름·형식·토픽 선택이 잠깁니다.</p>
                             </div>
                         </section>
                         <section class="ui-panel">
                             <div class="ui-panel-header">
-                                <h3 class="ui-panel-title">Selected Topics</h3>
-                                <button type="button" class="ui-btn ui-btn-ghost" onclick="refreshRecorderTopics()">목록 새로고침</button>
+                                <h3 class="ui-panel-title" id="recorder-topic-table-title">Selected Topics</h3>
+                                <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" onclick="refreshRecorderTopics()"><svg class="ui-icon" aria-hidden="true"><use href="#icon-refresh"></use></svg><span class="ui-btn-label">목록 새로고침</span></button>
                             </div>
                             <div class="ui-panel-body">
                                 <div id="recorder-selected-topics-display" hidden></div>
@@ -1159,221 +1193,191 @@
                         </div>
                     </div>
                     <div class="ui-screen-actions" id="file-player-header-actions"></div>
+                    <div class="ui-screen-below">
+                        <div class="ui-seg" role="radiogroup" aria-label="데이터셋" id="file-player-dataset-seg">
+                            <button type="button" class="ui-seg-option" data-dataset="conpr" role="radio" aria-checked="true">ConPR</button>
+                            <button type="button" class="ui-seg-option" data-dataset="kitti" role="radio" aria-checked="false">KITTI Raw</button>
+                            <button type="button" class="ui-seg-option" data-dataset="kaist" role="radio" aria-checked="false">KAIST Complex Urban</button>
+                            <button type="button" class="ui-seg-option" data-dataset="mulran" role="radio" aria-checked="false">MulRan</button>
+                            <button type="button" class="ui-seg-option" data-dataset="helipr" role="radio" aria-checked="false">HeLiPR</button>
+                        </div>
+                        <select id="dataset-format-select" hidden onchange="onDatasetFormatChange(this.value)">
+                            <option value="conpr">ConPR</option>
+                            <option value="kitti">KITTI Raw</option>
+                            <option value="kaist">KAIST Complex Urban</option>
+                            <option value="mulran">MulRan</option>
+                            <option value="helipr">HeLiPR</option>
+                        </select>
+                    </div>
                 </header>
                 <div class="section card">
                     <h2>File Player</h2>
-
-                    <div class="player-control">
-                        <!-- 데이터셋 형식 선택 -->
-                        <div class="player-row">
-                            <div class="player-info">
-                                <span class="player-info-key">Dataset</span>
-                                <div class="ui-seg" role="radiogroup" aria-label="데이터셋" id="file-player-dataset-seg">
-                                    <button type="button" class="ui-seg-option" data-dataset="conpr" role="radio" aria-checked="true">ConPR</button>
-                                    <button type="button" class="ui-seg-option" data-dataset="kitti" role="radio" aria-checked="false">KITTI Raw</button>
-                                    <button type="button" class="ui-seg-option" data-dataset="kaist" role="radio" aria-checked="false">KAIST Complex Urban</button>
-                                    <button type="button" class="ui-seg-option" data-dataset="mulran" role="radio" aria-checked="false">MulRan</button>
-                                    <button type="button" class="ui-seg-option" data-dataset="helipr" role="radio" aria-checked="false">HeLiPR</button>
+                    <div class="ui-screen-grid ui-grid-7-5 ui-has-playbar">
+                    <div class="ui-col-main">
+                    <section class="ui-panel player-control">
+                        <div class="ui-panel-header"><h3 class="ui-panel-title" id="file-player-load-title">ConPR · 불러오기</h3></div>
+                        <div class="ui-panel-body">
+                            <div class="ui-field-row">
+                                <div class="ui-field">
+                                    <span class="ui-field-label">Dataset Path</span>
+                                    <label id="player-path-label" class="ui-input ui-input-static">—</label>
                                 </div>
-                                <select id="dataset-format-select" hidden onchange="onDatasetFormatChange(this.value)">
-                                    <option value="conpr">ConPR</option>
-                                    <option value="kitti">KITTI Raw</option>
-                                    <option value="kaist">KAIST Complex Urban</option>
-                                    <option value="mulran">MulRan</option>
-                                    <option value="helipr">HeLiPR</option>
-                                </select>
+                                <button type="button" class="ui-btn" onclick="loadPlayerPath()"><svg class="ui-icon" aria-hidden="true"><use href="#icon-upload"></use></svg><span class="ui-btn-label">Load</span></button>
                             </div>
-                        </div>
-
-                        <div class="player-row">
-                            <div class="player-info">
-                                <span class="player-info-key">Path</span>
-                                <label id="player-path-label" class="player-info-val">—</label>
-                            </div>
-                            <div class="player-actions">
-                                <button onclick="loadPlayerPath()">Load</button>
-                            </div>
-                        </div>
-                        <div class="player-row" id="conpr-save-row">
-                            <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
-                                <div id="conpr-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
-                                    <div id="conpr-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
-                                    <span id="conpr-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
-                                </div>
-                                <span id="conpr-progress-msg" style="font-size:12px; color:var(--muted);"></span>
-                                <select id="bag-format-select"
-                                        style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                                    <option value="ros2_mcap">ROS2 (mcap)</option>
-                                    <option value="ros2_db3" selected>ROS2 (db3)</option>
-                                    <option value="ros1">ROS1 (.bag)</option>
-                                </select>
-                                <button id="save-bag-btn" onclick="saveBag()">Save bag</button>
-                            </div>
-                        </div>
-
-                        <!-- KITTI 전용 UI (dataset=kitti 선택 시 표시) -->
-                        <div id="kitti-ui" style="display:none;">
-                            <div class="player-row">
-                                <div class="player-info">
-                                    <span class="player-info-key">Drive</span>
-                                    <select id="kitti-drive-select"
-                                            onchange="onKittiDriveChange(this.value)"
-                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                            <div id="kitti-ui" class="ui-ds-load" style="display:none;">
+                                <div class="ui-field">
+                                    <label class="ui-field-label" for="kitti-drive-select">Drive</label>
+                                    <select id="kitti-drive-select" class="ui-select" onchange="onKittiDriveChange(this.value)">
                                         <option value="">— Select a drive —</option>
                                     </select>
+                                    <p class="ui-hint">KITTI만 Drive 단위입니다 · 고르면 바로 불러옵니다</p>
                                 </div>
                             </div>
-                            <div class="player-row">
-                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
-                                    <div id="kitti-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
-                                        <div id="kitti-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
-                                        <span id="kitti-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
-                                    </div>
-                                    <span id="kitti-progress-msg" style="font-size:12px; color:var(--muted);"></span>
-                                    <select id="kitti-bag-format-select"
-                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                                        <option value="ros2_mcap">ROS2 (mcap)</option>
-                                        <option value="ros2_db3" selected>ROS2 (db3)</option>
-                                        <option value="ros1">ROS1 (.bag)</option>
-                                    </select>
-                                    <button id="kitti-convert-btn" onclick="convertKitti()">Save Bag</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- KAIST 전용 UI (dataset=kaist 선택 시 표시) -->
-                        <div id="kaist-ui" style="display:none;">
-                            <div class="player-row">
-                                <div class="player-info">
-                                    <span class="player-info-key">Sequence</span>
-                                    <select id="kaist-sequence-select"
-                                            onchange="onKaistSequenceChange(this.value)"
-                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                            <div id="kaist-ui" class="ui-ds-load" style="display:none;">
+                                <div class="ui-field">
+                                    <label class="ui-field-label" for="kaist-sequence-select">Sequence</label>
+                                    <select id="kaist-sequence-select" class="ui-select" onchange="onKaistSequenceChange(this.value)">
                                         <option value="">— Select a sequence —</option>
                                     </select>
+                                    <p class="ui-hint">데이터셋마다 이름만 다르고 칸은 같습니다 · 고르면 바로 불러옵니다</p>
                                 </div>
                             </div>
-                            <div class="player-row">
-                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
-                                    <div id="kaist-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
-                                        <div id="kaist-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
-                                        <span id="kaist-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
-                                    </div>
-                                    <span id="kaist-progress-msg" style="font-size:12px; color:var(--muted);"></span>
-                                    <select id="kaist-bag-format-select"
-                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                                        <option value="ros2_mcap">ROS2 (mcap)</option>
-                                        <option value="ros2_db3" selected>ROS2 (db3)</option>
-                                        <option value="ros1">ROS1 (.bag)</option>
-                                    </select>
-                                    <button id="kaist-convert-btn" onclick="convertKaist()">Save Bag</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- MulRan 전용 UI (dataset=mulran 선택 시 표시) -->
-                        <div id="mulran-ui" style="display:none;">
-                            <div class="player-row">
-                                <div class="player-info">
-                                    <span class="player-info-key">Sequence</span>
-                                    <select id="mulran-sequence-select"
-                                            onchange="onMulranSequenceChange(this.value)"
-                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                            <div id="mulran-ui" class="ui-ds-load" style="display:none;">
+                                <div class="ui-field">
+                                    <label class="ui-field-label" for="mulran-sequence-select">Sequence</label>
+                                    <select id="mulran-sequence-select" class="ui-select" onchange="onMulranSequenceChange(this.value)">
                                         <option value="">— Select a sequence —</option>
                                     </select>
+                                    <p class="ui-hint">데이터셋마다 이름만 다르고 칸은 같습니다 · 고르면 바로 불러옵니다</p>
                                 </div>
                             </div>
-                            <div class="player-row">
-                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
-                                    <div id="mulran-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
-                                        <div id="mulran-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
-                                        <span id="mulran-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
-                                    </div>
-                                    <span id="mulran-progress-msg" style="font-size:12px; color:var(--muted);"></span>
-                                    <select id="mulran-bag-format-select"
-                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                                        <option value="ros2_mcap">ROS2 (mcap)</option>
-                                        <option value="ros2_db3" selected>ROS2 (db3)</option>
-                                        <option value="ros1">ROS1 (.bag)</option>
-                                    </select>
-                                    <button id="mulran-convert-btn" onclick="convertMulran()">Save Bag</button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- HeLiPR 전용 UI (dataset=helipr 선택 시 표시) -->
-                        <div id="helipr-ui" style="display:none;">
-                            <div class="player-row">
-                                <div class="player-info">
-                                    <span class="player-info-key">Sequence</span>
-                                    <select id="helipr-sequence-select"
-                                            onchange="onHeliprSequenceChange(this.value)"
-                                            style="flex:1; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
+                            <div id="helipr-ui" class="ui-ds-load" style="display:none;">
+                                <div class="ui-field">
+                                    <label class="ui-field-label" for="helipr-sequence-select">Sequence</label>
+                                    <select id="helipr-sequence-select" class="ui-select" onchange="onHeliprSequenceChange(this.value)">
                                         <option value="">— Select a sequence —</option>
                                     </select>
-                                </div>
-                            </div>
-                            <div class="player-row">
-                                <div class="player-actions" style="width:100%; display:flex; align-items:center; gap:10px; justify-content:flex-end;">
-                                    <div id="helipr-progress-bar" style="display:none; flex:1; position:relative; height:22px; background:rgba(0,0,0,0.3); border:1px solid var(--border); border-radius:4px; overflow:hidden;">
-                                        <div id="helipr-progress-fill" style="height:100%; width:0%; background:var(--accent, #4caf50); transition:width 0.3s;"></div>
-                                        <span id="helipr-progress-text" style="position:absolute; top:0; left:0; width:100%; text-align:center; line-height:22px; font-size:12px; color:var(--text);">0%</span>
-                                    </div>
-                                    <span id="helipr-progress-msg" style="font-size:12px; color:var(--muted);"></span>
-                                    <select id="helipr-bag-format-select"
-                                            style="background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px;">
-                                        <option value="ros2_mcap">ROS2 (mcap)</option>
-                                        <option value="ros2_db3" selected>ROS2 (db3)</option>
-                                        <option value="ros1">ROS1 (.bag)</option>
-                                    </select>
-                                    <button id="helipr-convert-btn" onclick="convertHelipr()">Save Bag</button>
+                                    <p class="ui-hint">데이터셋마다 이름만 다르고 칸은 같습니다 · 고르면 바로 불러옵니다</p>
                                 </div>
                             </div>
                         </div>
+                    </section>
+                    <section class="ui-panel">
+                        <div class="ui-panel-header"><h3 class="ui-panel-title">Bag으로 저장</h3></div>
+                        <div class="ui-panel-body">
+                            <div id="conpr-save-row" class="ui-ds-save" data-dataset="conpr">
+                                <div class="ui-field-row">
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="bag-format-select">Format</label>
+                                        <select id="bag-format-select" class="ui-select"><option value="ros2_mcap">ROS2 (mcap)</option><option value="ros2_db3" selected>ROS2 (db3)</option><option value="ros1">ROS1 (.bag)</option></select>
+                                    </div>
+                                    <button id="save-bag-btn" class="ui-btn ui-btn-icon-download" type="button" onclick="saveBag()">Save bag</button>
+                                </div>
+                                <div class="ui-ds-progress-wrap">
+                                    <div id="conpr-progress-bar" class="ui-ds-progress" style="display:none;">
+                                        <div id="conpr-progress-fill" class="ui-ds-progress-fill"></div>
+                                        <span id="conpr-progress-text" class="ui-sr-only">0%</span>
+                                    </div>
+                                    <span id="conpr-progress-msg" class="ui-ds-progress-msg ui-mono"></span>
+                                </div>
+                            </div>
+                            <div class="ui-ds-save" data-dataset="kitti">
+                                <div class="ui-field-row">
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="kitti-bag-format-select">Format</label>
+                                        <select id="kitti-bag-format-select" class="ui-select"><option value="ros2_mcap">ROS2 (mcap)</option><option value="ros2_db3" selected>ROS2 (db3)</option><option value="ros1">ROS1 (.bag)</option></select>
+                                    </div>
+                                    <button id="kitti-convert-btn" class="ui-btn ui-btn-icon-download" type="button" onclick="convertKitti()">Save Bag</button>
+                                </div>
+                                <div class="ui-ds-progress-wrap">
+                                    <div id="kitti-progress-bar" class="ui-ds-progress" style="display:none;">
+                                        <div id="kitti-progress-fill" class="ui-ds-progress-fill"></div>
+                                        <span id="kitti-progress-text" class="ui-sr-only">0%</span>
+                                    </div>
+                                    <span id="kitti-progress-msg" class="ui-ds-progress-msg ui-mono"></span>
+                                </div>
+                            </div>
+                            <div class="ui-ds-save" data-dataset="kaist">
+                                <div class="ui-field-row">
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="kaist-bag-format-select">Format</label>
+                                        <select id="kaist-bag-format-select" class="ui-select"><option value="ros2_mcap">ROS2 (mcap)</option><option value="ros2_db3" selected>ROS2 (db3)</option><option value="ros1">ROS1 (.bag)</option></select>
+                                    </div>
+                                    <button id="kaist-convert-btn" class="ui-btn ui-btn-icon-download" type="button" onclick="convertKaist()">Save Bag</button>
+                                </div>
+                                <div class="ui-ds-progress-wrap">
+                                    <div id="kaist-progress-bar" class="ui-ds-progress" style="display:none;">
+                                        <div id="kaist-progress-fill" class="ui-ds-progress-fill"></div>
+                                        <span id="kaist-progress-text" class="ui-sr-only">0%</span>
+                                    </div>
+                                    <span id="kaist-progress-msg" class="ui-ds-progress-msg ui-mono"></span>
+                                </div>
+                            </div>
+                            <div class="ui-ds-save" data-dataset="mulran">
+                                <div class="ui-field-row">
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="mulran-bag-format-select">Format</label>
+                                        <select id="mulran-bag-format-select" class="ui-select"><option value="ros2_mcap">ROS2 (mcap)</option><option value="ros2_db3" selected>ROS2 (db3)</option><option value="ros1">ROS1 (.bag)</option></select>
+                                    </div>
+                                    <button id="mulran-convert-btn" class="ui-btn ui-btn-icon-download" type="button" onclick="convertMulran()">Save Bag</button>
+                                </div>
+                                <div class="ui-ds-progress-wrap">
+                                    <div id="mulran-progress-bar" class="ui-ds-progress" style="display:none;">
+                                        <div id="mulran-progress-fill" class="ui-ds-progress-fill"></div>
+                                        <span id="mulran-progress-text" class="ui-sr-only">0%</span>
+                                    </div>
+                                    <span id="mulran-progress-msg" class="ui-ds-progress-msg ui-mono"></span>
+                                </div>
+                            </div>
+                            <div class="ui-ds-save" data-dataset="helipr">
+                                <div class="ui-field-row">
+                                    <div class="ui-field">
+                                        <label class="ui-field-label" for="helipr-bag-format-select">Format</label>
+                                        <select id="helipr-bag-format-select" class="ui-select"><option value="ros2_mcap">ROS2 (mcap)</option><option value="ros2_db3" selected>ROS2 (db3)</option><option value="ros1">ROS1 (.bag)</option></select>
+                                    </div>
+                                    <button id="helipr-convert-btn" class="ui-btn ui-btn-icon-download" type="button" onclick="convertHelipr()">Save Bag</button>
+                                </div>
+                                <div class="ui-ds-progress-wrap">
+                                    <div id="helipr-progress-bar" class="ui-ds-progress" style="display:none;">
+                                        <div id="helipr-progress-fill" class="ui-ds-progress-fill"></div>
+                                        <span id="helipr-progress-text" class="ui-sr-only">0%</span>
+                                    </div>
+                                    <span id="helipr-progress-msg" class="ui-ds-progress-msg ui-mono"></span>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
                     </div>
-
-                    <div class="player-divider"></div>
-
-                    <div class="player-options player-options-redesigned">
-                        <div class="toggle-option">
-                            <span class="toggle-label">Loop</span>
-                            <label class="toggle-switch">
+                    <aside class="ui-col-side">
+                    <section class="ui-panel">
+                        <div class="ui-panel-header"><h3 class="ui-panel-title">재생 옵션</h3></div>
+                        <div class="ui-panel-body ui-toggle-list">
+                            <label class="toggle-switch ui-toggle">
                                 <input type="checkbox" id="player-loop" onchange="setLoop(this.checked)">
-                                <span class="toggle-track">
-                                    <span class="toggle-thumb"></span>
-                                </span>
+                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                <span class="ui-toggle-text">Loop</span>
                             </label>
-                        </div>
-                        <div class="toggle-option">
-                            <span class="toggle-label">Auto Start</span>
-                            <label class="toggle-switch">
+                            <label class="toggle-switch ui-toggle">
                                 <input type="checkbox" id="player-auto-start" onchange="setAutoStart(this.checked)">
-                                <span class="toggle-track">
-                                    <span class="toggle-thumb"></span>
-                                </span>
+                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                                <span class="ui-toggle-text">Auto Start (불러오면 바로 재생)</span>
                             </label>
                         </div>
+                    </section>
+                    </aside>
                     </div>
-
-                    <div class="player-divider"></div>
-
                 </div>
-                <div class="ui-playbar" id="file-playbar">
-                    <button id="play-button" class="ui-btn ui-btn-go" type="button" onclick="playPlayer()"><span class="ui-btn-label">Play</span></button>
-                    <button id="pause-button" class="ui-btn ui-btn-ghost" type="button" onclick="pausePlayer()"><span class="ui-btn-label">Pause</span></button>
-                    <span id="player-timestamp-label" class="ui-mono">—</span>
-                    <input type="range" id="player-slider" min="0" max="10000" value="0" onchange="setSliderPosition(this.value)">
+                <div class="ui-playbar" id="file-playbar" role="group" aria-label="재생 바">
+                    <button id="play-button" class="ui-btn ui-btn-go ui-btn-play" type="button" onclick="playPlayer()"><svg class="ui-icon ui-icon-fill ui-icon-when-idle" aria-hidden="true"><use href="#icon-play"></use></svg><svg class="ui-icon ui-icon-fill ui-icon-when-active" aria-hidden="true"><use href="#icon-square"></use></svg><span class="ui-btn-label">Play</span></button>
+                    <button id="pause-button" class="ui-btn ui-btn-play" type="button" onclick="pausePlayer()"><svg class="ui-icon ui-icon-fill" aria-hidden="true"><use href="#icon-pause"></use></svg><span class="ui-btn-label">Pause</span></button>
+                    <span class="ui-playbar-time"><span class="ui-playbar-total">Timestamp</span> <span id="player-timestamp-label" class="ui-mono">—</span></span>
+                    <input type="range" id="player-slider" class="ui-playbar-seek" min="0" max="10000" value="0" onchange="setSliderPosition(this.value)" aria-label="재생 위치">
                 </div>
             </div>
         </div>
 
         <!-- Visualization Tab -->
         <div id="visualization-tab" class="tab-content">
-            <div class="subtab-navigation card">
-                <button class="subtab-button active" onclick="openSubTab('plot-subtab')">Plot</button>
-                <button class="subtab-button" onclick="openSubTab('3d-viewer-subtab')">3D Viewer</button>
-            </div>
-
             <!-- Plot Sub-Tab -->
             <div id="plot-subtab" class="subtab-content active">
                 <header class="ui-screen-header" data-screen-header>
@@ -1419,34 +1423,29 @@
                         <div class="plot-display-panel" id="plot-display-panel">
                             <div class="plot-display-panel-header views-panel-header">
                                 <h3>Topic List</h3>
+                                <div class="plot-display-toolbar">
+                                    <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" id="plot-add-topics-btn" onclick="openPlotTopicSelectionModal()"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span class="ui-btn-label">Add</span></button>
+                                    <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" onclick="expandAllPlotTree()">Expand All</button>
+                                    <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" onclick="collapseAllPlotTree()">Collapse All</button>
+                                </div>
                                 <button type="button" id="plot-display-collapse-btn" class="views-collapse-btn"
                                         onclick="togglePlotDisplayPanel()" aria-label="토픽 목록 패널 접기/펼치기"
                                         title="토픽 목록 패널 접기/펼치기">▶</button>
                             </div>
                             <div id="plot-display-panel-body" class="plot-display-panel-body">
                                 <input class="ui-input" type="search" id="plot-field-search" placeholder="필드 찾기" aria-label="필드 찾기" oninput="plotState.tree && plotState.tree.filterByText(this.value)">
-                                <div class="plot-display-toolbar">
-                                    <button type="button" onclick="expandAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Expand All</button>
-                                    <button type="button" onclick="collapseAllPlotTree()" style="padding: 4px 12px; font-size: 11px;">Collapse All</button>
-                                </div>
-                                <div class="viewer-add-btn-group plot-add-btn-group">
-                                    <button type="button" id="plot-add-topics-btn" onclick="openPlotTopicSelectionModal()">+ Add</button>
-                                </div>
                                 <!-- 통합 트리 (토픽 + 메시지) -->
                                 <div id="plot-tree" class="plot-tree-scroll">
-                                    <div style="color: var(--muted); padding: 12px; text-align: center;">
-                                        Loading topics...
-                                    </div>
+                                    <div class="ui-plot-tree-loading">Loading topics...</div>
                                 </div>
+                                <p class="ui-hint ui-plot-tree-hint">필드를 누르거나 오른쪽으로 끌어다 놓으면 그래프가 생깁니다. 값은 4 Hz로 갱신됩니다.</p>
                             </div>
                         </div>
                         <!-- 오른쪽 Plot 영역 -->
                         <div class="plot-panel">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                                <h3 style="margin: 0;">Plot Area</h3>
-                            </div>
+                            <h3 class="ui-sr-only">Plot Area</h3>
                             <div id="plot-tab-bar-container"></div>
-                            <div id="plot-area-container" style="position: relative; width: 100%; height: 550px;">
+                            <div id="plot-area-container" style="position: relative; width: 100%; flex: 1; min-height: 0;">
                                 <!-- plot-area-tab-1, plot-area-tab-2, ... dynamically generated -->
                             </div>
                         </div>
@@ -1479,13 +1478,14 @@
                         </button>
                     </div>
                 </header>
-                <div class="section card" style="position: relative;">
+                <div class="section card ui-viewer3d-card">
                     <h2>3D Viewer</h2>
                     <div class="viewer-layout">
                         <!-- 왼쪽: Display 패널 -->
                         <div class="viewer-display-panel" id="viewer-display-panel">
                             <div class="viewer-display-panel-header views-panel-header">
                                 <h3>Displays</h3>
+                                <button type="button" class="ui-btn ui-btn-ghost ui-btn-sm" id="viewer-add-display-btn" onclick="openAddDisplayModal()"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span class="ui-btn-label">Add</span></button>
                                 <button type="button" id="viewer-display-collapse-btn" class="views-collapse-btn"
                                         onclick="toggleViewerDisplayPanel()" aria-label="Displays 패널 접기/펼치기"
                                         title="Displays 패널 접기/펼치기">▶</button>
@@ -1493,7 +1493,7 @@
                             <div id="viewer-display-panel-body" class="viewer-display-panel-body">
                                 <!-- Fixed Frame 입력 (RViz 스타일 커스텀 드롭다운) -->
                                 <div class="fixed-frame-row">
-                                    <label class="fixed-frame-label">Fixed Frame:</label>
+                                    <label class="fixed-frame-label" for="fixed-frame-input">Fixed Frame</label>
                                     <div class="fixed-frame-combo" id="fixed-frame-combo">
                                         <input id="fixed-frame-input" class="fixed-frame-input"
                                                value="map"
@@ -1509,9 +1509,6 @@
                                                 aria-label="사용 가능한 TF 프레임 목록" title="사용 가능한 TF 프레임 목록">▾</button>
                                         <div id="fixed-frame-dropdown" class="fixed-frame-dropdown" style="display:none;"></div>
                                     </div>
-                                </div>
-                                <div class="viewer-add-btn-group">
-                                    <button id="viewer-add-display-btn" onclick="openAddDisplayModal()">+ Add</button>
                                 </div>
                                 <div id="viewer-display-panel-content">
                                     <!-- renderDisplayPanel()로 동적 렌더링 -->
@@ -1556,22 +1553,25 @@
                             <!-- 패널 본문 (접히면 숨김) -->
                             <div id="views-body" class="views-body">
                                 <div class="views-type-row">
-                                    <label>Type:</label>
-                                    <select id="view-type-select" onchange="switchViewType(this.value)">
+                                    <span class="ui-field-label">Type</span>
+                                    <div class="ui-seg" role="radiogroup" aria-label="View Type" id="view-type-seg">
+                                        <button type="button" class="ui-seg-option" role="radio" data-view="orbit" aria-checked="true">Orbit</button>
+                                        <button type="button" class="ui-seg-option" role="radio" data-view="topdown" aria-checked="false">TopDown</button>
+                                    </div>
+                                    <select id="view-type-select" hidden onchange="switchViewType(this.value)">
                                         <option value="orbit">Orbit</option>
                                         <option value="topdown">TopDown</option>
                                     </select>
-                                    <button onclick="resetViewCamera()">Zero</button>
                                 </div>
                                 <div class="views-section">
                                     <div class="views-current-label">Current View</div>
                                     <div class="views-row">
-                                        <label>Near Clip:</label>
+                                        <label for="view-near-clip">Near Clip</label>
                                         <input type="number" id="view-near-clip" value="0.01" step="0.001"
                                                onchange="onViewNearClipChange(this.value)">
                                     </div>
                                     <div class="views-row">
-                                        <label>Target Frame:</label>
+                                        <label for="view-target-frame">Target Frame</label>
                                         <select id="view-target-frame" onchange="onViewTargetFrameChange(this.value)">
                                             <option value="<Fixed Frame>">&lt;Fixed Frame&gt;</option>
                                         </select>
@@ -1580,6 +1580,7 @@
                                         <!-- renderViewsPanel()로 동적 렌더링 -->
                                     </div>
                                 </div>
+                                <button type="button" class="ui-btn ui-btn-block" onclick="resetViewCamera()">Zero</button>
                             </div>
                         </div>
                     </div>
@@ -1725,13 +1726,13 @@
     <div id="save-map-modal" class="modal" style="display:none;">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Save Map</h3>
+                <h3 id="save-map-modal-title">지도 저장</h3>
                 <span class="close" onclick="closeSaveMapModal()">&times;</span>
             </div>
             <div class="modal-body">
                 <div class="form-group">
-                    <label>Directory Name:</label>
-                    <input type="text" id="save-map-directory" placeholder="Enter directory name (e.g., map_2024)"
+                    <label for="save-map-directory">지도 이름</label>
+                    <input type="text" id="save-map-directory" placeholder="slam_20261016_1512"
                            aria-describedby="save-map-location-hint save-map-name-error">
                 </div>
                 <div class="ui-save-map-hints">
@@ -1742,8 +1743,8 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button id="save-map-confirm-btn" onclick="confirmSaveMap()">OK</button>
-                <button onclick="closeSaveMapModal()">Cancel</button>
+                <button class="ui-btn ui-btn-ghost" type="button" onclick="closeSaveMapModal()">취소</button>
+                <button class="ui-btn ui-btn-go" id="save-map-confirm-btn" type="button" onclick="confirmSaveMap()">저장</button>
             </div>
         </div>
     </div>

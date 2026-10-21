@@ -547,12 +547,8 @@ class PlotlyPlotManager {
                 borderwidth: 1,
                 font: { color: theme.ink }
             },
-            margin: {
-                l: 60,
-                r: 120,
-                b: 50,
-                t: 50
-            },
+            autosize: true,
+            margin: { l: 48, r: 12, b: 36, t: 28 },
             paper_bgcolor: theme.surface,
             plot_bgcolor: theme.surface,
             font: {
@@ -774,12 +770,8 @@ class PlotlyPlotManager {
                 borderwidth: 1,
                 font: { color: theme.ink }
             },
-            margin: {
-                l: 60,
-                r: 120,
-                b: 50,
-                t: 50
-            },
+            autosize: true,
+            margin: { l: 48, r: 12, b: 36, t: 28 },
             paper_bgcolor: theme.surface,
             plot_bgcolor: theme.surface,
             font: {
@@ -951,99 +943,6 @@ class PlotlyPlotManager {
             x: syncedX,
             y: syncedY
         };
-    }
-
-    setupContextMenu() {
-        const plotDiv = document.getElementById(this.containerId);
-        let contextMenuPosition = { x: 0, y: 0 };  // 마우스 클릭 위치 저장
-        
-        // 기존 컨텍스트 메뉴 제거
-        plotDiv.addEventListener('contextmenu', (e) => {
-            // delete plot 메뉴가 표시되는 경우 기존 메뉴는 표시하지 않음
-            if (this.hoveredTraceIndex !== null) {
-                // Plot 데이터 위에 마우스가 있으면 기존 메뉴 표시 안함
-                return;
-            }
-            
-            // Legend 영역 확인
-            const legend = plotDiv.querySelector('.legend');
-            if (legend) {
-                const legendRect = legend.getBoundingClientRect();
-                const mouseX = e.clientX;
-                const mouseY = e.clientY;
-                
-                if (mouseX >= legendRect.left && mouseX <= legendRect.right &&
-                    mouseY >= legendRect.top && mouseY <= legendRect.bottom) {
-                    // Legend 위에 있으면 기존 메뉴 표시 안함
-                    return;
-                }
-            }
-            
-            e.preventDefault();
-            
-            // 마우스 위치 저장 (plot 영역 기준)
-            const rect = plotDiv.getBoundingClientRect();
-            contextMenuPosition.x = e.clientX - rect.left;
-            contextMenuPosition.y = e.clientY - rect.top;
-            
-            // 기존 메뉴 제거
-            const existingMenu = document.getElementById('plot-context-menu');
-            if (existingMenu) {
-                existingMenu.remove();
-            }
-            
-            // 커스텀 메뉴 생성
-            const menu = document.createElement('div');
-            menu.id = 'plot-context-menu';
-            menu.className = 'ui-context-menu';
-            menu.style.left = `${e.pageX}px`;
-            menu.style.top = `${e.pageY}px`;
-            
-            const menuItems = [
-                { label: '📷 Export as PNG', action: () => this.exportToPNG() },
-                { label: '↔️ Auto Scale', action: () => this.zoomOutAutoScale() },
-                { label: '⚙️ Plot Settings', action: () => this.openPlotSettings() },
-                { separator: true },
-                { label: '➗ Split Horizontally (Coming soon)', action: () => console.log('Coming soon'), disabled: true },
-                { label: '➗ Split Vertically (Coming soon)', action: () => console.log('Coming soon'), disabled: true }
-            ];
-            
-            menuItems.forEach(item => {
-                if (item.separator) {
-                    const separator = document.createElement('div');
-                    separator.className = 'ui-context-menu-sep';
-                    menu.appendChild(separator);
-                } else {
-                    const menuItem = document.createElement('div');
-                    menuItem.textContent = item.label;
-                    menuItem.className = item.disabled
-                        ? 'ui-context-menu-item ui-context-menu-item-disabled'
-                        : 'ui-context-menu-item';
-                    
-                    if (!item.disabled) {
-                        menuItem.onclick = () => {
-                            item.action();
-                            menu.remove();
-                        };
-                    }
-                    
-                    menu.appendChild(menuItem);
-                }
-            });
-            
-            document.body.appendChild(menu);
-            
-            // 외부 클릭 시 메뉴 닫기
-            const closeMenu = (event) => {
-                if (!menu.contains(event.target)) {
-                    menu.remove();
-                    document.removeEventListener('click', closeMenu);
-                }
-            };
-            setTimeout(() => {
-                document.addEventListener('click', closeMenu);
-            }, 100);
-        });
     }
 
     setupCustomHover() {
@@ -2510,39 +2409,6 @@ class PlotlyPlotManager {
         }
     }
 
-    // 첫 trace(XY는 Y축)의 최신값을 plot 우측 상단에 표시한다. 일시정지 중에는 값을 고정한다.
-    setCurrentValues(latest) {
-        if (!this.isInitialized || this.isPaused) return;
-        const path = this.isXYPlot ? this.yPath : this.dataBuffers.keys().next().value;
-        if (!latest.has(path)) return;
-        const value = latest.get(path);
-        const text = typeof value === 'number' && !Number.isInteger(value) ? value.toFixed(3) : String(value);
-        const valueEl = this._ensureCurrentValueEl().firstChild;
-        if (valueEl.textContent !== text) valueEl.textContent = text;
-    }
-
-    _ensureCurrentValueEl() {
-        let el = this.container.querySelector('.ui-plot-current');
-        if (!el) {
-            el = document.createElement('div');
-            el.className = 'ui-plot-current ui-mono';
-            const valueEl = document.createElement('span');
-            valueEl.className = 'ui-plot-current-value';
-            const pausedEl = document.createElement('span');
-            pausedEl.className = 'ui-plot-current-paused';
-            pausedEl.textContent = '일시정지';
-            pausedEl.hidden = !this.isPaused;
-            el.append(valueEl, pausedEl);
-            this.container.appendChild(el);
-        }
-        return el;
-    }
-
-    _syncPausedBadge() {
-        if (!this.isInitialized) return;
-        this._ensureCurrentValueEl().lastChild.hidden = !this.isPaused;
-    }
-
     togglePause(forceState = null) {
         // forceState: true=일시정지, false=재생, null=토글
         if (forceState !== null) {
@@ -2552,7 +2418,6 @@ class PlotlyPlotManager {
         }
         
         console.log(`[PlotlyPlotManager] Plot ${this.isPaused ? 'PAUSED' : 'RESUMED'}`);
-        this._syncPausedBadge();
         if (window.uiShell) uiShell.onPlotPauseChanged();
         // 그래프가 아직 없는 탭(헤더 전역 Pause)은 플래그만 — createPlot()이 isPaused를 보고 dragmode를 정한다
         if (!this.isInitialized) return;
