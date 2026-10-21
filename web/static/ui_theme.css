@@ -614,7 +614,19 @@ body:not(.ui-has-sidebar) .ui-screen-header:has(.ui-screen-actions:empty) { disp
 .ui-analytics .ui-kpi-sub:empty { display: none; }
 .ui-analytics-chart { position: relative; min-width: 0; }
 .ui-analytics-chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 4px; font-size: 12px; color: var(--color-mute); }
-.ui-analytics .analytics-plot-container { height: 160px; }
+/* Plot 탭의 .plot-container(700px 격자)가 Plotly 안쪽 상자까지 덮으면 단계 누적 면이 잘리고 시간축만 남는다.
+   바깥 칸(#analytics-chart-*)은 Plotly가 js-plotly-plot 클래스를 붙이므로, 100% 높이는 안쪽 상자에만 준다. */
+.ui-analytics .analytics-plot-container { height: 200px; overflow: hidden; }
+.ui-analytics .plot-container.plotly,
+.ui-analytics .svg-container {
+    display: block; width: 100% !important; height: 100% !important; min-height: 0 !important;
+    grid-template-columns: none; gap: 0;
+}
+.ui-analytics > .ui-panel-body {
+    max-height: calc(100vh - 200px);
+    overflow: auto;
+    min-height: 0;
+}
 .ui-analytics-chart-note {
     position: absolute; top: 28px; left: 50%; z-index: 1; margin: 0; padding: 2px 8px; transform: translateX(-50%);
     border: 1px solid var(--color-line2); border-radius: var(--radius-xs); background: var(--color-raised);

@@ -12020,7 +12020,7 @@ class SlamAnalyticsDashboard {
         const layout = {
             paper_bgcolor: 'transparent',
             plot_bgcolor: 'transparent',
-            margin: { t: 4, b: 30, l: 42, r: 8 },
+            margin: { t: 4, b: 52, l: 42, r: 8 },
             xaxis: {
                 showgrid: false,
                 color: '#5D6773',
@@ -12654,7 +12654,7 @@ class LocAnalyticsDashboard {
     _initProcTimePlot() {
         const layout = {
             paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
-            margin: { t: 4, b: 30, l: 42, r: 8 },
+            margin: { t: 4, b: 52, l: 42, r: 8 },
             xaxis: { showgrid:false, color:'#5D6773', tickfont:{size:9,color:'#5D6773'}, nticks:5, type:'date' },
             yaxis: { gridcolor:'#252B33', color:'#5D6773', tickfont:{size:9,color:'#8B95A1'}, title:{text:'ms',font:{size:10,color:'#556'}} },
             legend: { orientation:'h', y:-0.22, x:0, font:{size:9,color:'#8B95A1'}, bgcolor:'transparent' },
