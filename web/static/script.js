@@ -11406,20 +11406,20 @@ class SlamResultViewer {
             this._perspCamera.updateProjectionMatrix();
         }
 
+        const canvas = this._renderer.domElement;
         if (this._edlEnabled && this._edlTarget) {
-            // EDL ON: 고해상도 타깃으로 확장 후 2-pass 렌더
-            this._edlTarget.setSize(sw, sh);
+            // EDL ON: 타깃은 캔버스 물리 픽셀(CSS 크기 × devicePixelRatio)과 같아야 셰이더 UV가 맞는다
+            this._edlTarget.setSize(canvas.width, canvas.height);
             if (this._edlQuad) {
                 const u = this._edlQuad.material.uniforms;
-                u.uSx.value = sw;
-                u.uSy.value = sh;
+                u.uSx.value = canvas.width;
+                u.uSy.value = canvas.height;
             }
             this._renderEDL();
         } else {
             this._renderer.render(this._scene, this._camera);
         }
 
-        const canvas = this._renderer.domElement;
         canvas.toBlob((blob) => {
             // 원래 해상도로 복원
             this._renderer.setSize(w, h);
